@@ -100,6 +100,21 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
         for job in jobs
     ) or """<tr><td colspan="7" class="empty">No jobs queued yet.</td></tr>"""
 
+    reputation_rows = "\n".join(
+        f"""
+        <tr>
+          <td><code>{html.escape(_short(entry["node_id"], 18))}</code></td>
+          <td><span class="rep {html.escape(entry["status"])}">{html.escape(entry["status"])}</span></td>
+          <td>{html.escape(str(entry["score"]))}</td>
+          <td>{html.escape("" if entry["reliability"] is None else str(entry["reliability"]))}</td>
+          <td>{html.escape(str(entry["verified_matches"]))}</td>
+          <td>{html.escape(str(entry["mismatches"]))}</td>
+          <td>{html.escape(str(entry["disputed_results"]))}</td>
+        </tr>
+        """
+        for entry in snapshot["reputation"]
+    ) or """<tr><td colspan="7" class="empty">No reputation history yet.</td></tr>"""
+
     result_rows = "\n".join(
         f"""
         <tr>
@@ -231,6 +246,20 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
     .pending {{ background: var(--gray); }}
     .verified {{ background: var(--green); }}
     .disputed {{ background: var(--red); }}
+    .rep {{
+      display: inline-block;
+      min-width: 66px;
+      padding: 3px 7px;
+      border-radius: 999px;
+      color: #fff;
+      text-align: center;
+      font-size: 12px;
+    }}
+    .new {{ background: var(--gray); }}
+    .ok {{ background: var(--blue); }}
+    .trusted {{ background: var(--green); }}
+    .watch {{ background: var(--amber); }}
+    .flagged {{ background: var(--red); }}
     .empty {{ color: var(--muted); }}
     .api {{
       display: flex;
@@ -260,6 +289,7 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
       <a href="/api/nodes">nodes</a>
       <a href="/api/jobs">jobs</a>
       <a href="/api/results">results</a>
+      <a href="/api/reputation">reputation</a>
     </nav>
   </header>
   <main>
@@ -276,6 +306,13 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
       <table>
         <thead><tr><th>Job</th><th>Type</th><th>Status</th><th>Leased To</th><th>Reward</th><th>Results</th><th>Payload</th></tr></thead>
         <tbody>{job_rows}</tbody>
+      </table>
+    </section>
+    <section class="table-block">
+      <h2>Reputation</h2>
+      <table>
+        <thead><tr><th>Node</th><th>Status</th><th>Score</th><th>Reliability</th><th>Verified</th><th>Mismatches</th><th>Disputed</th></tr></thead>
+        <tbody>{reputation_rows}</tbody>
       </table>
     </section>
     <section class="table-block">
@@ -332,6 +369,11 @@ def create_coordinator_http_server(
             if parsed.path == "/api/results":
                 with lock:
                     _json_response(self, 200, {"results": coordinator.result_summaries()})
+                return
+
+            if parsed.path == "/api/reputation":
+                with lock:
+                    _json_response(self, 200, {"reputation": list(coordinator.reputation_summaries().values())})
                 return
 
             if parsed.path == "/api/snapshot":

@@ -343,6 +343,7 @@ class Coordinator:
 
     def node_summaries(self) -> list[dict[str, Any]]:
         summaries = []
+        reputation = self.reputation_summaries()
         for node_id, identity in self.known_nodes.items():
             capabilities = self.node_capabilities.get(node_id, {})
             summaries.append(
@@ -350,6 +351,7 @@ class Coordinator:
                     "node_id": node_id,
                     "public_key": identity.public_key,
                     "credits": self.credits.get(node_id, 0),
+                    "reputation": reputation.get(node_id, self._empty_reputation(node_id)),
                     "supported_job_types": capabilities.get("supported_job_types", []),
                     "hardware": capabilities.get("hardware", {}),
                 }
@@ -401,12 +403,45 @@ class Coordinator:
                 )
         return sorted(summaries, key=lambda item: (item["created_at"], item["job_id"]))
 
+    def reputation_summaries(self) -> dict[str, dict[str, Any]]:
+        reputation = {
+            node_id: self._empty_reputation(node_id)
+            for node_id in self.known_nodes
+        }
+
+        for job_id, results in self.results.items():
+            verification = self.verification_summary(job_id)
+            status = verification["status"]
+            if status not in {"verified", "disputed"}:
+                continue
+
+            winning_output_hash = verification["winning_output_hash"]
+            for result in results:
+                entry = reputation.setdefault(result.node_id, self._empty_reputation(result.node_id))
+                entry["terminal_results"] += 1
+                if status == "verified" and result.output_hash == winning_output_hash:
+                    entry["verified_matches"] += 1
+                elif status == "verified":
+                    entry["mismatches"] += 1
+                else:
+                    entry["disputed_results"] += 1
+
+        for entry in reputation.values():
+            score = entry["verified_matches"] - entry["mismatches"] - entry["disputed_results"]
+            terminal_results = entry["terminal_results"]
+            entry["score"] = score
+            entry["reliability"] = round(entry["verified_matches"] / terminal_results, 3) if terminal_results else None
+            entry["status"] = self._reputation_status(entry)
+
+        return dict(sorted(reputation.items(), key=lambda item: item[0]))
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "status": self.status(),
             "nodes": self.node_summaries(),
             "jobs": self.job_summaries(),
             "results": self.result_summaries(),
+            "reputation": list(self.reputation_summaries().values()),
         }
 
     def _node_supports_job(self, node_id: str, job: JobPacket) -> bool:
@@ -476,3 +511,26 @@ class Coordinator:
         if required_results <= 1:
             return 1
         return (required_results * 2) - 1
+
+    def _empty_reputation(self, node_id: str) -> dict[str, Any]:
+        return {
+            "node_id": node_id,
+            "score": 0,
+            "status": "new",
+            "terminal_results": 0,
+            "verified_matches": 0,
+            "mismatches": 0,
+            "disputed_results": 0,
+            "reliability": None,
+        }
+
+    def _reputation_status(self, entry: dict[str, Any]) -> str:
+        if entry["terminal_results"] == 0:
+            return "new"
+        if entry["score"] < 0:
+            return "flagged"
+        if entry["mismatches"] or entry["disputed_results"]:
+            return "watch"
+        if entry["score"] >= 3:
+            return "trusted"
+        return "ok"

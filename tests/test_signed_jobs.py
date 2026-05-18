@@ -145,6 +145,10 @@ def test_duplicate_verification_requires_matching_independent_results():
     assert summary["status"] == "verified"
     assert summary["required_results"] == 2
     assert coordinator.status()["verified_jobs"] == 1
+    reputation = coordinator.reputation_summaries()
+    assert reputation[worker_a_identity.node_id]["score"] == 1
+    assert reputation[worker_a_identity.node_id]["status"] == "ok"
+    assert reputation[worker_b_identity.node_id]["verified_matches"] == 1
 
 
 def test_duplicate_verification_marks_disputed_after_tie_breaker_fails():
@@ -189,3 +193,49 @@ def test_duplicate_verification_marks_disputed_after_tie_breaker_fails():
     summary = coordinator.verification_summary(job.job_id)
     assert summary["status"] == "disputed"
     assert coordinator.status()["disputed_jobs"] == 1
+    reputation = coordinator.reputation_summaries()
+    assert reputation[identities[0].node_id]["status"] == "flagged"
+    assert reputation[identities[0].node_id]["disputed_results"] == 1
+    assert reputation[identities[1].node_id]["score"] == -1
+    assert reputation[identities[2].node_id]["score"] == -1
+
+
+def test_verified_job_flags_mismatching_worker_reputation():
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    identities = [NodeIdentity.generate(prefix="worker") for _ in range(3)]
+    workers = [WorkerNode(identity=identity) for identity in identities]
+    for worker in workers:
+        coordinator.register_node(worker.identity.public(), capabilities=worker.capabilities())
+    job = coordinator.create_job(
+        job_type="eval.deterministic.v1",
+        payload={
+            "task": "arithmetic",
+            "operation": "multiply",
+            "operands": [3, 4],
+            "expected": 12,
+        },
+    )
+
+    leased_a = coordinator.lease_next_job(identities[0].node_id)
+    assert leased_a is not None
+    assert coordinator.submit_result(workers[0].run_job(leased_a))
+
+    leased_b = coordinator.lease_next_job(identities[1].node_id)
+    assert leased_b is not None
+    wrong_b = JobResult.create(
+        node=identities[1],
+        job=leased_b,
+        output={"passed": False, "answer": 13, "expected": 12, "confidence": 1.0},
+    )
+    assert coordinator.submit_result(wrong_b)
+
+    leased_c = coordinator.lease_next_job(identities[2].node_id)
+    assert leased_c is not None
+    assert coordinator.submit_result(workers[2].run_job(leased_c))
+
+    assert coordinator.verification_summary(job.job_id)["status"] == "verified"
+    reputation = coordinator.reputation_summaries()
+    assert reputation[identities[0].node_id]["status"] == "ok"
+    assert reputation[identities[2].node_id]["verified_matches"] == 1
+    assert reputation[identities[1].node_id]["mismatches"] == 1
+    assert reputation[identities[1].node_id]["status"] == "flagged"

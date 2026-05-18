@@ -297,6 +297,11 @@ def show_snapshot(args: argparse.Namespace) -> None:
     print(json.dumps(client.snapshot(), indent=2, sort_keys=True))
 
 
+def show_reputation(args: argparse.Namespace) -> None:
+    client = CoordinatorClient(args.coordinator)
+    print(json.dumps(client.reputation(), indent=2, sort_keys=True))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="chatp2p", description="ChatP2P prototype")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -380,6 +385,10 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot_parser = job_subcommands.add_parser("snapshot", help="Show coordinator snapshot")
     snapshot_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
     snapshot_parser.set_defaults(func=show_snapshot)
+
+    reputation_parser = job_subcommands.add_parser("reputation", help="Show node reputation")
+    reputation_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    reputation_parser.set_defaults(func=show_reputation)
 
     return parser
 

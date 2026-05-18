@@ -43,6 +43,9 @@ class CoordinatorClient:
     def results(self) -> dict[str, Any]:
         return self._request("GET", "/api/results")
 
+    def reputation(self) -> dict[str, Any]:
+        return self._request("GET", "/api/reputation")
+
     def register(self, registration: NodeRegistration) -> dict[str, Any]:
         return self._request("POST", "/nodes/register", registration.to_dict())
 

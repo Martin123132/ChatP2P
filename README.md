@@ -46,6 +46,7 @@ Useful local API endpoints:
 - `GET /api/nodes`
 - `GET /api/jobs`
 - `GET /api/results`
+- `GET /api/reputation`
 
 Drain a seeded queue with one worker:
 
@@ -67,6 +68,7 @@ Inspect jobs and state:
 ```bash
 chatp2p job list
 chatp2p job snapshot
+chatp2p job reputation
 ```
 
 Generic JSON job creation is also available:
@@ -91,6 +93,22 @@ Current job states:
 - `pending`: at least one result exists, but quorum is not reached
 - `verified`: enough matching results exist
 - `disputed`: max verification attempts used without quorum
+
+## Reputation
+
+Reputation is computed from signed result history:
+
+- matching results on verified jobs increase score
+- mismatches on verified jobs decrease score
+- participation in disputed jobs decreases score until better dispute handling exists
+
+Current node reputation states:
+
+- `new`: no terminal verification history yet
+- `ok`: positive score with no flags
+- `trusted`: score of 3 or higher with no flags
+- `watch`: positive score but some mismatch/dispute history
+- `flagged`: score below zero
 
 ## Product Direction
 
