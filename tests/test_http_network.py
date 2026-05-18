@@ -38,14 +38,18 @@ def test_http_worker_registers_leases_job_and_submits_result():
 
         health = client.health()
         assert health["known_nodes"] == 1
+        assert health["live_nodes"] == 1
+        assert health["lease_timeout_seconds"] == 30.0
         assert health["pending_jobs"] == 1
         assert health["completed_jobs"] == 0
+        assert client.heartbeat(worker_identity.node_id)["accepted"] is True
 
         snapshot = client.snapshot()
         assert len(snapshot["nodes"]) == 1
         assert len(snapshot["jobs"]) == 4
         assert len(snapshot["results"]) == 1
         assert len(snapshot["reputation"]) == 1
+        assert snapshot["nodes"][0]["liveness_status"] == "live"
         assert snapshot["leasing_policy"]["flagged_order"] == ["tie_breaker"]
         assert snapshot["reputation"][0]["status"] == "new"
         leased_snapshot_job = next(item for item in snapshot["jobs"] if item["job_id"] == job.job_id)

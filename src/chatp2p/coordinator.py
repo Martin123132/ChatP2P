@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -9,15 +10,24 @@ from .crypto import NodeIdentity
 from .packets import JobPacket, JobResult, NodeRegistration
 from .storage import SQLiteCoordinatorStore
 
+DEFAULT_LEASE_TIMEOUT_SECONDS = 30.0
+DEFAULT_NODE_STALE_SECONDS = 60.0
+
 
 @dataclass
 class Coordinator:
     identity: NodeIdentity
     store: SQLiteCoordinatorStore | None = None
+    lease_timeout_seconds: float = DEFAULT_LEASE_TIMEOUT_SECONDS
+    node_stale_seconds: float = DEFAULT_NODE_STALE_SECONDS
     known_nodes: dict[str, NodeIdentity] = field(default_factory=dict)
     node_capabilities: dict[str, dict[str, Any]] = field(default_factory=dict)
+    node_last_seen: dict[str, float] = field(default_factory=dict)
     jobs: dict[str, JobPacket] = field(default_factory=dict)
     leased_jobs: dict[str, set[str]] = field(default_factory=dict)
+    lease_started_at: dict[str, dict[str, float]] = field(default_factory=dict)
+    lease_expires_at: dict[str, dict[str, float]] = field(default_factory=dict)
+    expired_leases: list[dict[str, Any]] = field(default_factory=list)
     results: dict[str, list[JobResult]] = field(default_factory=dict)
     credits: dict[str, int] = field(default_factory=dict)
 
@@ -25,36 +35,50 @@ class Coordinator:
         if self.store is None:
             return
 
-        stored_nodes, stored_capabilities = self.store.load_nodes()
-        stored_jobs, stored_leases = self.store.load_jobs()
+        stored_nodes, stored_capabilities, stored_last_seen = self.store.load_nodes()
+        (
+            stored_jobs,
+            stored_leases,
+            stored_lease_started_at,
+            stored_lease_expires_at,
+            stored_expired_leases,
+        ) = self.store.load_jobs(default_lease_timeout_seconds=self.lease_timeout_seconds)
         stored_results = self.store.load_results()
         stored_credits = self.store.load_credits()
 
         self.known_nodes.update(stored_nodes)
         self.node_capabilities.update(stored_capabilities)
+        self.node_last_seen.update(stored_last_seen)
         self.jobs.update(stored_jobs)
         self.leased_jobs.update(stored_leases)
+        self.lease_started_at.update(stored_lease_started_at)
+        self.lease_expires_at.update(stored_lease_expires_at)
+        self.expired_leases.extend(stored_expired_leases)
         self.results.update(stored_results)
         self.credits.update(stored_credits)
+        self.reap_expired_leases()
 
     def register_node(self, node: NodeIdentity, capabilities: dict[str, Any] | None = None) -> None:
         self.known_nodes[node.node_id] = node.public()
         self.node_capabilities[node.node_id] = capabilities or {
             "supported_job_types": ["eval.math.v1", "eval.deterministic.v1", "inference.echo.v1"]
         }
+        self.node_last_seen[node.node_id] = round(time.time(), 3)
         self.credits.setdefault(node.node_id, 0)
 
     def register_signed_node(self, registration: NodeRegistration) -> bool:
         if not registration.verify_signature():
             return False
+        seen_at = round(time.time(), 3)
         self.known_nodes[registration.node_id] = NodeIdentity(
             node_id=registration.node_id,
             public_key=registration.node_public_key,
         )
         self.node_capabilities[registration.node_id] = registration.capabilities
+        self.node_last_seen[registration.node_id] = seen_at
         self.credits.setdefault(registration.node_id, 0)
         if self.store is not None:
-            self.store.save_node(registration)
+            self.store.save_node(registration, last_seen_at=seen_at)
         return True
 
     def create_math_eval_job(self) -> JobPacket:
@@ -271,23 +295,33 @@ class Coordinator:
         }
 
     def lease_next_job(self, node_id: str) -> JobPacket | None:
+        now = time.time()
+        self.reap_expired_leases(now=now)
         if node_id not in self.known_nodes:
             return None
+        self.touch_node(node_id, seen_at=now)
 
         for job_id in self._lease_candidates_for_node(node_id):
             job = self.jobs[job_id]
             leased_to = self.leased_jobs.setdefault(job_id, set())
+            leased_at = round(now, 3)
+            expires_at = round(now + self.lease_timeout_seconds, 3)
             leased_to.add(node_id)
+            self.lease_started_at.setdefault(job_id, {})[node_id] = leased_at
+            self.lease_expires_at.setdefault(job_id, {})[node_id] = expires_at
             if self.store is not None:
-                self.store.save_lease(job_id, node_id)
+                self.store.save_lease(job_id, node_id, leased_at=leased_at, expires_at=expires_at)
             return job
         return None
 
     def submit_result(self, result: JobResult) -> bool:
+        now = time.time()
+        self.reap_expired_leases(now=now)
         if result.job_id not in self.jobs:
             return False
         if result.node_id not in self.known_nodes:
             return False
+        self.touch_node(result.node_id, seen_at=now)
         if self._job_is_terminal(result.job_id):
             return False
         leased_to = self.leased_jobs.get(result.job_id, set())
@@ -310,7 +344,47 @@ class Coordinator:
             self.store.set_credit(result.node_id, self.credits[result.node_id])
         return True
 
+    def touch_node(self, node_id: str, seen_at: float | None = None) -> bool:
+        if node_id not in self.known_nodes:
+            return False
+        timestamp = round(seen_at if seen_at is not None else time.time(), 3)
+        self.node_last_seen[node_id] = timestamp
+        if self.store is not None:
+            self.store.touch_node(node_id, timestamp)
+        return True
+
+    def reap_expired_leases(self, now: float | None = None) -> list[dict[str, Any]]:
+        timestamp = round(now if now is not None else time.time(), 3)
+        expired: list[dict[str, Any]] = []
+        for job_id, node_ids in list(self.leased_jobs.items()):
+            result_node_ids = {result.node_id for result in self.results.get(job_id, [])}
+            for node_id in list(node_ids):
+                if node_id in result_node_ids:
+                    continue
+                expires_at = self.lease_expires_at.get(job_id, {}).get(node_id)
+                if expires_at is None or expires_at > timestamp:
+                    continue
+
+                node_ids.remove(node_id)
+                leased_at = self.lease_started_at.get(job_id, {}).pop(node_id, None)
+                self.lease_expires_at.get(job_id, {}).pop(node_id, None)
+                lease = {
+                    "job_id": job_id,
+                    "node_id": node_id,
+                    "leased_at": leased_at,
+                    "expires_at": expires_at,
+                    "expired_at": timestamp,
+                }
+                self.expired_leases.append(lease)
+                expired.append(lease)
+                if self.store is not None:
+                    self.store.mark_lease_expired(job_id, node_id, expired_at=timestamp)
+            if not node_ids:
+                self.leased_jobs.pop(job_id, None)
+        return expired
+
     def status(self) -> dict:
+        self.reap_expired_leases()
         verification_summaries = [self.verification_summary(job_id) for job_id in self.jobs]
         verified_jobs = sum(1 for summary in verification_summaries if summary["status"] == "verified")
         disputed_jobs = sum(1 for summary in verification_summaries if summary["status"] == "disputed")
@@ -319,14 +393,22 @@ class Coordinator:
         pending_jobs = sum(1 for summary in verification_summaries if summary["status"] == "pending")
         active_leases = sum(len(self._active_leases(job_id)) for job_id in self.leased_jobs)
         total_leases = sum(len(nodes) for nodes in self.leased_jobs.values())
+        now = time.time()
+        liveness = [self._node_liveness_status(node_id, now=now) for node_id in self.known_nodes]
         return {
             "coordinator_id": self.identity.node_id,
             "known_nodes": len(self.known_nodes),
+            "live_nodes": liveness.count("live"),
+            "stale_nodes": liveness.count("stale"),
+            "offline_nodes": liveness.count("offline"),
             "jobs": len(self.jobs),
             "queued_jobs": queued_jobs,
             "pending_jobs": pending_jobs,
             "leased_jobs": active_leases,
             "total_leases": total_leases,
+            "expired_leases": len(self.expired_leases),
+            "lease_timeout_seconds": self.lease_timeout_seconds,
+            "node_stale_seconds": self.node_stale_seconds,
             "completed_jobs": completed_jobs,
             "verified_jobs": verified_jobs,
             "disputed_jobs": disputed_jobs,
@@ -335,16 +417,26 @@ class Coordinator:
         }
 
     def node_summaries(self) -> list[dict[str, Any]]:
+        self.reap_expired_leases()
         summaries = []
         reputation = self.reputation_summaries()
+        now = time.time()
         for node_id, identity in self.known_nodes.items():
             capabilities = self.node_capabilities.get(node_id, {})
+            last_seen_at = self.node_last_seen.get(node_id)
             summaries.append(
                 {
                     "node_id": node_id,
                     "public_key": identity.public_key,
                     "credits": self.credits.get(node_id, 0),
                     "reputation": reputation.get(node_id, self._empty_reputation(node_id)),
+                    "last_seen_at": last_seen_at,
+                    "last_seen_seconds_ago": (
+                        round(max(0.0, now - last_seen_at), 3) if last_seen_at is not None else None
+                    ),
+                    "liveness_status": self._node_liveness_status(node_id, now=now),
+                    "active_leases": self._active_lease_count_for_node(node_id, now=now),
+                    "expired_leases": self._expired_lease_count_for_node(node_id),
                     "supported_job_types": capabilities.get("supported_job_types", []),
                     "hardware": capabilities.get("hardware", {}),
                 }
@@ -352,11 +444,14 @@ class Coordinator:
         return sorted(summaries, key=lambda item: item["node_id"])
 
     def job_summaries(self) -> list[dict[str, Any]]:
+        self.reap_expired_leases()
         summaries = []
+        now = time.time()
         for job_id, job in self.jobs.items():
             result_count = len(self.results.get(job_id, []))
             leased_to = sorted(self.leased_jobs.get(job_id, set()))
             verification = self.verification_summary(job_id)
+            leases = self._lease_summaries_for_job(job_id, now=now)
             summaries.append(
                 {
                     "job_id": job_id,
@@ -365,6 +460,9 @@ class Coordinator:
                     "status": verification["status"],
                     "leased_to": leased_to,
                     "active_leases": sorted(self._active_leases(job_id)),
+                    "lease_count": len(leases),
+                    "expired_lease_count": sum(1 for lease in leases if lease["status"] == "expired"),
+                    "leases": leases,
                     "reward": job.reward,
                     "deadline": job.deadline,
                     "result_count": result_count,
@@ -397,6 +495,7 @@ class Coordinator:
         return sorted(summaries, key=lambda item: (item["created_at"], item["job_id"]))
 
     def reputation_summaries(self) -> dict[str, dict[str, Any]]:
+        self.reap_expired_leases()
         reputation = {
             node_id: self._empty_reputation(node_id)
             for node_id in self.known_nodes
@@ -419,16 +518,23 @@ class Coordinator:
                 else:
                     entry["disputed_results"] += 1
 
+        for lease in self.expired_leases:
+            entry = reputation.setdefault(lease["node_id"], self._empty_reputation(lease["node_id"]))
+            entry["timeouts"] += 1
+
         for entry in reputation.values():
-            score = entry["verified_matches"] - entry["mismatches"] - entry["disputed_results"]
+            timeout_penalty = entry["timeouts"] * 0.25
+            score = entry["verified_matches"] - entry["mismatches"] - entry["disputed_results"] - timeout_penalty
             terminal_results = entry["terminal_results"]
-            entry["score"] = score
+            entry["timeout_penalty"] = round(timeout_penalty, 3)
+            entry["score"] = round(score, 3)
             entry["reliability"] = round(entry["verified_matches"] / terminal_results, 3) if terminal_results else None
             entry["status"] = self._reputation_status(entry)
 
         return dict(sorted(reputation.items(), key=lambda item: item[0]))
 
     def snapshot(self) -> dict[str, Any]:
+        self.reap_expired_leases()
         return {
             "status": self.status(),
             "nodes": self.node_summaries(),
@@ -477,6 +583,8 @@ class Coordinator:
         if not self._node_supports_job(node_id, job):
             return None
         if any(result.node_id == node_id for result in self.results.get(job_id, [])):
+            return None
+        if self._node_timed_out_job(job_id, node_id):
             return None
 
         leased_to = self.leased_jobs.get(job_id, set())
@@ -559,9 +667,78 @@ class Coordinator:
     def _job_is_terminal(self, job_id: str) -> bool:
         return self.verification_summary(job_id)["status"] in {"verified", "disputed"}
 
-    def _active_leases(self, job_id: str) -> set[str]:
+    def _active_leases(self, job_id: str, now: float | None = None) -> set[str]:
+        timestamp = now if now is not None else time.time()
         result_node_ids = {result.node_id for result in self.results.get(job_id, [])}
-        return set(self.leased_jobs.get(job_id, set())) - result_node_ids
+        return {
+            node_id
+            for node_id in self.leased_jobs.get(job_id, set())
+            if node_id not in result_node_ids and not self._lease_is_expired(job_id, node_id, timestamp)
+        }
+
+    def _lease_is_expired(self, job_id: str, node_id: str, now: float) -> bool:
+        expires_at = self.lease_expires_at.get(job_id, {}).get(node_id)
+        return expires_at is not None and expires_at <= now
+
+    def _lease_summaries_for_job(self, job_id: str, now: float | None = None) -> list[dict[str, Any]]:
+        timestamp = now if now is not None else time.time()
+        result_node_ids = {result.node_id for result in self.results.get(job_id, [])}
+        summaries: list[dict[str, Any]] = []
+        for node_id in sorted(self.leased_jobs.get(job_id, set())):
+            expires_at = self.lease_expires_at.get(job_id, {}).get(node_id)
+            status = "completed" if node_id in result_node_ids else "active"
+            summaries.append(
+                {
+                    "job_id": job_id,
+                    "node_id": node_id,
+                    "status": status,
+                    "leased_at": self.lease_started_at.get(job_id, {}).get(node_id),
+                    "expires_at": expires_at,
+                    "expires_in_seconds": (
+                        round(max(0.0, expires_at - timestamp), 3)
+                        if status == "active" and expires_at is not None
+                        else None
+                    ),
+                }
+            )
+        summaries.extend(
+            {
+                "job_id": lease["job_id"],
+                "node_id": lease["node_id"],
+                "status": "expired",
+                "leased_at": lease["leased_at"],
+                "expires_at": lease["expires_at"],
+                "expires_in_seconds": None,
+                "expired_at": lease["expired_at"],
+            }
+            for lease in self.expired_leases
+            if lease["job_id"] == job_id
+        )
+        return summaries
+
+    def _node_liveness_status(self, node_id: str, now: float | None = None) -> str:
+        last_seen_at = self.node_last_seen.get(node_id)
+        if last_seen_at is None:
+            return "offline"
+        elapsed = (now if now is not None else time.time()) - last_seen_at
+        if elapsed <= self.node_stale_seconds:
+            return "live"
+        if elapsed <= self.node_stale_seconds * 3:
+            return "stale"
+        return "offline"
+
+    def _active_lease_count_for_node(self, node_id: str, now: float | None = None) -> int:
+        timestamp = now if now is not None else time.time()
+        return sum(1 for job_id in self.jobs if node_id in self._active_leases(job_id, now=timestamp))
+
+    def _expired_lease_count_for_node(self, node_id: str) -> int:
+        return sum(1 for lease in self.expired_leases if lease["node_id"] == node_id)
+
+    def _node_timed_out_job(self, job_id: str, node_id: str) -> bool:
+        return any(
+            lease["job_id"] == job_id and lease["node_id"] == node_id
+            for lease in self.expired_leases
+        )
 
     def _required_results_for_job(self, job: JobPacket) -> int:
         strategy = job.verification_strategy
@@ -591,16 +768,24 @@ class Coordinator:
             "verified_matches": 0,
             "mismatches": 0,
             "disputed_results": 0,
+            "timeouts": 0,
+            "timeout_penalty": 0,
             "reliability": None,
         }
 
     def _reputation_status(self, entry: dict[str, Any]) -> str:
-        if entry["terminal_results"] == 0:
+        if entry["terminal_results"] == 0 and entry["timeouts"] == 0:
             return "new"
+        if entry["mismatches"] or entry["disputed_results"]:
+            if entry["score"] < 0:
+                return "flagged"
+            return "watch"
+        if entry["timeouts"]:
+            if entry["timeouts"] >= 4 and entry["score"] <= -1:
+                return "flagged"
+            return "watch"
         if entry["score"] < 0:
             return "flagged"
-        if entry["mismatches"] or entry["disputed_results"]:
-            return "watch"
         if entry["score"] >= 3:
             return "trusted"
         return "ok"

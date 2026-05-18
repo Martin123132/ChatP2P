@@ -33,6 +33,7 @@ chatp2p worker run-once
 ```
 
 The coordinator stores state in `.mesh/coordinator.sqlite3` by default, so registered nodes, jobs, leases, results, and credits survive restarts.
+Leases expire after 30 seconds by default and can be tuned with `--lease-timeout-seconds`.
 
 Open the coordinator dashboard:
 
@@ -96,19 +97,32 @@ Current job states:
 
 ## Reputation
 
-Reputation is computed from signed result history:
+Reputation is computed from signed result and lease history:
 
 - matching results on verified jobs increase score
 - mismatches on verified jobs decrease score
 - participation in disputed jobs decreases score until better dispute handling exists
+- expired leases add a small timeout penalty
 
 Current node reputation states:
 
 - `new`: no terminal verification history yet
 - `ok`: positive score with no flags
 - `trusted`: score of 3 or higher with no flags
-- `watch`: positive score but some mismatch/dispute history
+- `watch`: some timeout history or non-terminal concern
 - `flagged`: score below zero
+
+## Lease Recovery and Liveness
+
+Workers are expected to disappear sometimes, so the coordinator now treats leases as temporary:
+
+- every lease has `leased_at` and `expires_at`
+- expired leases are removed from the active queue and can be picked up by another worker
+- late results from expired leases are rejected
+- node `last_seen_at` is updated on registration, heartbeat, job pull, and result submission
+- node liveness is reported as `live`, `stale`, or `offline`
+
+Lease and liveness state is exposed in the dashboard, `GET /api/snapshot`, and `GET /health`. Workers can also ping `POST /nodes/heartbeat` with a known `node_id`.
 
 ## Trust-Aware Leasing
 

@@ -49,6 +49,9 @@ class CoordinatorClient:
     def register(self, registration: NodeRegistration) -> dict[str, Any]:
         return self._request("POST", "/nodes/register", registration.to_dict())
 
+    def heartbeat(self, node_id: str) -> dict[str, Any]:
+        return self._request("POST", "/nodes/heartbeat", {"node_id": node_id})
+
     def create_demo_math_job(self) -> JobPacket:
         response = self._request("POST", "/jobs/demo-math", {})
         return JobPacket.from_dict(response["job"])

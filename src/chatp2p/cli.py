@@ -157,7 +157,12 @@ def serve_coordinator(args: argparse.Namespace) -> None:
     home = Path(args.home)
     identity = _load_or_create_identity(home, "coordinator")
     db_path = Path(args.db) if args.db else home / "coordinator.sqlite3"
-    coordinator = Coordinator(identity=identity, store=SQLiteCoordinatorStore(db_path))
+    coordinator = Coordinator(
+        identity=identity,
+        store=SQLiteCoordinatorStore(db_path),
+        lease_timeout_seconds=args.lease_timeout_seconds,
+        node_stale_seconds=args.node_stale_seconds,
+    )
     if args.seed_math_job:
         coordinator.create_math_eval_job()
     if args.seed_eval_suite:
@@ -322,6 +327,18 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--host", default="127.0.0.1", help="Host to bind")
     serve_parser.add_argument("--port", default=8765, type=int, help="Port to bind")
     serve_parser.add_argument("--db", default=None, help="SQLite database path")
+    serve_parser.add_argument(
+        "--lease-timeout-seconds",
+        default=30.0,
+        type=float,
+        help="Seconds before an unfinished lease is released for another worker",
+    )
+    serve_parser.add_argument(
+        "--node-stale-seconds",
+        default=60.0,
+        type=float,
+        help="Seconds after last activity before a node is marked stale",
+    )
     serve_parser.add_argument("--seed-math-job", action="store_true", help="Create one math eval job on startup")
     serve_parser.add_argument("--seed-eval-suite", action="store_true", help="Create deterministic eval jobs on startup")
     serve_parser.set_defaults(func=serve_coordinator)

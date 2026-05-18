@@ -60,6 +60,8 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
         ("Jobs", "jobs"),
         ("Queued", "queued_jobs"),
         ("Pending", "pending_jobs"),
+        ("Active Leases", "leased_jobs"),
+        ("Expired Leases", "expired_leases"),
         ("Verified", "verified_jobs"),
         ("Disputed", "disputed_jobs"),
     ]
@@ -77,13 +79,16 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
         f"""
         <tr>
           <td><code>{html.escape(_short(node["node_id"], 18))}</code></td>
+          <td><span class="live-state {html.escape(node["liveness_status"])}">{html.escape(node["liveness_status"])}</span></td>
           <td>{html.escape(str(node["credits"]))}</td>
+          <td>{html.escape("" if node["last_seen_seconds_ago"] is None else f'{node["last_seen_seconds_ago"]}s')}</td>
+          <td>{html.escape(str(node["active_leases"]))}/{html.escape(str(node["expired_leases"]))}</td>
           <td>{html.escape(", ".join(node["supported_job_types"]) or "none")}</td>
           <td>{html.escape(node["hardware"].get("system", "unknown"))}</td>
         </tr>
         """
         for node in nodes
-    ) or """<tr><td colspan="4" class="empty">No nodes registered yet.</td></tr>"""
+    ) or """<tr><td colspan="7" class="empty">No nodes registered yet.</td></tr>"""
 
     job_rows = "\n".join(
         f"""
@@ -91,14 +96,15 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
           <td><code>{html.escape(_short(job["job_id"], 18))}</code></td>
           <td>{html.escape(job["job_type"])}</td>
           <td><span class="status {html.escape(job["status"])}">{html.escape(job["status"])}</span></td>
-          <td><code>{html.escape(", ".join(_short(node_id, 18) for node_id in job["leased_to"]))}</code></td>
+          <td><code>{html.escape(", ".join(_short(node_id, 18) for node_id in job["active_leases"]))}</code></td>
+          <td>{html.escape(str(job["expired_lease_count"]))}</td>
           <td>{html.escape(str(job["reward"]))}</td>
           <td>{html.escape(str(job["result_count"]))}/{html.escape(str(job["required_results"]))}</td>
           <td><code>{_json_snippet(job["payload"])}</code></td>
         </tr>
         """
         for job in jobs
-    ) or """<tr><td colspan="7" class="empty">No jobs queued yet.</td></tr>"""
+    ) or """<tr><td colspan="8" class="empty">No jobs queued yet.</td></tr>"""
 
     reputation_rows = "\n".join(
         f"""
@@ -110,10 +116,11 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
           <td>{html.escape(str(entry["verified_matches"]))}</td>
           <td>{html.escape(str(entry["mismatches"]))}</td>
           <td>{html.escape(str(entry["disputed_results"]))}</td>
+          <td>{html.escape(str(entry["timeouts"]))}</td>
         </tr>
         """
         for entry in snapshot["reputation"]
-    ) or """<tr><td colspan="7" class="empty">No reputation history yet.</td></tr>"""
+    ) or """<tr><td colspan="8" class="empty">No reputation history yet.</td></tr>"""
 
     result_rows = "\n".join(
         f"""
@@ -260,6 +267,18 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
     .trusted {{ background: var(--green); }}
     .watch {{ background: var(--amber); }}
     .flagged {{ background: var(--red); }}
+    .live-state {{
+      display: inline-block;
+      min-width: 58px;
+      padding: 3px 7px;
+      border-radius: 999px;
+      color: #fff;
+      text-align: center;
+      font-size: 12px;
+    }}
+    .live {{ background: var(--green); }}
+    .stale {{ background: var(--amber); }}
+    .offline {{ background: var(--red); }}
     .empty {{ color: var(--muted); }}
     .api {{
       display: flex;
@@ -297,21 +316,21 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
     <section class="table-block">
       <h2>Nodes</h2>
       <table>
-        <thead><tr><th>Node</th><th>Credits</th><th>Capabilities</th><th>System</th></tr></thead>
+        <thead><tr><th>Node</th><th>Live</th><th>Credits</th><th>Seen</th><th>Leases</th><th>Capabilities</th><th>System</th></tr></thead>
         <tbody>{node_rows}</tbody>
       </table>
     </section>
     <section class="table-block">
       <h2>Jobs</h2>
       <table>
-        <thead><tr><th>Job</th><th>Type</th><th>Status</th><th>Leased To</th><th>Reward</th><th>Results</th><th>Payload</th></tr></thead>
+        <thead><tr><th>Job</th><th>Type</th><th>Status</th><th>Active</th><th>Expired</th><th>Reward</th><th>Results</th><th>Payload</th></tr></thead>
         <tbody>{job_rows}</tbody>
       </table>
     </section>
     <section class="table-block">
       <h2>Reputation</h2>
       <table>
-        <thead><tr><th>Node</th><th>Status</th><th>Score</th><th>Reliability</th><th>Verified</th><th>Mismatches</th><th>Disputed</th></tr></thead>
+        <thead><tr><th>Node</th><th>Status</th><th>Score</th><th>Reliability</th><th>Verified</th><th>Mismatches</th><th>Disputed</th><th>Timeouts</th></tr></thead>
         <tbody>{reputation_rows}</tbody>
       </table>
     </section>
@@ -408,6 +427,24 @@ def create_coordinator_http_server(
                     credits = coordinator.credits.get(registration.node_id, 0)
                 status = 200 if accepted else 403
                 _json_response(self, status, {"accepted": accepted, "node_id": registration.node_id, "credits": credits})
+                return
+
+            if parsed.path == "/nodes/heartbeat":
+                try:
+                    request = _read_json(self)
+                    node_id = request["node_id"]
+                except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                    _json_response(self, 400, {"accepted": False, "error": str(exc)})
+                    return
+                with lock:
+                    accepted = coordinator.touch_node(node_id)
+                    last_seen_at = coordinator.node_last_seen.get(node_id)
+                status = 200 if accepted else 404
+                _json_response(
+                    self,
+                    status,
+                    {"accepted": accepted, "node_id": node_id, "last_seen_at": last_seen_at},
+                )
                 return
 
             if parsed.path == "/jobs/result":

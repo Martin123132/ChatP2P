@@ -364,3 +364,57 @@ def test_flagged_worker_can_take_conflict_tie_breaker():
 
     assert tie_breaker is not None
     assert tie_breaker.job_id == conflict_job.job_id
+
+
+def test_expired_lease_requeues_job_and_rejects_late_result():
+    coordinator = Coordinator(
+        identity=NodeIdentity.generate(prefix="coordinator"),
+        lease_timeout_seconds=10,
+    )
+    first_identity = NodeIdentity.generate(prefix="worker")
+    second_identity = NodeIdentity.generate(prefix="worker")
+    first_worker = WorkerNode(identity=first_identity)
+    second_worker = WorkerNode(identity=second_identity)
+    coordinator.register_node(first_identity.public(), capabilities=first_worker.capabilities())
+    coordinator.register_node(second_identity.public(), capabilities=second_worker.capabilities())
+    job = coordinator.create_echo_inference_job("recover this if a worker disappears")
+
+    first_lease = coordinator.lease_next_job(first_identity.node_id)
+    assert first_lease is not None
+    assert first_lease.job_id == job.job_id
+    lease = coordinator.job_summaries()[0]["leases"][0]
+
+    expired = coordinator.reap_expired_leases(now=lease["expires_at"] + 0.001)
+
+    assert expired[0]["node_id"] == first_identity.node_id
+    assert coordinator.submit_result(first_worker.run_job(first_lease)) is False
+    assert coordinator.verification_summary(job.job_id)["status"] == "queued"
+    assert coordinator.reputation_summaries()[first_identity.node_id]["timeouts"] == 1
+    assert coordinator.reputation_summaries()[first_identity.node_id]["status"] == "watch"
+    assert coordinator.lease_next_job(first_identity.node_id) is None
+
+    second_lease = coordinator.lease_next_job(second_identity.node_id)
+    assert second_lease is not None
+    assert second_lease.job_id == job.job_id
+    assert coordinator.submit_result(second_worker.run_job(second_lease))
+    assert coordinator.verification_summary(job.job_id)["status"] == "verified"
+
+
+def test_node_liveness_updates_when_worker_polls():
+    coordinator = Coordinator(
+        identity=NodeIdentity.generate(prefix="coordinator"),
+        node_stale_seconds=10,
+    )
+    worker_identity = NodeIdentity.generate(prefix="worker")
+    worker = WorkerNode(identity=worker_identity)
+    coordinator.register_node(worker_identity.public(), capabilities=worker.capabilities())
+    coordinator.create_echo_inference_job("liveness ping")
+
+    coordinator.node_last_seen[worker_identity.node_id] -= 35
+    assert coordinator.node_summaries()[0]["liveness_status"] == "offline"
+
+    assert coordinator.lease_next_job(worker_identity.node_id) is not None
+
+    summary = coordinator.node_summaries()[0]
+    assert summary["liveness_status"] == "live"
+    assert summary["active_leases"] == 1
