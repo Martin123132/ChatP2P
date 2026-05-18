@@ -425,6 +425,38 @@ def test_reliable_worker_gets_pending_verification_before_queued_work():
     assert leased_reliable.job_id == pending_job.job_id
 
 
+def test_pending_job_does_not_overlease_beyond_needed_verification():
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    identities = [NodeIdentity.generate(prefix="worker") for _ in range(3)]
+    workers = [WorkerNode(identity=identity) for identity in identities]
+    for worker in workers:
+        coordinator.register_node(worker.identity.public(), capabilities=worker.capabilities())
+
+    job = coordinator.create_job(
+        job_type="eval.deterministic.v1",
+        payload={
+            "task": "arithmetic",
+            "operation": "add",
+            "operands": [20, 22],
+            "expected": 42,
+        },
+    )
+
+    first_lease = coordinator.lease_next_job(identities[0].node_id)
+    assert first_lease is not None
+    assert first_lease.job_id == job.job_id
+    assert coordinator.submit_result(workers[0].run_job(first_lease))
+
+    second_lease = coordinator.lease_next_job(identities[1].node_id)
+    assert second_lease is not None
+    assert second_lease.job_id == job.job_id
+
+    assert coordinator.lease_next_job(identities[2].node_id) is None
+
+    assert coordinator.submit_result(workers[1].run_job(second_lease))
+    assert coordinator.verification_summary(job.job_id)["status"] == "verified"
+
+
 def test_flagged_worker_can_take_conflict_tie_breaker():
     coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
     identities = [NodeIdentity.generate(prefix="worker") for _ in range(6)]

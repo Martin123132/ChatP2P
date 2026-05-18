@@ -73,6 +73,22 @@ chatp2p job snapshot
 chatp2p job reputation
 ```
 
+## Reliability Proof Harness
+
+Run a one-machine swarm proof with a local coordinator and separate worker processes:
+
+```bash
+chatp2p proof swarm --workers 25 --jobs 100 --report .mesh/proof/reliability-report.json
+```
+
+The proof writes a full JSON report and prints a short summary with workers registered, jobs verified, accepted results, expired leases, disputes, and pass/fail status.
+
+To prove lease recovery, make a few workers acknowledge a lease and disappear:
+
+```bash
+chatp2p proof swarm --workers 25 --jobs 100 --fault-timeout-workers 2
+```
+
 Generic JSON job creation is also available:
 
 ```bash

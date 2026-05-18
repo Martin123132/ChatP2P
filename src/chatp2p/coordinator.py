@@ -738,10 +738,20 @@ class Coordinator:
             return None
 
         verification = self.verification_summary(job_id)
-        if verification["status"] == "leased" and len(self._active_leases(job_id)) >= self._required_results_for_job(job):
-            return None
-
         kind = self._verification_need_kind(job_id)
+        active_lease_count = len(self._active_leases(job_id))
+        result_count = len(self.results.get(job_id, []))
+        required_results = self._required_results_for_job(job)
+        max_results = self._max_results_for_job(job)
+        if kind in {"queued", "leased", "pending_verification"}:
+            needed_results = max(0, required_results - result_count)
+            if active_lease_count >= needed_results:
+                return None
+        if kind == "tie_breaker":
+            needed_results = max(0, max_results - result_count)
+            if active_lease_count >= needed_results:
+                return None
+
         status = reputation["status"]
 
         if status == "flagged":

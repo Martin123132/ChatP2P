@@ -12,6 +12,7 @@ from .coordinator import Coordinator
 from .crypto import NodeIdentity
 from .http_api import create_coordinator_http_server
 from .packets import NodeRegistration
+from .proof import SwarmProofConfig, proof_summary, run_swarm_proof
 from .storage import SQLiteCoordinatorStore
 from .worker import WorkerNode
 
@@ -307,6 +308,28 @@ def show_reputation(args: argparse.Namespace) -> None:
     print(json.dumps(client.reputation(), indent=2, sort_keys=True))
 
 
+def run_proof_swarm(args: argparse.Namespace) -> None:
+    config = SwarmProofConfig(
+        workers=args.workers,
+        jobs=args.jobs,
+        work_dir=Path(args.work_dir),
+        report_path=Path(args.report),
+        timeout_seconds=args.timeout_seconds,
+        lease_timeout_seconds=args.lease_timeout_seconds,
+        poll_interval=args.poll_interval,
+        worker_interval=args.worker_interval,
+        fault_timeout_workers=args.fault_timeout_workers,
+    )
+    try:
+        report = run_swarm_proof(config)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    print(json.dumps(proof_summary(report), indent=2, sort_keys=True))
+    if not report["passed"]:
+        raise SystemExit(1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="chatp2p", description="ChatP2P prototype")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -406,6 +429,50 @@ def build_parser() -> argparse.ArgumentParser:
     reputation_parser = job_subcommands.add_parser("reputation", help="Show node reputation")
     reputation_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
     reputation_parser.set_defaults(func=show_reputation)
+
+    proof_parser = subcommands.add_parser("proof", help="Run local proof harnesses")
+    proof_subcommands = proof_parser.add_subparsers(dest="proof_command", required=True)
+
+    swarm_parser = proof_subcommands.add_parser("swarm", help="Run a local multi-process reliability proof")
+    swarm_parser.add_argument("--workers", default=25, type=int, help="Number of worker processes to launch")
+    swarm_parser.add_argument("--jobs", default=100, type=int, help="Number of deterministic eval jobs to create")
+    swarm_parser.add_argument("--work-dir", default=".mesh/proof", help="Directory for proof run state")
+    swarm_parser.add_argument(
+        "--report",
+        default=".mesh/proof/reliability-report.json",
+        help="Path for the JSON proof report",
+    )
+    swarm_parser.add_argument(
+        "--timeout-seconds",
+        default=120.0,
+        type=float,
+        help="Maximum proof runtime before marking the run failed",
+    )
+    swarm_parser.add_argument(
+        "--lease-timeout-seconds",
+        default=10.0,
+        type=float,
+        help="Seconds before unfinished leases are released to other workers",
+    )
+    swarm_parser.add_argument(
+        "--poll-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between parent snapshot polls",
+    )
+    swarm_parser.add_argument(
+        "--worker-interval",
+        default=0.1,
+        type=float,
+        help="Seconds idle workers wait between job polls",
+    )
+    swarm_parser.add_argument(
+        "--fault-timeout-workers",
+        default=0,
+        type=int,
+        help="Workers that acknowledge one lease and disappear to prove lease recovery",
+    )
+    swarm_parser.set_defaults(func=run_proof_swarm)
 
     return parser
 
