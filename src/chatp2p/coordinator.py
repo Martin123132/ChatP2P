@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from .benchmark import tier_meets_requirement
 from .crypto import NodeIdentity
 from .packets import (
     JobLeaseAcknowledgement,
@@ -580,8 +581,12 @@ class Coordinator:
                     "liveness_status": self._node_liveness_status(node_id, now=now),
                     "active_leases": self._active_lease_count_for_node(node_id, now=now),
                     "expired_leases": self._expired_lease_count_for_node(node_id),
+                    "capability_tier": capabilities.get("capability_tier", "light"),
                     "supported_job_types": capabilities.get("supported_job_types", []),
                     "hardware": capabilities.get("hardware", {}),
+                    "benchmark": capabilities.get("benchmark", {}),
+                    "gpu": capabilities.get("gpu", {}),
+                    "model_runtimes": capabilities.get("model_runtimes", {}),
                 }
             )
         return sorted(summaries, key=lambda item: item["node_id"])
@@ -703,7 +708,10 @@ class Coordinator:
         supported_job_types = capabilities.get("supported_job_types")
         if not supported_job_types:
             return False
-        return job.job_type in supported_job_types
+        if job.job_type not in supported_job_types:
+            return False
+        required_tier = job.resource_requirements.get("min_capability_tier")
+        return tier_meets_requirement(capabilities.get("capability_tier"), required_tier)
 
     def _lease_candidates_for_node(self, node_id: str) -> list[str]:
         reputation = self.reputation_summaries().get(node_id, self._empty_reputation(node_id))

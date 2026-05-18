@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import platform
 import time
 from dataclasses import dataclass
 from typing import Any
 
+from .benchmark import capabilities_from_benchmark, collect_hardware_profile
 from .crypto import NodeIdentity
 from .packets import JobPacket, JobResult
 
@@ -14,24 +14,25 @@ from .packets import JobPacket, JobResult
 def collect_hardware_attestation() -> dict[str, Any]:
     """Collect a small, non-invasive local capability report."""
 
-    return {
-        "machine": platform.machine(),
-        "processor": platform.processor(),
-        "python_version": platform.python_version(),
-        "system": platform.system(),
-        "system_version": platform.version(),
-    }
+    return collect_hardware_profile()
 
 
 @dataclass
 class WorkerNode:
     identity: NodeIdentity
+    capability_profile: dict[str, Any] | None = None
 
     def capabilities(self) -> dict[str, Any]:
-        return {
-            "supported_job_types": ["eval.math.v1", "eval.deterministic.v1", "inference.echo.v1"],
-            "hardware": collect_hardware_attestation(),
-        }
+        if self.capability_profile is not None:
+            return self.capability_profile
+        return capabilities_from_benchmark(
+            {
+                "hardware": collect_hardware_attestation(),
+                "gpu": {"available": False, "provider": None, "devices": [], "total_vram_mb": None},
+                "benchmark": {"cpu_iterations_per_second": 0},
+                "model_runtimes": {},
+            }
+        )
 
     def run_job(self, job: JobPacket) -> JobResult:
         if not job.verify_signature():

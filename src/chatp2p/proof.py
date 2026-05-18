@@ -178,6 +178,7 @@ def proof_summary(report: dict[str, Any]) -> dict[str, Any]:
         "leased_jobs": report["leased_jobs"],
         "expired_leases": report["expired_leases"],
         "accepted_results": report["accepted_results"],
+        "capability_tiers": report["capability_tiers"],
         "worker_error_count": len(report["worker_errors"]),
     }
 
@@ -374,6 +375,10 @@ def _build_report(
     status = final_snapshot["status"]
     duration = round(finished_at - started_at, 3)
     accepted_results = len(final_snapshot["results"])
+    capability_tiers: dict[str, int] = {}
+    for node in final_snapshot["nodes"]:
+        tier = node.get("capability_tier", "light")
+        capability_tiers[tier] = capability_tiers.get(tier, 0) + 1
     worker_summaries = [worker_reports[index] for index in sorted(worker_reports)]
     worker_errors = [
         {
@@ -426,6 +431,7 @@ def _build_report(
         "leased_jobs": status["leased_jobs"],
         "expired_leases": status["expired_leases"],
         "accepted_results": accepted_results,
+        "capability_tiers": capability_tiers,
         "throughput_jobs_per_second": round(status["verified_jobs"] / duration, 3) if duration else None,
         "throughput_results_per_second": round(accepted_results / duration, 3) if duration else None,
         "per_worker_credits": dict(status["credits"]),

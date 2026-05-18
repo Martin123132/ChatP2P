@@ -33,6 +33,14 @@ Terminal 2:
 chatp2p worker run-once
 ```
 
+Benchmark a worker machine before registering it:
+
+```bash
+chatp2p node benchmark
+```
+
+This saves `.mesh/node-capabilities.json`. Worker commands automatically advertise the saved capability profile, including hardware, CPU score, GPU detection, local model runtime detection, and a capability tier such as `light`, `standard`, `gaming_laptop`, or `gpu_worker`.
+
 The coordinator stores state in `.mesh/coordinator.sqlite3` by default, so registered nodes, jobs, leases, results, and credits survive restarts.
 Leases expire after 30 seconds by default and can be tuned with `--lease-timeout-seconds`.
 

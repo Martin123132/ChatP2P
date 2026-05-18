@@ -83,12 +83,13 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
           <td>{html.escape(str(node["credits"]))}</td>
           <td>{html.escape("" if node["last_seen_seconds_ago"] is None else f'{node["last_seen_seconds_ago"]}s')}</td>
           <td>{html.escape(str(node["active_leases"]))}/{html.escape(str(node["expired_leases"]))}</td>
+          <td>{html.escape(node.get("capability_tier", "light"))}</td>
           <td>{html.escape(", ".join(node["supported_job_types"]) or "none")}</td>
           <td>{html.escape(node["hardware"].get("system", "unknown"))}</td>
         </tr>
         """
         for node in nodes
-    ) or """<tr><td colspan="7" class="empty">No nodes registered yet.</td></tr>"""
+    ) or """<tr><td colspan="8" class="empty">No nodes registered yet.</td></tr>"""
 
     job_rows = "\n".join(
         f"""
@@ -317,7 +318,7 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
     <section class="table-block">
       <h2>Nodes</h2>
       <table>
-        <thead><tr><th>Node</th><th>Live</th><th>Credits</th><th>Seen</th><th>Leases</th><th>Capabilities</th><th>System</th></tr></thead>
+        <thead><tr><th>Node</th><th>Live</th><th>Credits</th><th>Seen</th><th>Leases</th><th>Tier</th><th>Capabilities</th><th>System</th></tr></thead>
         <tbody>{node_rows}</tbody>
       </table>
     </section>

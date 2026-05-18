@@ -7,6 +7,7 @@ import json
 import time
 from pathlib import Path
 
+from .benchmark import CAPABILITY_PROFILE_NAME, load_node_capabilities, run_node_benchmark, save_node_benchmark
 from .client import CoordinatorClient
 from .coordinator import Coordinator
 from .crypto import NodeIdentity
@@ -21,6 +22,10 @@ def _identity_path(home: Path, name: str) -> Path:
     return home / f"{name}.identity.json"
 
 
+def _capabilities_path(home: Path) -> Path:
+    return home / CAPABILITY_PROFILE_NAME
+
+
 def _load_or_create_identity(home: Path, name: str) -> NodeIdentity:
     path = _identity_path(home, name)
     if path.exists():
@@ -28,6 +33,11 @@ def _load_or_create_identity(home: Path, name: str) -> NodeIdentity:
     identity = NodeIdentity.generate(prefix=name)
     identity.save(path)
     return identity
+
+
+def _load_worker(home: Path) -> WorkerNode:
+    identity = _load_or_create_identity(home, "worker")
+    return WorkerNode(identity=identity, capability_profile=load_node_capabilities(home))
 
 
 def _parse_json_value(raw: str):
@@ -186,8 +196,7 @@ def serve_coordinator(args: argparse.Namespace) -> None:
 
 
 def run_worker_once(args: argparse.Namespace) -> None:
-    identity = _load_or_create_identity(Path(args.home), "worker")
-    worker = WorkerNode(identity=identity)
+    worker = _load_worker(Path(args.home))
     client = CoordinatorClient(args.coordinator)
 
     _register_worker(client, worker)
@@ -221,8 +230,8 @@ def _run_one_remote_job(client: CoordinatorClient, worker: WorkerNode) -> dict:
 
 
 def run_worker_loop(args: argparse.Namespace) -> None:
-    identity = _load_or_create_identity(Path(args.home), "worker")
-    worker = WorkerNode(identity=identity)
+    worker = _load_worker(Path(args.home))
+    identity = worker.identity
     client = CoordinatorClient(args.coordinator)
     _register_worker(client, worker)
 
@@ -330,6 +339,14 @@ def run_proof_swarm(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def run_node_benchmark_command(args: argparse.Namespace) -> None:
+    home = Path(args.home)
+    report = run_node_benchmark(cpu_duration_seconds=args.cpu_duration_seconds)
+    output = Path(args.output) if args.output else _capabilities_path(home)
+    save_node_benchmark(report, output)
+    print(json.dumps({"saved": str(output), **report}, indent=2, sort_keys=True))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="chatp2p", description="ChatP2P prototype")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -342,6 +359,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     demo_parser = subcommands.add_parser("demo", help="Run a local signed job demo")
     demo_parser.set_defaults(func=run_demo)
+
+    node_parser = subcommands.add_parser("node", help="Local node commands")
+    node_subcommands = node_parser.add_subparsers(dest="node_command", required=True)
+    benchmark_parser = node_subcommands.add_parser(
+        "benchmark",
+        help="Benchmark this machine and save worker capabilities",
+    )
+    benchmark_parser.add_argument("--home", default=".mesh", help="Directory for node identity and capabilities")
+    benchmark_parser.add_argument(
+        "--output",
+        default=None,
+        help=f"Output path. Defaults to HOME/{CAPABILITY_PROFILE_NAME}",
+    )
+    benchmark_parser.add_argument(
+        "--cpu-duration-seconds",
+        default=0.25,
+        type=float,
+        help="Seconds to spend on the tiny CPU benchmark",
+    )
+    benchmark_parser.set_defaults(func=run_node_benchmark_command)
 
     coordinator_parser = subcommands.add_parser("coordinator", help="Coordinator commands")
     coordinator_subcommands = coordinator_parser.add_subparsers(dest="coordinator_command", required=True)
