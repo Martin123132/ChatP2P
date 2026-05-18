@@ -59,8 +59,9 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
         ("Nodes", "known_nodes"),
         ("Jobs", "jobs"),
         ("Queued", "queued_jobs"),
-        ("Leased", "leased_jobs"),
-        ("Completed", "completed_jobs"),
+        ("Pending", "pending_jobs"),
+        ("Verified", "verified_jobs"),
+        ("Disputed", "disputed_jobs"),
     ]
     metrics = "\n".join(
         f"""
@@ -90,13 +91,14 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
           <td><code>{html.escape(_short(job["job_id"], 18))}</code></td>
           <td>{html.escape(job["job_type"])}</td>
           <td><span class="status {html.escape(job["status"])}">{html.escape(job["status"])}</span></td>
-          <td><code>{html.escape(_short(job["leased_to"], 18)) if job["leased_to"] else ""}</code></td>
+          <td><code>{html.escape(", ".join(_short(node_id, 18) for node_id in job["leased_to"]))}</code></td>
           <td>{html.escape(str(job["reward"]))}</td>
+          <td>{html.escape(str(job["result_count"]))}/{html.escape(str(job["required_results"]))}</td>
           <td><code>{_json_snippet(job["payload"])}</code></td>
         </tr>
         """
         for job in jobs
-    ) or """<tr><td colspan="6" class="empty">No jobs queued yet.</td></tr>"""
+    ) or """<tr><td colspan="7" class="empty">No jobs queued yet.</td></tr>"""
 
     result_rows = "\n".join(
         f"""
@@ -132,6 +134,7 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
       --amber: #9a6518;
       --red: #a23b32;
       --blue: #315f8c;
+      --gray: #687076;
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -225,7 +228,9 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
     }}
     .queued {{ background: var(--amber); }}
     .leased {{ background: var(--blue); }}
-    .completed {{ background: var(--green); }}
+    .pending {{ background: var(--gray); }}
+    .verified {{ background: var(--green); }}
+    .disputed {{ background: var(--red); }}
     .empty {{ color: var(--muted); }}
     .api {{
       display: flex;
@@ -269,7 +274,7 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
     <section class="table-block">
       <h2>Jobs</h2>
       <table>
-        <thead><tr><th>Job</th><th>Type</th><th>Status</th><th>Leased To</th><th>Reward</th><th>Payload</th></tr></thead>
+        <thead><tr><th>Job</th><th>Type</th><th>Status</th><th>Leased To</th><th>Reward</th><th>Results</th><th>Payload</th></tr></thead>
         <tbody>{job_rows}</tbody>
       </table>
     </section>

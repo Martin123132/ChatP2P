@@ -210,7 +210,7 @@ def _run_one_remote_job(client: CoordinatorClient, worker: WorkerNode) -> dict:
         "result_accepted": submit_response.get("accepted"),
         "credits": submit_response.get("credits"),
         "output": result.output,
-        "status": "completed" if submit_response.get("accepted") else "rejected",
+        "status": "submitted" if submit_response.get("accepted") else "rejected",
     }
 
 

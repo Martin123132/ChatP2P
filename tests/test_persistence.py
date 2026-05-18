@@ -34,4 +34,5 @@ def test_sqlite_store_survives_coordinator_restart(tmp_path):
     assert worker_identity.node_id in restarted.known_nodes
     assert len(restarted.jobs) == 4
     assert restarted.credits[worker_identity.node_id] == 1
-    assert restarted.status()["completed_jobs"] == 1
+    assert restarted.status()["pending_jobs"] == 1
+    assert restarted.status()["completed_jobs"] == 0

@@ -75,6 +75,23 @@ Generic JSON job creation is also available:
 chatp2p job create --job-type inference.echo.v1 --payload-json "{\"prompt\":\"hello mesh\"}"
 ```
 
+## Verification Status
+
+Jobs no longer become trusted just because one worker replied.
+
+- `signature-and-schema-check` jobs need one signed result.
+- `duplicate-on-random-sample` jobs need two independent workers with matching output hashes.
+- If duplicate results disagree, the coordinator leases the job to a third worker as a tie-breaker.
+- If no output reaches quorum after the tie-breaker, the job becomes `disputed`.
+
+Current job states:
+
+- `queued`: waiting for a worker
+- `leased`: sent to a worker, no result yet
+- `pending`: at least one result exists, but quorum is not reached
+- `verified`: enough matching results exist
+- `disputed`: max verification attempts used without quorum
+
 ## Product Direction
 
 The first product goal is a one-click node that lets normal machines contribute useful work: deterministic evals, inference jobs, dataset review, verification, model feedback, and later distributed fine-tuning.

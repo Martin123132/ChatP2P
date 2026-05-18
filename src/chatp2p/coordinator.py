@@ -17,7 +17,7 @@ class Coordinator:
     known_nodes: dict[str, NodeIdentity] = field(default_factory=dict)
     node_capabilities: dict[str, dict[str, Any]] = field(default_factory=dict)
     jobs: dict[str, JobPacket] = field(default_factory=dict)
-    leased_jobs: dict[str, str] = field(default_factory=dict)
+    leased_jobs: dict[str, set[str]] = field(default_factory=dict)
     results: dict[str, list[JobResult]] = field(default_factory=dict)
     credits: dict[str, int] = field(default_factory=dict)
 
@@ -275,13 +275,17 @@ class Coordinator:
             return None
 
         for job_id, job in self.jobs.items():
-            if self.results.get(job_id):
+            if self._job_is_terminal(job_id):
                 continue
             if not self._node_supports_job(node_id, job):
                 continue
-            leased_to = self.leased_jobs.get(job_id)
-            if leased_to is None or leased_to == node_id:
-                self.leased_jobs[job_id] = node_id
+            if any(result.node_id == node_id for result in self.results.get(job_id, [])):
+                continue
+            leased_to = self.leased_jobs.setdefault(job_id, set())
+            if node_id in leased_to:
+                continue
+            if len(leased_to) < self._max_results_for_job(job):
+                leased_to.add(node_id)
                 if self.store is not None:
                     self.store.save_lease(job_id, node_id)
                 return job
@@ -292,8 +296,10 @@ class Coordinator:
             return False
         if result.node_id not in self.known_nodes:
             return False
-        leased_to = self.leased_jobs.get(result.job_id)
-        if leased_to is not None and leased_to != result.node_id:
+        if self._job_is_terminal(result.job_id):
+            return False
+        leased_to = self.leased_jobs.get(result.job_id, set())
+        if result.node_id not in leased_to:
             return False
         if any(existing.node_id == result.node_id for existing in self.results.get(result.job_id, [])):
             return False
@@ -313,17 +319,25 @@ class Coordinator:
         return True
 
     def status(self) -> dict:
-        completed_jobs = sum(1 for job_id in self.jobs if self.results.get(job_id))
-        queued_jobs = sum(1 for job_id in self.jobs if not self.results.get(job_id) and job_id not in self.leased_jobs)
-        active_leases = sum(1 for job_id in self.leased_jobs if not self.results.get(job_id))
+        verification_summaries = [self.verification_summary(job_id) for job_id in self.jobs]
+        verified_jobs = sum(1 for summary in verification_summaries if summary["status"] == "verified")
+        disputed_jobs = sum(1 for summary in verification_summaries if summary["status"] == "disputed")
+        completed_jobs = verified_jobs + disputed_jobs
+        queued_jobs = sum(1 for summary in verification_summaries if summary["status"] == "queued")
+        pending_jobs = sum(1 for summary in verification_summaries if summary["status"] == "pending")
+        active_leases = sum(len(self._active_leases(job_id)) for job_id in self.leased_jobs)
+        total_leases = sum(len(nodes) for nodes in self.leased_jobs.values())
         return {
             "coordinator_id": self.identity.node_id,
             "known_nodes": len(self.known_nodes),
             "jobs": len(self.jobs),
             "queued_jobs": queued_jobs,
+            "pending_jobs": pending_jobs,
             "leased_jobs": active_leases,
-            "total_leases": len(self.leased_jobs),
+            "total_leases": total_leases,
             "completed_jobs": completed_jobs,
+            "verified_jobs": verified_jobs,
+            "disputed_jobs": disputed_jobs,
             "credits": dict(self.credits),
         }
 
@@ -346,23 +360,23 @@ class Coordinator:
         summaries = []
         for job_id, job in self.jobs.items():
             result_count = len(self.results.get(job_id, []))
-            leased_to = self.leased_jobs.get(job_id)
-            if result_count:
-                status = "completed"
-            elif leased_to:
-                status = "leased"
-            else:
-                status = "queued"
+            leased_to = sorted(self.leased_jobs.get(job_id, set()))
+            verification = self.verification_summary(job_id)
             summaries.append(
                 {
                     "job_id": job_id,
                     "job_type": job.job_type,
                     "model_id": job.model_id,
-                    "status": status,
+                    "status": verification["status"],
                     "leased_to": leased_to,
+                    "active_leases": sorted(self._active_leases(job_id)),
                     "reward": job.reward,
                     "deadline": job.deadline,
                     "result_count": result_count,
+                    "required_results": verification["required_results"],
+                    "max_results": verification["max_results"],
+                    "winning_output_hash": verification["winning_output_hash"],
+                    "output_hash_counts": verification["output_hash_counts"],
                     "verification_strategy": job.verification_strategy,
                     "payload": job.payload,
                 }
@@ -401,3 +415,64 @@ class Coordinator:
         if not supported_job_types:
             return False
         return job.job_type in supported_job_types
+
+    def verification_summary(self, job_id: str) -> dict[str, Any]:
+        job = self.jobs[job_id]
+        results = self.results.get(job_id, [])
+        output_hash_counts: dict[str, int] = {}
+        for result in results:
+            output_hash_counts[result.output_hash] = output_hash_counts.get(result.output_hash, 0) + 1
+
+        required_results = self._required_results_for_job(job)
+        max_results = self._max_results_for_job(job)
+        winning_output_hash = None
+        for output_hash, count in output_hash_counts.items():
+            if count >= required_results:
+                winning_output_hash = output_hash
+                break
+
+        if winning_output_hash is not None:
+            status = "verified"
+        elif len(results) >= max_results:
+            status = "disputed"
+        elif results:
+            status = "pending"
+        elif self._active_leases(job_id):
+            status = "leased"
+        else:
+            status = "queued"
+
+        return {
+            "status": status,
+            "required_results": required_results,
+            "max_results": max_results,
+            "result_count": len(results),
+            "winning_output_hash": winning_output_hash,
+            "output_hash_counts": output_hash_counts,
+        }
+
+    def _job_is_terminal(self, job_id: str) -> bool:
+        return self.verification_summary(job_id)["status"] in {"verified", "disputed"}
+
+    def _active_leases(self, job_id: str) -> set[str]:
+        result_node_ids = {result.node_id for result in self.results.get(job_id, [])}
+        return set(self.leased_jobs.get(job_id, set())) - result_node_ids
+
+    def _required_results_for_job(self, job: JobPacket) -> int:
+        strategy = job.verification_strategy
+        if strategy == "signature-and-schema-check":
+            return 1
+        if strategy.startswith("quorum-"):
+            try:
+                return max(1, int(strategy.removeprefix("quorum-")))
+            except ValueError:
+                return 2
+        if "duplicate" in strategy:
+            return 2
+        return 1
+
+    def _max_results_for_job(self, job: JobPacket) -> int:
+        required_results = self._required_results_for_job(job)
+        if required_results <= 1:
+            return 1
+        return (required_results * 2) - 1

@@ -47,6 +47,13 @@ class SQLiteCoordinatorStore:
                     created_at REAL NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS leases (
+                    job_id TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (job_id, node_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS results (
                     job_id TEXT NOT NULL,
                     node_id TEXT NOT NULL,
@@ -98,18 +105,20 @@ class SQLiteCoordinatorStore:
                 (registration.node_id,),
             )
 
-    def load_jobs(self) -> tuple[dict[str, JobPacket], dict[str, str]]:
+    def load_jobs(self) -> tuple[dict[str, JobPacket], dict[str, set[str]]]:
         with self.connect() as connection:
             rows = connection.execute("SELECT * FROM jobs").fetchall()
+            lease_rows = connection.execute("SELECT * FROM leases").fetchall()
         jobs = {
             row["job_id"]: JobPacket.from_dict(json.loads(row["packet_json"]))
             for row in rows
         }
-        leases = {
-            row["job_id"]: row["leased_to"]
-            for row in rows
-            if row["leased_to"] is not None
-        }
+        leases: dict[str, set[str]] = {}
+        for row in rows:
+            if row["leased_to"] is not None:
+                leases.setdefault(row["job_id"], set()).add(row["leased_to"])
+        for row in lease_rows:
+            leases.setdefault(row["job_id"], set()).add(row["node_id"])
         return jobs, leases
 
     def save_job(self, job: JobPacket) -> None:
@@ -128,6 +137,13 @@ class SQLiteCoordinatorStore:
             connection.execute(
                 "UPDATE jobs SET leased_to = ? WHERE job_id = ?",
                 (node_id, job_id),
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO leases (job_id, node_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (job_id, node_id, time.time()),
             )
 
     def load_results(self) -> dict[str, list[JobResult]]:
