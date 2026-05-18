@@ -58,8 +58,7 @@ class Coordinator:
         return True
 
     def create_math_eval_job(self) -> JobPacket:
-        job = JobPacket.create(
-            coordinator=self.identity,
+        return self.create_job(
             job_type="eval.math.v1",
             model_id="deterministic-math-smoke-test",
             payload={"expression": "2 + 2", "expected": 4},
@@ -70,10 +69,6 @@ class Coordinator:
             verification_strategy="duplicate-on-random-sample",
             reward=1,
         )
-        self.jobs[job.job_id] = job
-        if self.store is not None:
-            self.store.save_job(job)
-        return job
 
     def create_deterministic_eval_jobs(self) -> list[JobPacket]:
         job_specs = [
@@ -104,8 +99,7 @@ class Coordinator:
         ]
 
         jobs = [
-            JobPacket.create(
-                coordinator=self.identity,
+            self.create_job(
                 job_type="eval.deterministic.v1",
                 model_id=f"deterministic-{spec['task']}",
                 payload=spec,
@@ -118,15 +112,10 @@ class Coordinator:
             )
             for spec in job_specs
         ]
-        for job in jobs:
-            self.jobs[job.job_id] = job
-            if self.store is not None:
-                self.store.save_job(job)
         return jobs
 
     def create_echo_inference_job(self, prompt: str) -> JobPacket:
-        job = JobPacket.create(
-            coordinator=self.identity,
+        return self.create_job(
             job_type="inference.echo.v1",
             model_id="echo-smoke-test",
             payload={"prompt": prompt},
@@ -135,10 +124,151 @@ class Coordinator:
             verification_strategy="signature-and-schema-check",
             reward=1,
         )
+
+    def create_job(
+        self,
+        *,
+        job_type: str,
+        payload: dict[str, Any],
+        model_id: str | None = None,
+        resource_requirements: dict[str, Any] | None = None,
+        expected_output_schema: dict[str, Any] | None = None,
+        verification_strategy: str | None = None,
+        reward: int = 1,
+        ttl_seconds: int = 300,
+    ) -> JobPacket:
+        if reward < 1:
+            raise ValueError("reward must be at least 1")
+
+        normalized_payload = self._validate_payload(job_type, payload)
+        defaults = self._job_defaults(job_type, normalized_payload)
+
+        job = JobPacket.create(
+            coordinator=self.identity,
+            job_type=job_type,
+            model_id=model_id or defaults["model_id"],
+            payload=normalized_payload,
+            resource_requirements=resource_requirements or defaults["resource_requirements"],
+            expected_output_schema=expected_output_schema or defaults["expected_output_schema"],
+            verification_strategy=verification_strategy or defaults["verification_strategy"],
+            reward=reward,
+            ttl_seconds=ttl_seconds,
+        )
         self.jobs[job.job_id] = job
         if self.store is not None:
             self.store.save_job(job)
         return job
+
+    def _job_defaults(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if job_type == "eval.math.v1":
+            return {
+                "model_id": "deterministic-math-smoke-test",
+                "resource_requirements": {"cpu": "tiny", "network": "none-after-download"},
+                "expected_output_schema": {"required": ["passed", "answer", "expected", "confidence"]},
+                "verification_strategy": "duplicate-on-random-sample",
+            }
+        if job_type == "eval.deterministic.v1":
+            return {
+                "model_id": f"deterministic-{payload['task']}",
+                "resource_requirements": {"cpu": "tiny", "network": "none-after-download"},
+                "expected_output_schema": {"required": ["passed", "answer", "expected", "confidence"]},
+                "verification_strategy": "duplicate-on-random-sample",
+            }
+        if job_type == "inference.echo.v1":
+            return {
+                "model_id": "echo-smoke-test",
+                "resource_requirements": {"cpu": "tiny"},
+                "expected_output_schema": {"required": ["answer", "confidence"]},
+                "verification_strategy": "signature-and-schema-check",
+            }
+        raise ValueError(f"unsupported job_type: {job_type}")
+
+    def _validate_payload(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be a JSON object")
+        if job_type == "eval.math.v1":
+            return self._validate_math_payload(payload)
+        if job_type == "eval.deterministic.v1":
+            return self._validate_deterministic_payload(payload)
+        if job_type == "inference.echo.v1":
+            return self._validate_echo_payload(payload)
+        raise ValueError(f"unsupported job_type: {job_type}")
+
+    def _validate_math_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        expression = payload.get("expression")
+        if expression != "2 + 2":
+            raise ValueError("eval.math.v1 currently supports only expression '2 + 2'")
+        if "expected" not in payload:
+            raise ValueError("eval.math.v1 requires expected")
+        return {"expression": expression, "expected": payload["expected"]}
+
+    def _validate_echo_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        prompt = payload.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("inference.echo.v1 requires a non-empty prompt string")
+        return {"prompt": prompt}
+
+    def _validate_deterministic_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        task = payload.get("task")
+        if task == "arithmetic":
+            return self._validate_arithmetic_payload(payload)
+        if task == "number_theory":
+            return self._validate_number_theory_payload(payload)
+        if task == "text":
+            return self._validate_text_payload(payload)
+        raise ValueError("eval.deterministic.v1 task must be arithmetic, number_theory, or text")
+
+    def _validate_arithmetic_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        operation = payload.get("operation")
+        if operation not in {"add", "subtract", "multiply", "divide"}:
+            raise ValueError("arithmetic operation must be add, subtract, multiply, or divide")
+        operands = payload.get("operands")
+        if not isinstance(operands, list) or len(operands) != 2:
+            raise ValueError("arithmetic operands must be a two-item list")
+        if not all(isinstance(operand, int | float) and not isinstance(operand, bool) for operand in operands):
+            raise ValueError("arithmetic operands must be numbers")
+        if operation == "divide" and operands[1] == 0:
+            raise ValueError("division by zero is not allowed")
+        if "expected" not in payload:
+            raise ValueError("arithmetic payload requires expected")
+        return {
+            "task": "arithmetic",
+            "operation": operation,
+            "operands": operands,
+            "expected": payload["expected"],
+        }
+
+    def _validate_number_theory_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("check") != "is_prime":
+            raise ValueError("number_theory check must be is_prime")
+        value = payload.get("value")
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ValueError("number_theory value must be an integer")
+        expected = payload.get("expected")
+        if not isinstance(expected, bool):
+            raise ValueError("number_theory expected must be a boolean")
+        return {
+            "task": "number_theory",
+            "check": "is_prime",
+            "value": value,
+            "expected": expected,
+        }
+
+    def _validate_text_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload.get("operation") != "normalize_whitespace":
+            raise ValueError("text operation must be normalize_whitespace")
+        value = payload.get("value")
+        expected = payload.get("expected")
+        if not isinstance(value, str):
+            raise ValueError("text value must be a string")
+        if not isinstance(expected, str):
+            raise ValueError("text expected must be a string")
+        return {
+            "task": "text",
+            "operation": "normalize_whitespace",
+            "value": value,
+            "expected": expected,
+        }
 
     def lease_next_job(self, node_id: str) -> JobPacket | None:
         if node_id not in self.known_nodes:

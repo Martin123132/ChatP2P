@@ -29,6 +29,92 @@ def _load_or_create_identity(home: Path, name: str) -> NodeIdentity:
     return identity
 
 
+def _parse_json_value(raw: str):
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _parse_number(raw: str) -> int | float:
+    value = json.loads(raw)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise SystemExit(f"Expected a number, got {raw!r}")
+    return value
+
+
+def _is_prime(value: int) -> bool:
+    if value < 2:
+        return False
+    if value == 2:
+        return True
+    if value % 2 == 0:
+        return False
+    divisor = 3
+    while divisor * divisor <= value:
+        if value % divisor == 0:
+            return False
+        divisor += 2
+    return True
+
+
+def _default_expected(payload: dict):
+    task = payload["task"]
+    if task == "arithmetic":
+        left, right = payload["operands"]
+        operation = payload["operation"]
+        if operation == "add":
+            return left + right
+        if operation == "subtract":
+            return left - right
+        if operation == "multiply":
+            return left * right
+        if operation == "divide":
+            return left / right
+    if task == "number_theory":
+        return _is_prime(payload["value"])
+    if task == "text":
+        return " ".join(payload["value"].split())
+    raise SystemExit(f"Cannot infer expected value for task {task!r}")
+
+
+def _build_deterministic_payload(args: argparse.Namespace) -> dict:
+    if args.task == "arithmetic":
+        if args.operation is None:
+            raise SystemExit("--operation is required for arithmetic jobs")
+        if args.operands is None:
+            raise SystemExit("--operands LEFT RIGHT is required for arithmetic jobs")
+        payload = {
+            "task": "arithmetic",
+            "operation": args.operation,
+            "operands": [_parse_number(args.operands[0]), _parse_number(args.operands[1])],
+        }
+    elif args.task == "number_theory":
+        if args.value is None:
+            raise SystemExit("--value is required for number_theory jobs")
+        parsed_value = _parse_number(args.value)
+        if not isinstance(parsed_value, int):
+            raise SystemExit("--value must be an integer for number_theory jobs")
+        payload = {
+            "task": "number_theory",
+            "check": "is_prime",
+            "value": parsed_value,
+        }
+    elif args.task == "text":
+        if args.value is None:
+            raise SystemExit("--value is required for text jobs")
+        payload = {
+            "task": "text",
+            "operation": "normalize_whitespace",
+            "value": args.value,
+        }
+    else:
+        raise SystemExit(f"Unsupported deterministic task: {args.task}")
+
+    payload["expected"] = _parse_json_value(args.expected) if args.expected is not None else _default_expected(payload)
+    return payload
+
+
 def init_identity(args: argparse.Namespace) -> None:
     home = Path(args.home)
     path = _identity_path(home, args.name)
@@ -153,6 +239,64 @@ def run_worker_loop(args: argparse.Namespace) -> None:
         time.sleep(args.interval)
 
 
+def create_generic_job(args: argparse.Namespace) -> None:
+    payload = json.loads(args.payload_json)
+    client = CoordinatorClient(args.coordinator)
+    job = client.create_job(
+        job_type=args.job_type,
+        payload=payload,
+        model_id=args.model_id,
+        reward=args.reward,
+        ttl_seconds=args.ttl_seconds,
+    )
+    print(json.dumps({"created": True, "job": job.to_dict()}, indent=2, sort_keys=True))
+
+
+def create_echo_job(args: argparse.Namespace) -> None:
+    client = CoordinatorClient(args.coordinator)
+    job = client.create_job(
+        job_type="inference.echo.v1",
+        payload={"prompt": args.prompt},
+        reward=args.reward,
+        ttl_seconds=args.ttl_seconds,
+    )
+    print(json.dumps({"created": True, "job": job.to_dict()}, indent=2, sort_keys=True))
+
+
+def create_deterministic_job(args: argparse.Namespace) -> None:
+    client = CoordinatorClient(args.coordinator)
+    payload = _build_deterministic_payload(args)
+    job = client.create_job(
+        job_type="eval.deterministic.v1",
+        payload=payload,
+        reward=args.reward,
+        ttl_seconds=args.ttl_seconds,
+    )
+    print(json.dumps({"created": True, "job": job.to_dict()}, indent=2, sort_keys=True))
+
+
+def create_demo_suite(args: argparse.Namespace) -> None:
+    client = CoordinatorClient(args.coordinator)
+    jobs = client.create_demo_suite()
+    print(
+        json.dumps(
+            {"created": True, "jobs": [job.to_dict() for job in jobs]},
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def list_jobs(args: argparse.Namespace) -> None:
+    client = CoordinatorClient(args.coordinator)
+    print(json.dumps(client.jobs(), indent=2, sort_keys=True))
+
+
+def show_snapshot(args: argparse.Namespace) -> None:
+    client = CoordinatorClient(args.coordinator)
+    print(json.dumps(client.snapshot(), indent=2, sort_keys=True))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="chatp2p", description="ChatP2P prototype")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -191,6 +335,51 @@ def build_parser() -> argparse.ArgumentParser:
     loop_parser.add_argument("--max-jobs", default=None, type=int, help="Stop after completing this many jobs")
     loop_parser.add_argument("--stop-when-idle", action="store_true", help="Stop once the coordinator has no job")
     loop_parser.set_defaults(func=run_worker_loop)
+
+    job_parser = subcommands.add_parser("job", help="Create and inspect coordinator jobs")
+    job_subcommands = job_parser.add_subparsers(dest="job_command", required=True)
+
+    generic_parser = job_subcommands.add_parser("create", help="Create a job from a JSON payload")
+    generic_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    generic_parser.add_argument("--job-type", required=True, help="Job type, such as eval.deterministic.v1")
+    generic_parser.add_argument("--payload-json", required=True, help="JSON object payload")
+    generic_parser.add_argument("--model-id", default=None, help="Optional model id override")
+    generic_parser.add_argument("--reward", default=1, type=int, help="Credits awarded for accepted result")
+    generic_parser.add_argument("--ttl-seconds", default=300, type=int, help="Job lifetime in seconds")
+    generic_parser.set_defaults(func=create_generic_job)
+
+    echo_parser = job_subcommands.add_parser("create-echo", help="Create an echo inference smoke-test job")
+    echo_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    echo_parser.add_argument("--prompt", required=True, help="Prompt to echo")
+    echo_parser.add_argument("--reward", default=1, type=int, help="Credits awarded for accepted result")
+    echo_parser.add_argument("--ttl-seconds", default=300, type=int, help="Job lifetime in seconds")
+    echo_parser.set_defaults(func=create_echo_job)
+
+    deterministic_parser = job_subcommands.add_parser(
+        "create-deterministic",
+        help="Create a deterministic eval job",
+    )
+    deterministic_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    deterministic_parser.add_argument("--task", required=True, choices=["arithmetic", "number_theory", "text"])
+    deterministic_parser.add_argument("--operation", choices=["add", "subtract", "multiply", "divide"])
+    deterministic_parser.add_argument("--operands", nargs=2, metavar=("LEFT", "RIGHT"), help="Arithmetic operands")
+    deterministic_parser.add_argument("--value", help="Number theory integer or text value")
+    deterministic_parser.add_argument("--expected", help="Expected answer as JSON; inferred when omitted")
+    deterministic_parser.add_argument("--reward", default=1, type=int, help="Credits awarded for accepted result")
+    deterministic_parser.add_argument("--ttl-seconds", default=300, type=int, help="Job lifetime in seconds")
+    deterministic_parser.set_defaults(func=create_deterministic_job)
+
+    suite_parser = job_subcommands.add_parser("create-suite", help="Create the deterministic demo eval suite")
+    suite_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    suite_parser.set_defaults(func=create_demo_suite)
+
+    list_parser = job_subcommands.add_parser("list", help="List jobs")
+    list_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    list_parser.set_defaults(func=list_jobs)
+
+    snapshot_parser = job_subcommands.add_parser("snapshot", help="Show coordinator snapshot")
+    snapshot_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    snapshot_parser.set_defaults(func=show_snapshot)
 
     return parser
 

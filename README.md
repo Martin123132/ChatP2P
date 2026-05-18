@@ -53,6 +53,28 @@ Drain a seeded queue with one worker:
 chatp2p worker loop --max-jobs 4 --stop-when-idle
 ```
 
+Create jobs after the coordinator is already running:
+
+```bash
+chatp2p job create-deterministic --task arithmetic --operation add --operands 7 8
+chatp2p job create-deterministic --task number_theory --value 97
+chatp2p job create-deterministic --task text --value "open     compute mesh"
+chatp2p job create-echo --prompt "hello mesh"
+```
+
+Inspect jobs and state:
+
+```bash
+chatp2p job list
+chatp2p job snapshot
+```
+
+Generic JSON job creation is also available:
+
+```bash
+chatp2p job create --job-type inference.echo.v1 --payload-json "{\"prompt\":\"hello mesh\"}"
+```
+
 ## Product Direction
 
 The first product goal is a one-click node that lets normal machines contribute useful work: deterministic evals, inference jobs, dataset review, verification, model feedback, and later distributed fine-tuning.

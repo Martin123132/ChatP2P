@@ -54,6 +54,26 @@ class CoordinatorClient:
         response = self._request("POST", "/jobs/demo-suite", {})
         return [JobPacket.from_dict(job) for job in response["jobs"]]
 
+    def create_job(
+        self,
+        *,
+        job_type: str,
+        payload: dict[str, Any],
+        model_id: str | None = None,
+        reward: int = 1,
+        ttl_seconds: int = 300,
+    ) -> JobPacket:
+        request = {
+            "job_type": job_type,
+            "payload": payload,
+            "reward": reward,
+            "ttl_seconds": ttl_seconds,
+        }
+        if model_id is not None:
+            request["model_id"] = model_id
+        response = self._request("POST", "/jobs", request)
+        return JobPacket.from_dict(response["job"])
+
     def next_job(self, node_id: str) -> JobPacket | None:
         query = urlencode({"node_id": node_id})
         response = self._request("GET", f"/jobs/next?{query}")

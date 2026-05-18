@@ -81,3 +81,29 @@ def test_coordinator_leases_only_supported_job_types():
     coordinator.create_deterministic_eval_jobs()
 
     assert coordinator.lease_next_job(worker_identity.node_id) is None
+
+
+def test_coordinator_rejects_invalid_created_jobs():
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+
+    try:
+        coordinator.create_job(
+            job_type="eval.deterministic.v1",
+            payload={
+                "task": "arithmetic",
+                "operation": "divide",
+                "operands": [1, 0],
+                "expected": 0,
+            },
+        )
+    except ValueError as exc:
+        assert "division by zero" in str(exc)
+    else:
+        raise AssertionError("Expected invalid arithmetic job to be rejected")
+
+    try:
+        coordinator.create_job(job_type="inference.echo.v1", payload={"prompt": ""})
+    except ValueError as exc:
+        assert "non-empty prompt" in str(exc)
+    else:
+        raise AssertionError("Expected empty echo prompt to be rejected")

@@ -376,6 +376,26 @@ def create_coordinator_http_server(
                 _json_response(self, status, {"accepted": accepted, "node_id": result.node_id, "credits": credits})
                 return
 
+            if parsed.path == "/jobs":
+                try:
+                    request = _read_json(self)
+                    with lock:
+                        job = coordinator.create_job(
+                            job_type=request["job_type"],
+                            payload=request["payload"],
+                            model_id=request.get("model_id"),
+                            resource_requirements=request.get("resource_requirements"),
+                            expected_output_schema=request.get("expected_output_schema"),
+                            verification_strategy=request.get("verification_strategy"),
+                            reward=int(request.get("reward", 1)),
+                            ttl_seconds=int(request.get("ttl_seconds", 300)),
+                        )
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                    _json_response(self, 400, {"created": False, "error": str(exc)})
+                    return
+                _json_response(self, 201, {"created": True, "job": job.to_dict()})
+                return
+
             if parsed.path == "/jobs/demo-math":
                 with lock:
                     job = coordinator.create_math_eval_job()
