@@ -7,7 +7,15 @@ from typing import Any
 from urllib.request import Request, urlopen
 
 from .crypto import NodeIdentity
-from .packets import JobLeaseAcknowledgement, JobLeaseRequest, JobPacket, JobResult, NodeHeartbeat, NodeRegistration
+from .packets import (
+    JobLeaseAcknowledgement,
+    JobLeaseGrant,
+    JobLeaseRequest,
+    JobPacket,
+    JobResult,
+    NodeHeartbeat,
+    NodeRegistration,
+)
 
 
 class CoordinatorClient:
@@ -86,12 +94,12 @@ class CoordinatorClient:
             return None
         job = JobPacket.from_dict(response["job"])
         lease = response["lease"]
-        acknowledgement = JobLeaseAcknowledgement.create(
-            node=node,
-            job_id=job.job_id,
-            leased_at=lease["leased_at"],
-            expires_at=lease["expires_at"],
-        )
+        grant = JobLeaseGrant.from_dict(lease["grant"])
+        if not grant.verify_signature():
+            raise RuntimeError("lease grant signature rejected")
+        if grant.grant_hash() != lease["grant_hash"]:
+            raise RuntimeError("lease grant hash mismatch")
+        acknowledgement = JobLeaseAcknowledgement.create(node=node, grant=grant)
         ack_response = self.acknowledge_lease(acknowledgement)
         if not ack_response.get("accepted"):
             raise RuntimeError(f"lease acknowledgement rejected: {ack_response}")

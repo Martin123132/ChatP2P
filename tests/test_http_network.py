@@ -57,6 +57,8 @@ def test_http_worker_registers_leases_job_and_submits_result():
         leased_snapshot_job = next(item for item in snapshot["jobs"] if item["job_id"] == job.job_id)
         assert leased_snapshot_job["status"] == "pending"
         assert leased_snapshot_job["acknowledged_lease_count"] == 1
+        assert leased_snapshot_job["leases"][0]["lease_id"].startswith("lease_")
+        assert leased_snapshot_job["leases"][0]["grant_hash"]
 
         with urlopen(f"http://{host}:{port}/dashboard", timeout=10) as response:
             dashboard = response.read().decode("utf-8")

@@ -66,6 +66,7 @@ class NodeRegistration:
 @dataclass(frozen=True)
 class NodeHeartbeat:
     packet_type: str
+    heartbeat_id: str
     node_id: str
     node_public_key: str
     created_at: float
@@ -75,6 +76,7 @@ class NodeHeartbeat:
     def create(cls, *, node: NodeIdentity) -> "NodeHeartbeat":
         unsigned = {
             "packet_type": "node.heartbeat.v1",
+            "heartbeat_id": f"heartbeat_{uuid.uuid4().hex}",
             "node_id": node.node_id,
             "node_public_key": node.public_key,
             "created_at": round(time.time(), 3),
@@ -89,6 +91,7 @@ class NodeHeartbeat:
     def to_dict(self) -> dict[str, Any]:
         return {
             "packet_type": self.packet_type,
+            "heartbeat_id": self.heartbeat_id,
             "node_id": self.node_id,
             "node_public_key": self.node_public_key,
             "created_at": self.created_at,
@@ -155,13 +158,95 @@ class JobLeaseRequest:
 
 
 @dataclass(frozen=True)
-class JobLeaseAcknowledgement:
+class JobLeaseGrant:
     packet_type: str
+    lease_id: str
+    request_id: str
     job_id: str
     node_id: str
     node_public_key: str
     leased_at: float
     expires_at: float
+    created_at: float
+    coordinator_id: str
+    coordinator_public_key: str
+    coordinator_signature: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        coordinator: NodeIdentity,
+        request_id: str,
+        job_id: str,
+        node_id: str,
+        node_public_key: str,
+        leased_at: float,
+        expires_at: float,
+    ) -> "JobLeaseGrant":
+        unsigned = {
+            "packet_type": "job.lease-grant.v1",
+            "lease_id": f"lease_{uuid.uuid4().hex}",
+            "request_id": request_id,
+            "job_id": job_id,
+            "node_id": node_id,
+            "node_public_key": node_public_key,
+            "leased_at": leased_at,
+            "expires_at": expires_at,
+            "created_at": round(time.time(), 3),
+            "coordinator_id": coordinator.node_id,
+            "coordinator_public_key": coordinator.public_key,
+        }
+        signature = coordinator.sign(canonical_bytes(unsigned))
+        return cls(**unsigned, coordinator_signature=signature)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "JobLeaseGrant":
+        return cls(**data)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "packet_type": self.packet_type,
+            "lease_id": self.lease_id,
+            "request_id": self.request_id,
+            "job_id": self.job_id,
+            "node_id": self.node_id,
+            "node_public_key": self.node_public_key,
+            "leased_at": self.leased_at,
+            "expires_at": self.expires_at,
+            "created_at": self.created_at,
+            "coordinator_id": self.coordinator_id,
+            "coordinator_public_key": self.coordinator_public_key,
+            "coordinator_signature": self.coordinator_signature,
+        }
+
+    def unsigned_dict(self) -> dict[str, Any]:
+        data = self.to_dict()
+        data.pop("coordinator_signature")
+        return data
+
+    def verify_signature(self) -> bool:
+        if self.packet_type != "job.lease-grant.v1":
+            return False
+        coordinator = NodeIdentity(
+            node_id=self.coordinator_id,
+            public_key=self.coordinator_public_key,
+        )
+        return coordinator.verify(canonical_bytes(self.unsigned_dict()), self.coordinator_signature)
+
+    def grant_hash(self) -> str:
+        return sha256_json(self.to_dict())
+
+
+@dataclass(frozen=True)
+class JobLeaseAcknowledgement:
+    packet_type: str
+    acknowledgement_id: str
+    lease_id: str
+    job_id: str
+    node_id: str
+    node_public_key: str
+    grant_hash: str
     created_at: float
     node_signature: str
 
@@ -170,17 +255,16 @@ class JobLeaseAcknowledgement:
         cls,
         *,
         node: NodeIdentity,
-        job_id: str,
-        leased_at: float,
-        expires_at: float,
+        grant: JobLeaseGrant,
     ) -> "JobLeaseAcknowledgement":
         unsigned = {
             "packet_type": "job.lease-ack.v1",
-            "job_id": job_id,
+            "acknowledgement_id": f"lease_ack_{uuid.uuid4().hex}",
+            "lease_id": grant.lease_id,
+            "job_id": grant.job_id,
             "node_id": node.node_id,
             "node_public_key": node.public_key,
-            "leased_at": leased_at,
-            "expires_at": expires_at,
+            "grant_hash": grant.grant_hash(),
             "created_at": round(time.time(), 3),
         }
         signature = node.sign(canonical_bytes(unsigned))
@@ -193,11 +277,12 @@ class JobLeaseAcknowledgement:
     def to_dict(self) -> dict[str, Any]:
         return {
             "packet_type": self.packet_type,
+            "acknowledgement_id": self.acknowledgement_id,
+            "lease_id": self.lease_id,
             "job_id": self.job_id,
             "node_id": self.node_id,
             "node_public_key": self.node_public_key,
-            "leased_at": self.leased_at,
-            "expires_at": self.expires_at,
+            "grant_hash": self.grant_hash,
             "created_at": self.created_at,
             "node_signature": self.node_signature,
         }

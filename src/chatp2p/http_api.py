@@ -447,11 +447,12 @@ def create_coordinator_http_server(
                     _json_response(self, 400, {"accepted": False, "error": str(exc)})
                     return
                 with lock:
-                    if not coordinator.verify_signed_node_packet(lease_request):
+                    rejection_reason = coordinator.signed_node_packet_rejection_reason(lease_request)
+                    if rejection_reason is not None:
                         _json_response(
                             self,
                             403,
-                            {"accepted": False, "job": None, "lease": None, "error": "invalid lease request"},
+                            {"accepted": False, "job": None, "lease": None, "error": rejection_reason},
                         )
                         return
                     leased = coordinator.lease_next_signed_job(lease_request)

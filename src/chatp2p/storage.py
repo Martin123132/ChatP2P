@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .crypto import NodeIdentity
-from .packets import JobLeaseAcknowledgement, JobPacket, JobResult, NodeRegistration
+from .packets import JobLeaseAcknowledgement, JobLeaseGrant, JobPacket, JobResult, NodeRegistration
 
 
 class SQLiteCoordinatorStore:
@@ -55,6 +55,10 @@ class SQLiteCoordinatorStore:
                     leased_at REAL,
                     expires_at REAL,
                     expired_at REAL,
+                    lease_id TEXT,
+                    request_id TEXT,
+                    grant_json TEXT,
+                    grant_hash TEXT,
                     acknowledged_at REAL,
                     acknowledgement_json TEXT,
                     PRIMARY KEY (job_id, node_id)
@@ -72,12 +76,24 @@ class SQLiteCoordinatorStore:
                     node_id TEXT PRIMARY KEY,
                     credits INTEGER NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS seen_packets (
+                    packet_id TEXT PRIMARY KEY,
+                    packet_type TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    seen_at REAL NOT NULL
+                );
                 """
             )
             self._ensure_column(connection, "nodes", "last_seen_at", "REAL")
             self._ensure_column(connection, "leases", "leased_at", "REAL")
             self._ensure_column(connection, "leases", "expires_at", "REAL")
             self._ensure_column(connection, "leases", "expired_at", "REAL")
+            self._ensure_column(connection, "leases", "lease_id", "TEXT")
+            self._ensure_column(connection, "leases", "request_id", "TEXT")
+            self._ensure_column(connection, "leases", "grant_json", "TEXT")
+            self._ensure_column(connection, "leases", "grant_hash", "TEXT")
             self._ensure_column(connection, "leases", "acknowledged_at", "REAL")
             self._ensure_column(connection, "leases", "acknowledgement_json", "TEXT")
 
@@ -148,6 +164,7 @@ class SQLiteCoordinatorStore:
         dict[str, dict[str, float]],
         dict[str, dict[str, float]],
         dict[str, dict[str, float]],
+        dict[str, dict[str, JobLeaseGrant]],
         dict[str, dict[str, JobLeaseAcknowledgement]],
         list[dict[str, Any]],
     ]:
@@ -162,6 +179,7 @@ class SQLiteCoordinatorStore:
         lease_started_at: dict[str, dict[str, float]] = {}
         lease_expires_at: dict[str, dict[str, float]] = {}
         lease_acknowledged_at: dict[str, dict[str, float]] = {}
+        lease_grants: dict[str, dict[str, JobLeaseGrant]] = {}
         lease_acknowledgements: dict[str, dict[str, JobLeaseAcknowledgement]] = {}
         expired_leases: list[dict[str, Any]] = []
         for row in rows:
@@ -185,7 +203,14 @@ class SQLiteCoordinatorStore:
                 "acknowledged_at": (
                     float(row["acknowledged_at"]) if row["acknowledged_at"] is not None else None
                 ),
+                "lease_id": row["lease_id"],
+                "request_id": row["request_id"],
+                "grant_hash": row["grant_hash"],
             }
+            if row["grant_json"] is not None:
+                lease_grants.setdefault(row["job_id"], {})[row["node_id"]] = (
+                    JobLeaseGrant.from_dict(json.loads(row["grant_json"]))
+                )
             if row["acknowledged_at"] is not None:
                 lease_acknowledged_at.setdefault(row["job_id"], {})[row["node_id"]] = float(row["acknowledged_at"])
             if row["acknowledgement_json"] is not None:
@@ -205,6 +230,7 @@ class SQLiteCoordinatorStore:
             lease_started_at,
             lease_expires_at,
             lease_acknowledged_at,
+            lease_grants,
             lease_acknowledgements,
             expired_leases,
         )
@@ -220,7 +246,17 @@ class SQLiteCoordinatorStore:
                 (job.job_id, json.dumps(job.to_dict(), sort_keys=True), time.time()),
             )
 
-    def save_lease(self, job_id: str, node_id: str, *, leased_at: float, expires_at: float) -> None:
+    def save_lease(
+        self,
+        job_id: str,
+        node_id: str,
+        *,
+        leased_at: float,
+        expires_at: float,
+        grant: JobLeaseGrant | None = None,
+    ) -> None:
+        grant_json = json.dumps(grant.to_dict(), sort_keys=True) if grant is not None else None
+        grant_hash = grant.grant_hash() if grant is not None else None
         with self.connect() as connection:
             connection.execute(
                 "UPDATE jobs SET leased_to = ? WHERE job_id = ?",
@@ -235,19 +271,37 @@ class SQLiteCoordinatorStore:
                     leased_at,
                     expires_at,
                     expired_at,
+                    lease_id,
+                    request_id,
+                    grant_json,
+                    grant_hash,
                     acknowledged_at,
                     acknowledgement_json
                 )
-                VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)
+                VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, NULL, NULL)
                 ON CONFLICT(job_id, node_id) DO UPDATE SET
                     created_at = excluded.created_at,
                     leased_at = excluded.leased_at,
                     expires_at = excluded.expires_at,
                     expired_at = NULL,
+                    lease_id = excluded.lease_id,
+                    request_id = excluded.request_id,
+                    grant_json = excluded.grant_json,
+                    grant_hash = excluded.grant_hash,
                     acknowledged_at = NULL,
                     acknowledgement_json = NULL
                 """,
-                (job_id, node_id, leased_at, leased_at, expires_at),
+                (
+                    job_id,
+                    node_id,
+                    leased_at,
+                    leased_at,
+                    expires_at,
+                    grant.lease_id if grant is not None else None,
+                    grant.request_id if grant is not None else None,
+                    grant_json,
+                    grant_hash,
+                ),
             )
 
     def save_lease_acknowledgement(self, acknowledgement: JobLeaseAcknowledgement) -> None:
@@ -318,6 +372,29 @@ class SQLiteCoordinatorStore:
         with self.connect() as connection:
             rows = connection.execute("SELECT * FROM credits").fetchall()
         return {row["node_id"]: int(row["credits"]) for row in rows}
+
+    def load_seen_packet_ids(self) -> set[str]:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT packet_id FROM seen_packets").fetchall()
+        return {row["packet_id"] for row in rows}
+
+    def save_seen_packet(
+        self,
+        *,
+        packet_id: str,
+        packet_type: str,
+        node_id: str,
+        created_at: float,
+        seen_at: float,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO seen_packets (packet_id, packet_type, node_id, created_at, seen_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (packet_id, packet_type, node_id, created_at, seen_at),
+            )
 
     def set_credit(self, node_id: str, credits: int) -> None:
         with self.connect() as connection:

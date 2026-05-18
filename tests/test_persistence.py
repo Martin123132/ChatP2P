@@ -1,6 +1,6 @@
 from chatp2p.coordinator import Coordinator
 from chatp2p.crypto import NodeIdentity
-from chatp2p.packets import JobLeaseAcknowledgement, JobLeaseRequest, NodeRegistration
+from chatp2p.packets import JobLeaseAcknowledgement, JobLeaseGrant, JobLeaseRequest, NodeRegistration
 from chatp2p.storage import SQLiteCoordinatorStore
 from chatp2p.worker import WorkerNode
 
@@ -87,12 +87,11 @@ def test_sqlite_store_restores_signed_lease_acknowledgement(tmp_path):
     leased = coordinator.lease_next_signed_job(JobLeaseRequest.create(node=worker_identity))
     assert leased is not None
     job, lease = leased
+    grant = JobLeaseGrant.from_dict(lease["grant"])
     assert coordinator.acknowledge_lease(
         JobLeaseAcknowledgement.create(
             node=worker_identity,
-            job_id=job.job_id,
-            leased_at=lease["leased_at"],
-            expires_at=lease["expires_at"],
+            grant=grant,
         )
     )
 
@@ -104,3 +103,31 @@ def test_sqlite_store_restores_signed_lease_acknowledgement(tmp_path):
 
     assert summary["acknowledged_lease_count"] == 1
     assert summary["leases"][0]["acknowledged"] is True
+    assert summary["leases"][0]["lease_id"] == grant.lease_id
+    assert summary["leases"][0]["grant_hash"] == grant.grant_hash()
+
+
+def test_sqlite_store_restores_seen_packet_replay_cache(tmp_path):
+    db_path = tmp_path / "coordinator.sqlite3"
+    coordinator_identity = NodeIdentity.generate(prefix="coordinator")
+    worker_identity = NodeIdentity.generate(prefix="worker")
+    worker = WorkerNode(identity=worker_identity)
+
+    coordinator = Coordinator(
+        identity=coordinator_identity,
+        store=SQLiteCoordinatorStore(db_path),
+    )
+    assert coordinator.register_signed_node(
+        NodeRegistration.create(node=worker_identity, capabilities=worker.capabilities())
+    )
+    coordinator.create_echo_inference_job("persist replay cache")
+    request = JobLeaseRequest.create(node=worker_identity)
+    assert coordinator.lease_next_signed_job(request) is not None
+
+    restarted = Coordinator(
+        identity=coordinator_identity,
+        store=SQLiteCoordinatorStore(db_path),
+    )
+
+    assert restarted.signed_node_packet_rejection_reason(request) == "replayed packet"
+    assert restarted.lease_next_signed_job(request) is None

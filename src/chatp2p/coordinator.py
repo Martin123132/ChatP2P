@@ -7,11 +7,21 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .crypto import NodeIdentity
-from .packets import JobLeaseAcknowledgement, JobLeaseRequest, JobPacket, JobResult, NodeHeartbeat, NodeRegistration
+from .packets import (
+    JobLeaseAcknowledgement,
+    JobLeaseGrant,
+    JobLeaseRequest,
+    JobPacket,
+    JobResult,
+    NodeHeartbeat,
+    NodeRegistration,
+)
 from .storage import SQLiteCoordinatorStore
 
 DEFAULT_LEASE_TIMEOUT_SECONDS = 30.0
 DEFAULT_NODE_STALE_SECONDS = 60.0
+DEFAULT_PACKET_MAX_AGE_SECONDS = 300.0
+DEFAULT_PACKET_FUTURE_SKEW_SECONDS = 30.0
 
 
 @dataclass
@@ -20,6 +30,8 @@ class Coordinator:
     store: SQLiteCoordinatorStore | None = None
     lease_timeout_seconds: float = DEFAULT_LEASE_TIMEOUT_SECONDS
     node_stale_seconds: float = DEFAULT_NODE_STALE_SECONDS
+    packet_max_age_seconds: float = DEFAULT_PACKET_MAX_AGE_SECONDS
+    packet_future_skew_seconds: float = DEFAULT_PACKET_FUTURE_SKEW_SECONDS
     known_nodes: dict[str, NodeIdentity] = field(default_factory=dict)
     node_capabilities: dict[str, dict[str, Any]] = field(default_factory=dict)
     node_last_seen: dict[str, float] = field(default_factory=dict)
@@ -27,9 +39,11 @@ class Coordinator:
     leased_jobs: dict[str, set[str]] = field(default_factory=dict)
     lease_started_at: dict[str, dict[str, float]] = field(default_factory=dict)
     lease_expires_at: dict[str, dict[str, float]] = field(default_factory=dict)
+    lease_grants: dict[str, dict[str, JobLeaseGrant]] = field(default_factory=dict)
     lease_acknowledged_at: dict[str, dict[str, float]] = field(default_factory=dict)
     lease_acknowledgements: dict[str, dict[str, JobLeaseAcknowledgement]] = field(default_factory=dict)
     expired_leases: list[dict[str, Any]] = field(default_factory=list)
+    seen_packet_ids: set[str] = field(default_factory=set)
     results: dict[str, list[JobResult]] = field(default_factory=dict)
     credits: dict[str, int] = field(default_factory=dict)
 
@@ -44,11 +58,13 @@ class Coordinator:
             stored_lease_started_at,
             stored_lease_expires_at,
             stored_lease_acknowledged_at,
+            stored_lease_grants,
             stored_lease_acknowledgements,
             stored_expired_leases,
         ) = self.store.load_jobs(default_lease_timeout_seconds=self.lease_timeout_seconds)
         stored_results = self.store.load_results()
         stored_credits = self.store.load_credits()
+        stored_seen_packet_ids = self.store.load_seen_packet_ids()
 
         self.known_nodes.update(stored_nodes)
         self.node_capabilities.update(stored_capabilities)
@@ -57,11 +73,13 @@ class Coordinator:
         self.leased_jobs.update(stored_leases)
         self.lease_started_at.update(stored_lease_started_at)
         self.lease_expires_at.update(stored_lease_expires_at)
+        self.lease_grants.update(stored_lease_grants)
         self.lease_acknowledged_at.update(stored_lease_acknowledged_at)
         self.lease_acknowledgements.update(stored_lease_acknowledgements)
         self.expired_leases.extend(stored_expired_leases)
         self.results.update(stored_results)
         self.credits.update(stored_credits)
+        self.seen_packet_ids.update(stored_seen_packet_ids)
         self.reap_expired_leases()
 
     def register_node(self, node: NodeIdentity, capabilities: dict[str, Any] | None = None) -> None:
@@ -88,7 +106,7 @@ class Coordinator:
         return True
 
     def record_signed_heartbeat(self, heartbeat: NodeHeartbeat) -> bool:
-        if not self.verify_signed_node_packet(heartbeat):
+        if not self.consume_signed_node_packet(heartbeat):
             return False
         return self.touch_node(heartbeat.node_id)
 
@@ -99,6 +117,36 @@ class Coordinator:
         if known_node.public_key != packet.node_public_key:
             return False
         return bool(packet.verify_signature())
+
+    def consume_signed_node_packet(self, packet: Any, now: float | None = None) -> bool:
+        timestamp = round(now if now is not None else time.time(), 3)
+        if self.signed_node_packet_rejection_reason(packet, now=timestamp) is not None:
+            return False
+
+        packet_id = self._packet_replay_id(packet)
+        self.seen_packet_ids.add(packet_id)
+        if self.store is not None:
+            self.store.save_seen_packet(
+                packet_id=packet_id,
+                packet_type=packet.packet_type,
+                node_id=packet.node_id,
+                created_at=packet.created_at,
+                seen_at=timestamp,
+            )
+        return True
+
+    def signed_node_packet_rejection_reason(self, packet: Any, now: float | None = None) -> str | None:
+        timestamp = round(now if now is not None else time.time(), 3)
+        packet_id = self._packet_replay_id(packet)
+        if not packet_id:
+            return "missing packet id"
+        if packet_id in self.seen_packet_ids:
+            return "replayed packet"
+        if not self.verify_signed_node_packet(packet):
+            return "invalid signature"
+        if not self._packet_is_fresh(packet, now=timestamp):
+            return "stale packet"
+        return None
 
     def create_math_eval_job(self) -> JobPacket:
         return self.create_job(
@@ -313,7 +361,7 @@ class Coordinator:
             "expected": expected,
         }
 
-    def lease_next_job(self, node_id: str) -> JobPacket | None:
+    def lease_next_job(self, node_id: str, request_id: str | None = None) -> JobPacket | None:
         now = time.time()
         self.reap_expired_leases(now=now)
         if node_id not in self.known_nodes:
@@ -328,25 +376,43 @@ class Coordinator:
             leased_to.add(node_id)
             self.lease_started_at.setdefault(job_id, {})[node_id] = leased_at
             self.lease_expires_at.setdefault(job_id, {})[node_id] = expires_at
+            grant = None
+            if request_id is not None:
+                node = self.known_nodes[node_id]
+                grant = JobLeaseGrant.create(
+                    coordinator=self.identity,
+                    request_id=request_id,
+                    job_id=job_id,
+                    node_id=node_id,
+                    node_public_key=node.public_key,
+                    leased_at=leased_at,
+                    expires_at=expires_at,
+                )
+                self.lease_grants.setdefault(job_id, {})[node_id] = grant
             if self.store is not None:
-                self.store.save_lease(job_id, node_id, leased_at=leased_at, expires_at=expires_at)
+                self.store.save_lease(job_id, node_id, leased_at=leased_at, expires_at=expires_at, grant=grant)
             return job
         return None
 
     def lease_next_signed_job(self, request: JobLeaseRequest) -> tuple[JobPacket, dict[str, Any]] | None:
-        if not self.verify_signed_node_packet(request):
+        if not self.consume_signed_node_packet(request):
             return None
-        job = self.lease_next_job(request.node_id)
+        job = self.lease_next_job(request.node_id, request_id=request.request_id)
         if job is None:
             return None
         return job, self.lease_metadata(job.job_id, request.node_id)
 
     def lease_metadata(self, job_id: str, node_id: str) -> dict[str, Any]:
+        grant = self.lease_grants.get(job_id, {}).get(node_id)
         return {
             "job_id": job_id,
             "node_id": node_id,
             "leased_at": self.lease_started_at.get(job_id, {}).get(node_id),
             "expires_at": self.lease_expires_at.get(job_id, {}).get(node_id),
+            "lease_id": grant.lease_id if grant is not None else None,
+            "request_id": grant.request_id if grant is not None else None,
+            "grant": grant.to_dict() if grant is not None else None,
+            "grant_hash": grant.grant_hash() if grant is not None else None,
             "acknowledged": node_id in self.lease_acknowledged_at.get(job_id, {}),
             "acknowledged_at": self.lease_acknowledged_at.get(job_id, {}).get(node_id),
         }
@@ -354,7 +420,7 @@ class Coordinator:
     def acknowledge_lease(self, acknowledgement: JobLeaseAcknowledgement) -> bool:
         now = time.time()
         self.reap_expired_leases(now=now)
-        if not self.verify_signed_node_packet(acknowledgement):
+        if not self.consume_signed_node_packet(acknowledgement, now=now):
             return False
         if acknowledgement.job_id not in self.jobs:
             return False
@@ -363,11 +429,14 @@ class Coordinator:
         if self._lease_is_expired(acknowledgement.job_id, acknowledgement.node_id, now):
             return False
 
-        leased_at = self.lease_started_at.get(acknowledgement.job_id, {}).get(acknowledgement.node_id)
-        expires_at = self.lease_expires_at.get(acknowledgement.job_id, {}).get(acknowledgement.node_id)
-        if leased_at is None or expires_at is None:
+        grant = self.lease_grants.get(acknowledgement.job_id, {}).get(acknowledgement.node_id)
+        if grant is None:
             return False
-        if acknowledgement.leased_at != leased_at or acknowledgement.expires_at != expires_at:
+        if not self._grant_matches_coordinator(grant):
+            return False
+        if acknowledgement.lease_id != grant.lease_id:
+            return False
+        if acknowledgement.grant_hash != grant.grant_hash():
             return False
 
         self.lease_acknowledged_at.setdefault(acknowledgement.job_id, {})[
@@ -436,6 +505,7 @@ class Coordinator:
                 leased_at = self.lease_started_at.get(job_id, {}).pop(node_id, None)
                 self.lease_expires_at.get(job_id, {}).pop(node_id, None)
                 acknowledged_at = self.lease_acknowledged_at.get(job_id, {}).pop(node_id, None)
+                grant = self.lease_grants.get(job_id, {}).pop(node_id, None)
                 self.lease_acknowledgements.get(job_id, {}).pop(node_id, None)
                 lease = {
                     "job_id": job_id,
@@ -444,6 +514,9 @@ class Coordinator:
                     "expires_at": expires_at,
                     "expired_at": timestamp,
                     "acknowledged_at": acknowledged_at,
+                    "lease_id": grant.lease_id if grant is not None else None,
+                    "request_id": grant.request_id if grant is not None else None,
+                    "grant_hash": grant.grant_hash() if grant is not None else None,
                 }
                 self.expired_leases.append(lease)
                 expired.append(lease)
@@ -757,6 +830,7 @@ class Coordinator:
         summaries: list[dict[str, Any]] = []
         for node_id in sorted(self.leased_jobs.get(job_id, set())):
             expires_at = self.lease_expires_at.get(job_id, {}).get(node_id)
+            grant = self.lease_grants.get(job_id, {}).get(node_id)
             status = "completed" if node_id in result_node_ids else "active"
             summaries.append(
                 {
@@ -765,6 +839,9 @@ class Coordinator:
                     "status": status,
                     "leased_at": self.lease_started_at.get(job_id, {}).get(node_id),
                     "expires_at": expires_at,
+                    "lease_id": grant.lease_id if grant is not None else None,
+                    "request_id": grant.request_id if grant is not None else None,
+                    "grant_hash": grant.grant_hash() if grant is not None else None,
                     "acknowledged": node_id in self.lease_acknowledged_at.get(job_id, {}),
                     "acknowledged_at": self.lease_acknowledged_at.get(job_id, {}).get(node_id),
                     "expires_in_seconds": (
@@ -781,6 +858,9 @@ class Coordinator:
                 "status": "expired",
                 "leased_at": lease["leased_at"],
                 "expires_at": lease["expires_at"],
+                "lease_id": lease.get("lease_id"),
+                "request_id": lease.get("request_id"),
+                "grant_hash": lease.get("grant_hash"),
                 "acknowledged": lease.get("acknowledged_at") is not None,
                 "acknowledged_at": lease.get("acknowledged_at"),
                 "expires_in_seconds": None,
@@ -790,6 +870,29 @@ class Coordinator:
             if lease["job_id"] == job_id
         )
         return summaries
+
+    def _packet_replay_id(self, packet: Any) -> str | None:
+        if isinstance(packet, NodeHeartbeat):
+            return packet.heartbeat_id
+        if isinstance(packet, JobLeaseRequest):
+            return packet.request_id
+        if isinstance(packet, JobLeaseAcknowledgement):
+            return packet.acknowledgement_id
+        return None
+
+    def _packet_is_fresh(self, packet: Any, now: float | None = None) -> bool:
+        timestamp = now if now is not None else time.time()
+        created_at = packet.created_at
+        if created_at > timestamp + self.packet_future_skew_seconds:
+            return False
+        return timestamp - created_at <= self.packet_max_age_seconds
+
+    def _grant_matches_coordinator(self, grant: JobLeaseGrant) -> bool:
+        if grant.coordinator_id != self.identity.node_id:
+            return False
+        if grant.coordinator_public_key != self.identity.public_key:
+            return False
+        return grant.verify_signature()
 
     def _node_liveness_status(self, node_id: str, now: float | None = None) -> str:
         last_seen_at = self.node_last_seen.get(node_id)

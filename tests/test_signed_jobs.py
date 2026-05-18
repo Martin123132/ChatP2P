@@ -1,6 +1,13 @@
 from chatp2p.coordinator import Coordinator
 from chatp2p.crypto import NodeIdentity
-from chatp2p.packets import JobLeaseAcknowledgement, JobLeaseRequest, JobResult, NodeHeartbeat, NodeRegistration
+from chatp2p.packets import (
+    JobLeaseAcknowledgement,
+    JobLeaseGrant,
+    JobLeaseRequest,
+    JobResult,
+    NodeHeartbeat,
+    NodeRegistration,
+)
 from chatp2p.worker import WorkerNode
 
 
@@ -87,6 +94,27 @@ def test_signed_heartbeat_rejects_spoofed_node_id():
     assert coordinator.node_last_seen[worker_identity.node_id] == original_last_seen
 
 
+def test_signed_heartbeat_replay_and_stale_packets_are_rejected(monkeypatch):
+    worker_identity = NodeIdentity.generate(prefix="worker")
+    worker = WorkerNode(identity=worker_identity)
+    coordinator = Coordinator(
+        identity=NodeIdentity.generate(prefix="coordinator"),
+        packet_max_age_seconds=10,
+    )
+    coordinator.register_node(worker_identity.public(), capabilities=worker.capabilities())
+
+    heartbeat = NodeHeartbeat.create(node=worker_identity)
+
+    assert coordinator.record_signed_heartbeat(heartbeat)
+    assert coordinator.record_signed_heartbeat(heartbeat) is False
+
+    monkeypatch.setattr("chatp2p.packets.time.time", lambda: 100.0)
+    stale = NodeHeartbeat.create(node=worker_identity)
+    monkeypatch.undo()
+
+    assert coordinator.record_signed_heartbeat(stale) is False
+
+
 def test_signed_lease_request_requires_acknowledgement():
     coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
     worker_identity = NodeIdentity.generate(prefix="worker")
@@ -99,25 +127,62 @@ def test_signed_lease_request_requires_acknowledgement():
 
     assert leased is not None
     job, lease = leased
+    grant = JobLeaseGrant.from_dict(lease["grant"])
     attacker_ack = JobLeaseAcknowledgement.create(
         node=attacker_identity,
-        job_id=job.job_id,
-        leased_at=lease["leased_at"],
-        expires_at=lease["expires_at"],
+        grant=grant,
     )
     assert coordinator.acknowledge_lease(attacker_ack) is False
 
     acknowledgement = JobLeaseAcknowledgement.create(
         node=worker_identity,
-        job_id=job.job_id,
-        leased_at=lease["leased_at"],
-        expires_at=lease["expires_at"],
+        grant=grant,
     )
 
     assert coordinator.acknowledge_lease(acknowledgement)
     summary = coordinator.job_summaries()[0]
     assert summary["acknowledged_lease_count"] == 1
     assert summary["leases"][0]["acknowledged"] is True
+
+
+def test_signed_lease_request_replay_is_rejected():
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    worker_identity = NodeIdentity.generate(prefix="worker")
+    worker = WorkerNode(identity=worker_identity)
+    coordinator.register_node(worker_identity.public(), capabilities=worker.capabilities())
+    coordinator.create_echo_inference_job("replay request")
+    request = JobLeaseRequest.create(node=worker_identity)
+
+    assert coordinator.lease_next_signed_job(request) is not None
+
+    assert coordinator.lease_next_signed_job(request) is None
+    assert coordinator.signed_node_packet_rejection_reason(request) == "replayed packet"
+
+
+def test_lease_acknowledgement_replay_and_tampered_grant_are_rejected():
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    worker_identity = NodeIdentity.generate(prefix="worker")
+    worker = WorkerNode(identity=worker_identity)
+    coordinator.register_node(worker_identity.public(), capabilities=worker.capabilities())
+    coordinator.create_echo_inference_job("grant hash")
+    leased = coordinator.lease_next_signed_job(JobLeaseRequest.create(node=worker_identity))
+    assert leased is not None
+    job, lease = leased
+    grant = JobLeaseGrant.from_dict(lease["grant"])
+
+    tampered_grant_data = grant.to_dict()
+    tampered_grant_data["expires_at"] = tampered_grant_data["expires_at"] + 30
+    tampered_ack = JobLeaseAcknowledgement.create(
+        node=worker_identity,
+        grant=JobLeaseGrant.from_dict(tampered_grant_data),
+    )
+    assert coordinator.acknowledge_lease(tampered_ack) is False
+
+    acknowledgement = JobLeaseAcknowledgement.create(node=worker_identity, grant=grant)
+
+    assert coordinator.acknowledge_lease(acknowledgement)
+    assert coordinator.acknowledge_lease(acknowledgement) is False
+    assert coordinator.signed_node_packet_rejection_reason(acknowledgement) == "replayed packet"
 
 
 def test_coordinator_leases_only_supported_job_types():
