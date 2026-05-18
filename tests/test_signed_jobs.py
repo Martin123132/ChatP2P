@@ -239,3 +239,128 @@ def test_verified_job_flags_mismatching_worker_reputation():
     assert reputation[identities[2].node_id]["verified_matches"] == 1
     assert reputation[identities[1].node_id]["mismatches"] == 1
     assert reputation[identities[1].node_id]["status"] == "flagged"
+
+
+def test_flagged_worker_skips_ordinary_queued_jobs():
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    identities = [NodeIdentity.generate(prefix="worker") for _ in range(3)]
+    workers = [WorkerNode(identity=identity) for identity in identities]
+    for worker in workers:
+        coordinator.register_node(worker.identity.public(), capabilities=worker.capabilities())
+
+    first_job = coordinator.create_job(
+        job_type="eval.deterministic.v1",
+        payload={
+            "task": "arithmetic",
+            "operation": "add",
+            "operands": [8, 1],
+            "expected": 9,
+        },
+    )
+    assert coordinator.submit_result(workers[0].run_job(coordinator.lease_next_job(identities[0].node_id)))
+    leased_bad = coordinator.lease_next_job(identities[1].node_id)
+    assert leased_bad is not None
+    wrong = JobResult.create(
+        node=identities[1],
+        job=leased_bad,
+        output={"passed": False, "answer": 10, "expected": 9, "confidence": 1.0},
+    )
+    assert coordinator.submit_result(wrong)
+    assert coordinator.submit_result(workers[2].run_job(coordinator.lease_next_job(identities[2].node_id)))
+    assert coordinator.verification_summary(first_job.job_id)["status"] == "verified"
+    assert coordinator.reputation_summaries()[identities[1].node_id]["status"] == "flagged"
+
+    coordinator.create_echo_inference_job("ordinary queued work")
+
+    assert coordinator.lease_next_job(identities[1].node_id) is None
+
+
+def test_reliable_worker_gets_pending_verification_before_queued_work():
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    reliable_identity = NodeIdentity.generate(prefix="worker")
+    helper_identity = NodeIdentity.generate(prefix="worker")
+    reliable_worker = WorkerNode(identity=reliable_identity)
+    helper_worker = WorkerNode(identity=helper_identity)
+    coordinator.register_node(reliable_identity.public(), capabilities=reliable_worker.capabilities())
+    coordinator.register_node(helper_identity.public(), capabilities=helper_worker.capabilities())
+
+    reputation_job = coordinator.create_echo_inference_job("build initial score")
+    leased_reputation = coordinator.lease_next_job(reliable_identity.node_id)
+    assert leased_reputation is not None
+    assert leased_reputation.job_id == reputation_job.job_id
+    assert coordinator.submit_result(reliable_worker.run_job(leased_reputation))
+    assert coordinator.reputation_summaries()[reliable_identity.node_id]["status"] == "ok"
+
+    pending_job = coordinator.create_job(
+        job_type="eval.deterministic.v1",
+        payload={
+            "task": "arithmetic",
+            "operation": "multiply",
+            "operands": [5, 5],
+            "expected": 25,
+        },
+    )
+    leased_helper = coordinator.lease_next_job(helper_identity.node_id)
+    assert leased_helper is not None
+    assert leased_helper.job_id == pending_job.job_id
+    assert coordinator.submit_result(helper_worker.run_job(leased_helper))
+    coordinator.create_echo_inference_job("queued but less urgent")
+
+    leased_reliable = coordinator.lease_next_job(reliable_identity.node_id)
+
+    assert leased_reliable is not None
+    assert leased_reliable.job_id == pending_job.job_id
+
+
+def test_flagged_worker_can_take_conflict_tie_breaker():
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    identities = [NodeIdentity.generate(prefix="worker") for _ in range(6)]
+    workers = [WorkerNode(identity=identity) for identity in identities]
+    for worker in workers:
+        coordinator.register_node(worker.identity.public(), capabilities=worker.capabilities())
+
+    reputation_job = coordinator.create_job(
+        job_type="eval.deterministic.v1",
+        payload={
+            "task": "arithmetic",
+            "operation": "add",
+            "operands": [1, 2],
+            "expected": 3,
+        },
+    )
+    assert coordinator.submit_result(workers[0].run_job(coordinator.lease_next_job(identities[0].node_id)))
+    bad_reputation_job = coordinator.lease_next_job(identities[1].node_id)
+    assert bad_reputation_job is not None
+    bad_reputation_result = JobResult.create(
+        node=identities[1],
+        job=bad_reputation_job,
+        output={"passed": False, "answer": 4, "expected": 3, "confidence": 1.0},
+    )
+    assert coordinator.submit_result(bad_reputation_result)
+    assert coordinator.submit_result(workers[2].run_job(coordinator.lease_next_job(identities[2].node_id)))
+    assert coordinator.verification_summary(reputation_job.job_id)["status"] == "verified"
+    assert coordinator.reputation_summaries()[identities[1].node_id]["status"] == "flagged"
+
+    conflict_job = coordinator.create_job(
+        job_type="eval.deterministic.v1",
+        payload={
+            "task": "arithmetic",
+            "operation": "add",
+            "operands": [10, 5],
+            "expected": 15,
+        },
+    )
+    assert coordinator.submit_result(workers[3].run_job(coordinator.lease_next_job(identities[3].node_id)))
+    conflict_bad_job = coordinator.lease_next_job(identities[4].node_id)
+    assert conflict_bad_job is not None
+    conflict_bad_result = JobResult.create(
+        node=identities[4],
+        job=conflict_bad_job,
+        output={"passed": False, "answer": 14, "expected": 15, "confidence": 1.0},
+    )
+    assert coordinator.submit_result(conflict_bad_result)
+
+    tie_breaker = coordinator.lease_next_job(identities[1].node_id)
+
+    assert tie_breaker is not None
+    assert tie_breaker.job_id == conflict_job.job_id

@@ -46,6 +46,7 @@ def test_http_worker_registers_leases_job_and_submits_result():
         assert len(snapshot["jobs"]) == 4
         assert len(snapshot["results"]) == 1
         assert len(snapshot["reputation"]) == 1
+        assert snapshot["leasing_policy"]["flagged_order"] == ["tie_breaker"]
         assert snapshot["reputation"][0]["status"] == "new"
         leased_snapshot_job = next(item for item in snapshot["jobs"] if item["job_id"] == job.job_id)
         assert leased_snapshot_job["status"] == "pending"

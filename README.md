@@ -110,6 +110,18 @@ Current node reputation states:
 - `watch`: positive score but some mismatch/dispute history
 - `flagged`: score below zero
 
+## Trust-Aware Leasing
+
+Workers pull jobs from the coordinator, so reputation affects which job the coordinator offers next:
+
+- `trusted` and `ok` workers get pending verification and tie-breaker work before ordinary queued work.
+- `new` workers get ordinary queued work first, then pending verification work if no queue work is available.
+- `watch` workers can still work, but they are not preferred for normal quorum verification.
+- `flagged` workers do not receive ordinary queued work.
+- `flagged` workers may receive a conflicting pending job only when the coordinator needs a tie-breaker result.
+
+The active leasing policy is included in `GET /api/snapshot` and `GET /health`.
+
 ## Product Direction
 
 The first product goal is a one-click node that lets normal machines contribute useful work: deterministic evals, inference jobs, dataset review, verification, model feedback, and later distributed fine-tuning.

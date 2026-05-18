@@ -274,21 +274,13 @@ class Coordinator:
         if node_id not in self.known_nodes:
             return None
 
-        for job_id, job in self.jobs.items():
-            if self._job_is_terminal(job_id):
-                continue
-            if not self._node_supports_job(node_id, job):
-                continue
-            if any(result.node_id == node_id for result in self.results.get(job_id, [])):
-                continue
+        for job_id in self._lease_candidates_for_node(node_id):
+            job = self.jobs[job_id]
             leased_to = self.leased_jobs.setdefault(job_id, set())
-            if node_id in leased_to:
-                continue
-            if len(leased_to) < self._max_results_for_job(job):
-                leased_to.add(node_id)
-                if self.store is not None:
-                    self.store.save_lease(job_id, node_id)
-                return job
+            leased_to.add(node_id)
+            if self.store is not None:
+                self.store.save_lease(job_id, node_id)
+            return job
         return None
 
     def submit_result(self, result: JobResult) -> bool:
@@ -339,6 +331,7 @@ class Coordinator:
             "verified_jobs": verified_jobs,
             "disputed_jobs": disputed_jobs,
             "credits": dict(self.credits),
+            "leasing_policy": self.leasing_policy(),
         }
 
     def node_summaries(self) -> list[dict[str, Any]]:
@@ -442,6 +435,17 @@ class Coordinator:
             "jobs": self.job_summaries(),
             "results": self.result_summaries(),
             "reputation": list(self.reputation_summaries().values()),
+            "leasing_policy": self.leasing_policy(),
+        }
+
+    def leasing_policy(self) -> dict[str, Any]:
+        return {
+            "trusted_statuses": ["trusted", "ok"],
+            "trusted_order": ["tie_breaker", "pending_verification", "queued"],
+            "new_order": ["queued", "pending_verification", "tie_breaker"],
+            "watch_order": ["queued", "tie_breaker", "pending_verification"],
+            "flagged_order": ["tie_breaker"],
+            "flagged_rule": "Flagged workers receive only conflicting pending jobs that need a tie-breaker.",
         }
 
     def _node_supports_job(self, node_id: str, job: JobPacket) -> bool:
@@ -450,6 +454,72 @@ class Coordinator:
         if not supported_job_types:
             return False
         return job.job_type in supported_job_types
+
+    def _lease_candidates_for_node(self, node_id: str) -> list[str]:
+        reputation = self.reputation_summaries().get(node_id, self._empty_reputation(node_id))
+        candidates = []
+        for job_id, job in self.jobs.items():
+            priority = self._lease_priority(node_id, reputation, job_id, job)
+            if priority is None:
+                continue
+            candidates.append((priority, job_id))
+        return [job_id for _, job_id in sorted(candidates)]
+
+    def _lease_priority(
+        self,
+        node_id: str,
+        reputation: dict[str, Any],
+        job_id: str,
+        job: JobPacket,
+    ) -> tuple[int, str] | None:
+        if self._job_is_terminal(job_id):
+            return None
+        if not self._node_supports_job(node_id, job):
+            return None
+        if any(result.node_id == node_id for result in self.results.get(job_id, [])):
+            return None
+
+        leased_to = self.leased_jobs.get(job_id, set())
+        if node_id in leased_to:
+            return None
+        if len(leased_to) >= self._max_results_for_job(job):
+            return None
+
+        verification = self.verification_summary(job_id)
+        if verification["status"] == "leased" and len(self._active_leases(job_id)) >= self._required_results_for_job(job):
+            return None
+
+        kind = self._verification_need_kind(job_id)
+        status = reputation["status"]
+
+        if status == "flagged":
+            if kind == "tie_breaker":
+                return (0, job_id)
+            return None
+
+        if status in {"trusted", "ok"}:
+            order = {"tie_breaker": 0, "pending_verification": 1, "queued": 2, "leased": 3}
+        elif status == "watch":
+            order = {"queued": 0, "tie_breaker": 1, "pending_verification": 2, "leased": 3}
+        else:
+            order = {"queued": 0, "pending_verification": 1, "tie_breaker": 2, "leased": 3}
+
+        priority = order.get(kind)
+        if priority is None:
+            return None
+        return (priority, job_id)
+
+    def _verification_need_kind(self, job_id: str) -> str:
+        verification = self.verification_summary(job_id)
+        if verification["status"] == "queued":
+            return "queued"
+        if verification["status"] == "leased":
+            return "leased"
+        if verification["status"] == "pending":
+            if len(verification["output_hash_counts"]) > 1:
+                return "tie_breaker"
+            return "pending_verification"
+        return verification["status"]
 
     def verification_summary(self, job_id: str) -> dict[str, Any]:
         job = self.jobs[job_id]
