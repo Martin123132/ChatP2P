@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chatp2p"
+version = "0.1.0"
+description = "A peer-to-peer AI job mesh prototype with signed work packets and verified results."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "cryptography>=42.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[project.scripts]
+chatp2p = "chatp2p.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
