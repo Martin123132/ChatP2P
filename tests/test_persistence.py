@@ -1,6 +1,6 @@
 from chatp2p.coordinator import Coordinator
 from chatp2p.crypto import NodeIdentity
-from chatp2p.packets import NodeRegistration
+from chatp2p.packets import JobLeaseAcknowledgement, JobLeaseRequest, NodeRegistration
 from chatp2p.storage import SQLiteCoordinatorStore
 from chatp2p.worker import WorkerNode
 
@@ -68,3 +68,39 @@ def test_sqlite_store_restores_active_lease_metadata(tmp_path):
     assert summary["leases"][0]["status"] == "active"
     assert summary["leases"][0]["expires_at"] is not None
     assert restarted.node_summaries()[0]["liveness_status"] == "live"
+
+
+def test_sqlite_store_restores_signed_lease_acknowledgement(tmp_path):
+    db_path = tmp_path / "coordinator.sqlite3"
+    coordinator_identity = NodeIdentity.generate(prefix="coordinator")
+    worker_identity = NodeIdentity.generate(prefix="worker")
+    worker = WorkerNode(identity=worker_identity)
+
+    coordinator = Coordinator(
+        identity=coordinator_identity,
+        store=SQLiteCoordinatorStore(db_path),
+    )
+    assert coordinator.register_signed_node(
+        NodeRegistration.create(node=worker_identity, capabilities=worker.capabilities())
+    )
+    coordinator.create_echo_inference_job("persist this acknowledgement")
+    leased = coordinator.lease_next_signed_job(JobLeaseRequest.create(node=worker_identity))
+    assert leased is not None
+    job, lease = leased
+    assert coordinator.acknowledge_lease(
+        JobLeaseAcknowledgement.create(
+            node=worker_identity,
+            job_id=job.job_id,
+            leased_at=lease["leased_at"],
+            expires_at=lease["expires_at"],
+        )
+    )
+
+    restarted = Coordinator(
+        identity=coordinator_identity,
+        store=SQLiteCoordinatorStore(db_path),
+    )
+    summary = next(item for item in restarted.job_summaries() if item["job_id"] == job.job_id)
+
+    assert summary["acknowledged_lease_count"] == 1
+    assert summary["leases"][0]["acknowledged"] is True

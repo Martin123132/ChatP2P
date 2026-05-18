@@ -202,7 +202,7 @@ def _register_worker(client: CoordinatorClient, worker: WorkerNode) -> None:
 
 
 def _run_one_remote_job(client: CoordinatorClient, worker: WorkerNode) -> dict:
-    job = client.next_job(worker.identity.node_id)
+    job = client.next_job(worker.identity)
     if job is None:
         return {"worker": worker.identity.node_id, "job": None, "status": "idle"}
 

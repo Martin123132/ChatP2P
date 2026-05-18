@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .crypto import NodeIdentity
-from .packets import JobPacket, JobResult, NodeRegistration
+from .packets import JobLeaseAcknowledgement, JobPacket, JobResult, NodeRegistration
 
 
 class SQLiteCoordinatorStore:
@@ -55,6 +55,8 @@ class SQLiteCoordinatorStore:
                     leased_at REAL,
                     expires_at REAL,
                     expired_at REAL,
+                    acknowledged_at REAL,
+                    acknowledgement_json TEXT,
                     PRIMARY KEY (job_id, node_id)
                 );
 
@@ -76,6 +78,8 @@ class SQLiteCoordinatorStore:
             self._ensure_column(connection, "leases", "leased_at", "REAL")
             self._ensure_column(connection, "leases", "expires_at", "REAL")
             self._ensure_column(connection, "leases", "expired_at", "REAL")
+            self._ensure_column(connection, "leases", "acknowledged_at", "REAL")
+            self._ensure_column(connection, "leases", "acknowledgement_json", "TEXT")
 
     def _ensure_column(self, connection: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         existing_columns = {
@@ -143,6 +147,8 @@ class SQLiteCoordinatorStore:
         dict[str, set[str]],
         dict[str, dict[str, float]],
         dict[str, dict[str, float]],
+        dict[str, dict[str, float]],
+        dict[str, dict[str, JobLeaseAcknowledgement]],
         list[dict[str, Any]],
     ]:
         with self.connect() as connection:
@@ -155,6 +161,8 @@ class SQLiteCoordinatorStore:
         leases: dict[str, set[str]] = {}
         lease_started_at: dict[str, dict[str, float]] = {}
         lease_expires_at: dict[str, dict[str, float]] = {}
+        lease_acknowledged_at: dict[str, dict[str, float]] = {}
+        lease_acknowledgements: dict[str, dict[str, JobLeaseAcknowledgement]] = {}
         expired_leases: list[dict[str, Any]] = []
         for row in rows:
             if row["leased_to"] is not None:
@@ -174,7 +182,16 @@ class SQLiteCoordinatorStore:
                 "leased_at": leased_at,
                 "expires_at": expires_at,
                 "expired_at": row["expired_at"],
+                "acknowledged_at": (
+                    float(row["acknowledged_at"]) if row["acknowledged_at"] is not None else None
+                ),
             }
+            if row["acknowledged_at"] is not None:
+                lease_acknowledged_at.setdefault(row["job_id"], {})[row["node_id"]] = float(row["acknowledged_at"])
+            if row["acknowledgement_json"] is not None:
+                lease_acknowledgements.setdefault(row["job_id"], {})[row["node_id"]] = (
+                    JobLeaseAcknowledgement.from_dict(json.loads(row["acknowledgement_json"]))
+                )
             if row["expired_at"] is None:
                 leases.setdefault(row["job_id"], set()).add(row["node_id"])
                 lease_started_at.setdefault(row["job_id"], {})[row["node_id"]] = leased_at
@@ -182,7 +199,15 @@ class SQLiteCoordinatorStore:
             else:
                 lease["expired_at"] = float(row["expired_at"])
                 expired_leases.append(lease)
-        return jobs, leases, lease_started_at, lease_expires_at, expired_leases
+        return (
+            jobs,
+            leases,
+            lease_started_at,
+            lease_expires_at,
+            lease_acknowledged_at,
+            lease_acknowledgements,
+            expired_leases,
+        )
 
     def save_job(self, job: JobPacket) -> None:
         with self.connect() as connection:
@@ -203,15 +228,43 @@ class SQLiteCoordinatorStore:
             )
             connection.execute(
                 """
-                INSERT INTO leases (job_id, node_id, created_at, leased_at, expires_at, expired_at)
-                VALUES (?, ?, ?, ?, ?, NULL)
+                INSERT INTO leases (
+                    job_id,
+                    node_id,
+                    created_at,
+                    leased_at,
+                    expires_at,
+                    expired_at,
+                    acknowledged_at,
+                    acknowledgement_json
+                )
+                VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)
                 ON CONFLICT(job_id, node_id) DO UPDATE SET
                     created_at = excluded.created_at,
                     leased_at = excluded.leased_at,
                     expires_at = excluded.expires_at,
-                    expired_at = NULL
+                    expired_at = NULL,
+                    acknowledged_at = NULL,
+                    acknowledgement_json = NULL
                 """,
                 (job_id, node_id, leased_at, leased_at, expires_at),
+            )
+
+    def save_lease_acknowledgement(self, acknowledgement: JobLeaseAcknowledgement) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE leases
+                SET acknowledged_at = ?,
+                    acknowledgement_json = ?
+                WHERE job_id = ? AND node_id = ? AND expired_at IS NULL
+                """,
+                (
+                    acknowledgement.created_at,
+                    json.dumps(acknowledgement.to_dict(), sort_keys=True),
+                    acknowledgement.job_id,
+                    acknowledgement.node_id,
+                ),
             )
 
     def mark_lease_expired(self, job_id: str, node_id: str, *, expired_at: float) -> None:

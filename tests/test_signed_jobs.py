@@ -1,6 +1,6 @@
 from chatp2p.coordinator import Coordinator
 from chatp2p.crypto import NodeIdentity
-from chatp2p.packets import JobResult, NodeRegistration
+from chatp2p.packets import JobLeaseAcknowledgement, JobLeaseRequest, JobResult, NodeHeartbeat, NodeRegistration
 from chatp2p.worker import WorkerNode
 
 
@@ -70,6 +70,54 @@ def test_coordinator_rejects_tampered_registration():
 
     assert coordinator.register_signed_node(registration) is False
     assert worker_identity.node_id not in coordinator.known_nodes
+
+
+def test_signed_heartbeat_rejects_spoofed_node_id():
+    worker_identity = NodeIdentity.generate(prefix="worker")
+    attacker_identity = NodeIdentity.generate(prefix="worker")
+    worker = WorkerNode(identity=worker_identity)
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    coordinator.register_node(worker_identity.public(), capabilities=worker.capabilities())
+    original_last_seen = coordinator.node_last_seen[worker_identity.node_id]
+
+    heartbeat_data = NodeHeartbeat.create(node=attacker_identity).to_dict()
+    heartbeat_data["node_id"] = worker_identity.node_id
+
+    assert coordinator.record_signed_heartbeat(NodeHeartbeat.from_dict(heartbeat_data)) is False
+    assert coordinator.node_last_seen[worker_identity.node_id] == original_last_seen
+
+
+def test_signed_lease_request_requires_acknowledgement():
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    worker_identity = NodeIdentity.generate(prefix="worker")
+    attacker_identity = NodeIdentity.generate(prefix="worker")
+    worker = WorkerNode(identity=worker_identity)
+    coordinator.register_node(worker_identity.public(), capabilities=worker.capabilities())
+    coordinator.create_echo_inference_job("signed lease flow")
+
+    leased = coordinator.lease_next_signed_job(JobLeaseRequest.create(node=worker_identity))
+
+    assert leased is not None
+    job, lease = leased
+    attacker_ack = JobLeaseAcknowledgement.create(
+        node=attacker_identity,
+        job_id=job.job_id,
+        leased_at=lease["leased_at"],
+        expires_at=lease["expires_at"],
+    )
+    assert coordinator.acknowledge_lease(attacker_ack) is False
+
+    acknowledgement = JobLeaseAcknowledgement.create(
+        node=worker_identity,
+        job_id=job.job_id,
+        leased_at=lease["leased_at"],
+        expires_at=lease["expires_at"],
+    )
+
+    assert coordinator.acknowledge_lease(acknowledgement)
+    summary = coordinator.job_summaries()[0]
+    assert summary["acknowledged_lease_count"] == 1
+    assert summary["leases"][0]["acknowledged"] is True
 
 
 def test_coordinator_leases_only_supported_job_types():

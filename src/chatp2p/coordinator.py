@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .crypto import NodeIdentity
-from .packets import JobPacket, JobResult, NodeRegistration
+from .packets import JobLeaseAcknowledgement, JobLeaseRequest, JobPacket, JobResult, NodeHeartbeat, NodeRegistration
 from .storage import SQLiteCoordinatorStore
 
 DEFAULT_LEASE_TIMEOUT_SECONDS = 30.0
@@ -27,6 +27,8 @@ class Coordinator:
     leased_jobs: dict[str, set[str]] = field(default_factory=dict)
     lease_started_at: dict[str, dict[str, float]] = field(default_factory=dict)
     lease_expires_at: dict[str, dict[str, float]] = field(default_factory=dict)
+    lease_acknowledged_at: dict[str, dict[str, float]] = field(default_factory=dict)
+    lease_acknowledgements: dict[str, dict[str, JobLeaseAcknowledgement]] = field(default_factory=dict)
     expired_leases: list[dict[str, Any]] = field(default_factory=list)
     results: dict[str, list[JobResult]] = field(default_factory=dict)
     credits: dict[str, int] = field(default_factory=dict)
@@ -41,6 +43,8 @@ class Coordinator:
             stored_leases,
             stored_lease_started_at,
             stored_lease_expires_at,
+            stored_lease_acknowledged_at,
+            stored_lease_acknowledgements,
             stored_expired_leases,
         ) = self.store.load_jobs(default_lease_timeout_seconds=self.lease_timeout_seconds)
         stored_results = self.store.load_results()
@@ -53,6 +57,8 @@ class Coordinator:
         self.leased_jobs.update(stored_leases)
         self.lease_started_at.update(stored_lease_started_at)
         self.lease_expires_at.update(stored_lease_expires_at)
+        self.lease_acknowledged_at.update(stored_lease_acknowledged_at)
+        self.lease_acknowledgements.update(stored_lease_acknowledgements)
         self.expired_leases.extend(stored_expired_leases)
         self.results.update(stored_results)
         self.credits.update(stored_credits)
@@ -80,6 +86,19 @@ class Coordinator:
         if self.store is not None:
             self.store.save_node(registration, last_seen_at=seen_at)
         return True
+
+    def record_signed_heartbeat(self, heartbeat: NodeHeartbeat) -> bool:
+        if not self.verify_signed_node_packet(heartbeat):
+            return False
+        return self.touch_node(heartbeat.node_id)
+
+    def verify_signed_node_packet(self, packet: Any) -> bool:
+        known_node = self.known_nodes.get(packet.node_id)
+        if known_node is None:
+            return False
+        if known_node.public_key != packet.node_public_key:
+            return False
+        return bool(packet.verify_signature())
 
     def create_math_eval_job(self) -> JobPacket:
         return self.create_job(
@@ -314,6 +333,54 @@ class Coordinator:
             return job
         return None
 
+    def lease_next_signed_job(self, request: JobLeaseRequest) -> tuple[JobPacket, dict[str, Any]] | None:
+        if not self.verify_signed_node_packet(request):
+            return None
+        job = self.lease_next_job(request.node_id)
+        if job is None:
+            return None
+        return job, self.lease_metadata(job.job_id, request.node_id)
+
+    def lease_metadata(self, job_id: str, node_id: str) -> dict[str, Any]:
+        return {
+            "job_id": job_id,
+            "node_id": node_id,
+            "leased_at": self.lease_started_at.get(job_id, {}).get(node_id),
+            "expires_at": self.lease_expires_at.get(job_id, {}).get(node_id),
+            "acknowledged": node_id in self.lease_acknowledged_at.get(job_id, {}),
+            "acknowledged_at": self.lease_acknowledged_at.get(job_id, {}).get(node_id),
+        }
+
+    def acknowledge_lease(self, acknowledgement: JobLeaseAcknowledgement) -> bool:
+        now = time.time()
+        self.reap_expired_leases(now=now)
+        if not self.verify_signed_node_packet(acknowledgement):
+            return False
+        if acknowledgement.job_id not in self.jobs:
+            return False
+        if acknowledgement.node_id not in self.leased_jobs.get(acknowledgement.job_id, set()):
+            return False
+        if self._lease_is_expired(acknowledgement.job_id, acknowledgement.node_id, now):
+            return False
+
+        leased_at = self.lease_started_at.get(acknowledgement.job_id, {}).get(acknowledgement.node_id)
+        expires_at = self.lease_expires_at.get(acknowledgement.job_id, {}).get(acknowledgement.node_id)
+        if leased_at is None or expires_at is None:
+            return False
+        if acknowledgement.leased_at != leased_at or acknowledgement.expires_at != expires_at:
+            return False
+
+        self.lease_acknowledged_at.setdefault(acknowledgement.job_id, {})[
+            acknowledgement.node_id
+        ] = acknowledgement.created_at
+        self.lease_acknowledgements.setdefault(acknowledgement.job_id, {})[
+            acknowledgement.node_id
+        ] = acknowledgement
+        self.touch_node(acknowledgement.node_id, seen_at=now)
+        if self.store is not None:
+            self.store.save_lease_acknowledgement(acknowledgement)
+        return True
+
     def submit_result(self, result: JobResult) -> bool:
         now = time.time()
         self.reap_expired_leases(now=now)
@@ -368,12 +435,15 @@ class Coordinator:
                 node_ids.remove(node_id)
                 leased_at = self.lease_started_at.get(job_id, {}).pop(node_id, None)
                 self.lease_expires_at.get(job_id, {}).pop(node_id, None)
+                acknowledged_at = self.lease_acknowledged_at.get(job_id, {}).pop(node_id, None)
+                self.lease_acknowledgements.get(job_id, {}).pop(node_id, None)
                 lease = {
                     "job_id": job_id,
                     "node_id": node_id,
                     "leased_at": leased_at,
                     "expires_at": expires_at,
                     "expired_at": timestamp,
+                    "acknowledged_at": acknowledged_at,
                 }
                 self.expired_leases.append(lease)
                 expired.append(lease)
@@ -461,6 +531,7 @@ class Coordinator:
                     "leased_to": leased_to,
                     "active_leases": sorted(self._active_leases(job_id)),
                     "lease_count": len(leases),
+                    "acknowledged_lease_count": sum(1 for lease in leases if lease["acknowledged"]),
                     "expired_lease_count": sum(1 for lease in leases if lease["status"] == "expired"),
                     "leases": leases,
                     "reward": job.reward,
@@ -694,6 +765,8 @@ class Coordinator:
                     "status": status,
                     "leased_at": self.lease_started_at.get(job_id, {}).get(node_id),
                     "expires_at": expires_at,
+                    "acknowledged": node_id in self.lease_acknowledged_at.get(job_id, {}),
+                    "acknowledged_at": self.lease_acknowledged_at.get(job_id, {}).get(node_id),
                     "expires_in_seconds": (
                         round(max(0.0, expires_at - timestamp), 3)
                         if status == "active" and expires_at is not None
@@ -708,6 +781,8 @@ class Coordinator:
                 "status": "expired",
                 "leased_at": lease["leased_at"],
                 "expires_at": lease["expires_at"],
+                "acknowledged": lease.get("acknowledged_at") is not None,
+                "acknowledged_at": lease.get("acknowledged_at"),
                 "expires_in_seconds": None,
                 "expired_at": lease["expired_at"],
             }

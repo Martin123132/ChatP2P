@@ -7,10 +7,10 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 from .coordinator import Coordinator
-from .packets import JobResult, NodeRegistration
+from .packets import JobLeaseAcknowledgement, JobLeaseRequest, JobResult, NodeHeartbeat, NodeRegistration
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
@@ -97,6 +97,7 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
           <td>{html.escape(job["job_type"])}</td>
           <td><span class="status {html.escape(job["status"])}">{html.escape(job["status"])}</span></td>
           <td><code>{html.escape(", ".join(_short(node_id, 18) for node_id in job["active_leases"]))}</code></td>
+          <td>{html.escape(str(job["acknowledged_lease_count"]))}</td>
           <td>{html.escape(str(job["expired_lease_count"]))}</td>
           <td>{html.escape(str(job["reward"]))}</td>
           <td>{html.escape(str(job["result_count"]))}/{html.escape(str(job["required_results"]))}</td>
@@ -104,7 +105,7 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
         </tr>
         """
         for job in jobs
-    ) or """<tr><td colspan="8" class="empty">No jobs queued yet.</td></tr>"""
+    ) or """<tr><td colspan="9" class="empty">No jobs queued yet.</td></tr>"""
 
     reputation_rows = "\n".join(
         f"""
@@ -323,7 +324,7 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
     <section class="table-block">
       <h2>Jobs</h2>
       <table>
-        <thead><tr><th>Job</th><th>Type</th><th>Status</th><th>Active</th><th>Expired</th><th>Reward</th><th>Results</th><th>Payload</th></tr></thead>
+        <thead><tr><th>Job</th><th>Type</th><th>Status</th><th>Active</th><th>Acked</th><th>Expired</th><th>Reward</th><th>Results</th><th>Payload</th></tr></thead>
         <tbody>{job_rows}</tbody>
       </table>
     </section>
@@ -401,14 +402,7 @@ def create_coordinator_http_server(
                 return
 
             if parsed.path == "/jobs/next":
-                query = parse_qs(parsed.query)
-                node_id = query.get("node_id", [None])[0]
-                if node_id is None:
-                    _json_response(self, 400, {"error": "node_id query parameter is required"})
-                    return
-                with lock:
-                    job = coordinator.lease_next_job(node_id)
-                _json_response(self, 200, {"job": job.to_dict() if job else None})
+                _json_response(self, 405, {"error": "signed POST /jobs/next is required"})
                 return
 
             _json_response(self, 404, {"error": "not found"})
@@ -431,19 +425,66 @@ def create_coordinator_http_server(
 
             if parsed.path == "/nodes/heartbeat":
                 try:
-                    request = _read_json(self)
-                    node_id = request["node_id"]
+                    heartbeat = NodeHeartbeat.from_dict(_read_json(self))
                 except (KeyError, TypeError, json.JSONDecodeError) as exc:
                     _json_response(self, 400, {"accepted": False, "error": str(exc)})
                     return
                 with lock:
-                    accepted = coordinator.touch_node(node_id)
-                    last_seen_at = coordinator.node_last_seen.get(node_id)
-                status = 200 if accepted else 404
+                    accepted = coordinator.record_signed_heartbeat(heartbeat)
+                    last_seen_at = coordinator.node_last_seen.get(heartbeat.node_id)
+                status = 200 if accepted else 403
                 _json_response(
                     self,
                     status,
-                    {"accepted": accepted, "node_id": node_id, "last_seen_at": last_seen_at},
+                    {"accepted": accepted, "node_id": heartbeat.node_id, "last_seen_at": last_seen_at},
+                )
+                return
+
+            if parsed.path == "/jobs/next":
+                try:
+                    lease_request = JobLeaseRequest.from_dict(_read_json(self))
+                except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                    _json_response(self, 400, {"accepted": False, "error": str(exc)})
+                    return
+                with lock:
+                    if not coordinator.verify_signed_node_packet(lease_request):
+                        _json_response(
+                            self,
+                            403,
+                            {"accepted": False, "job": None, "lease": None, "error": "invalid lease request"},
+                        )
+                        return
+                    leased = coordinator.lease_next_signed_job(lease_request)
+                if leased is None:
+                    _json_response(self, 200, {"accepted": True, "job": None, "lease": None})
+                    return
+                job, lease = leased
+                _json_response(self, 200, {"accepted": True, "job": job.to_dict(), "lease": lease})
+                return
+
+            if parsed.path == "/jobs/lease/ack":
+                try:
+                    acknowledgement = JobLeaseAcknowledgement.from_dict(_read_json(self))
+                except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                    _json_response(self, 400, {"accepted": False, "error": str(exc)})
+                    return
+                with lock:
+                    accepted = coordinator.acknowledge_lease(acknowledgement)
+                    lease = (
+                        coordinator.lease_metadata(acknowledgement.job_id, acknowledgement.node_id)
+                        if accepted
+                        else None
+                    )
+                status = 200 if accepted else 403
+                _json_response(
+                    self,
+                    status,
+                    {
+                        "accepted": accepted,
+                        "job_id": acknowledgement.job_id,
+                        "node_id": acknowledgement.node_id,
+                        "lease": lease,
+                    },
                 )
                 return
 

@@ -9,6 +9,7 @@ Peer-contributed AI compute, starting with the boring pieces that have to be tru
 - The worker verifies leased jobs before running them.
 - The worker signs completed results.
 - The coordinator verifies results and awards credits.
+- Network liveness and job leasing use signed worker packets.
 
 ## Quickstart
 
@@ -117,12 +118,14 @@ Current node reputation states:
 Workers are expected to disappear sometimes, so the coordinator now treats leases as temporary:
 
 - every lease has `leased_at` and `expires_at`
+- job pulls use signed `job.lease-request.v1` packets
+- workers sign a `job.lease-ack.v1` acknowledgement for the concrete lease they accept
 - expired leases are removed from the active queue and can be picked up by another worker
 - late results from expired leases are rejected
 - node `last_seen_at` is updated on registration, heartbeat, job pull, and result submission
 - node liveness is reported as `live`, `stale`, or `offline`
 
-Lease and liveness state is exposed in the dashboard, `GET /api/snapshot`, and `GET /health`. Workers can also ping `POST /nodes/heartbeat` with a known `node_id`.
+Lease and liveness state is exposed in the dashboard, `GET /api/snapshot`, and `GET /health`. Workers can ping `POST /nodes/heartbeat` with a signed `node.heartbeat.v1` packet. The legacy unsigned `GET /jobs/next?node_id=...` path is rejected.
 
 ## Trust-Aware Leasing
 

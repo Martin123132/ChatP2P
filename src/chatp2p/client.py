@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .packets import JobPacket, JobResult, NodeRegistration
+from .crypto import NodeIdentity
+from .packets import JobLeaseAcknowledgement, JobLeaseRequest, JobPacket, JobResult, NodeHeartbeat, NodeRegistration
 
 
 class CoordinatorClient:
@@ -49,8 +49,8 @@ class CoordinatorClient:
     def register(self, registration: NodeRegistration) -> dict[str, Any]:
         return self._request("POST", "/nodes/register", registration.to_dict())
 
-    def heartbeat(self, node_id: str) -> dict[str, Any]:
-        return self._request("POST", "/nodes/heartbeat", {"node_id": node_id})
+    def heartbeat(self, node: NodeIdentity) -> dict[str, Any]:
+        return self._request("POST", "/nodes/heartbeat", NodeHeartbeat.create(node=node).to_dict())
 
     def create_demo_math_job(self) -> JobPacket:
         response = self._request("POST", "/jobs/demo-math", {})
@@ -80,12 +80,25 @@ class CoordinatorClient:
         response = self._request("POST", "/jobs", request)
         return JobPacket.from_dict(response["job"])
 
-    def next_job(self, node_id: str) -> JobPacket | None:
-        query = urlencode({"node_id": node_id})
-        response = self._request("GET", f"/jobs/next?{query}")
+    def next_job(self, node: NodeIdentity) -> JobPacket | None:
+        response = self._request("POST", "/jobs/next", JobLeaseRequest.create(node=node).to_dict())
         if response["job"] is None:
             return None
-        return JobPacket.from_dict(response["job"])
+        job = JobPacket.from_dict(response["job"])
+        lease = response["lease"]
+        acknowledgement = JobLeaseAcknowledgement.create(
+            node=node,
+            job_id=job.job_id,
+            leased_at=lease["leased_at"],
+            expires_at=lease["expires_at"],
+        )
+        ack_response = self.acknowledge_lease(acknowledgement)
+        if not ack_response.get("accepted"):
+            raise RuntimeError(f"lease acknowledgement rejected: {ack_response}")
+        return job
+
+    def acknowledge_lease(self, acknowledgement: JobLeaseAcknowledgement) -> dict[str, Any]:
+        return self._request("POST", "/jobs/lease/ack", acknowledgement.to_dict())
 
     def submit_result(self, result: JobResult) -> dict[str, Any]:
         return self._request("POST", "/jobs/result", result.to_dict())
