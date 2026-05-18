@@ -37,8 +37,11 @@ class Coordinator:
         self.results.update(stored_results)
         self.credits.update(stored_credits)
 
-    def register_node(self, node: NodeIdentity) -> None:
+    def register_node(self, node: NodeIdentity, capabilities: dict[str, Any] | None = None) -> None:
         self.known_nodes[node.node_id] = node.public()
+        self.node_capabilities[node.node_id] = capabilities or {
+            "supported_job_types": ["eval.math.v1", "eval.deterministic.v1", "inference.echo.v1"]
+        }
         self.credits.setdefault(node.node_id, 0)
 
     def register_signed_node(self, registration: NodeRegistration) -> bool:
@@ -144,6 +147,8 @@ class Coordinator:
         for job_id, job in self.jobs.items():
             if self.results.get(job_id):
                 continue
+            if not self._node_supports_job(node_id, job):
+                continue
             leased_to = self.leased_jobs.get(job_id)
             if leased_to is None or leased_to == node_id:
                 self.leased_jobs[job_id] = node_id
@@ -179,11 +184,90 @@ class Coordinator:
 
     def status(self) -> dict:
         completed_jobs = sum(1 for job_id in self.jobs if self.results.get(job_id))
+        queued_jobs = sum(1 for job_id in self.jobs if not self.results.get(job_id) and job_id not in self.leased_jobs)
+        active_leases = sum(1 for job_id in self.leased_jobs if not self.results.get(job_id))
         return {
             "coordinator_id": self.identity.node_id,
             "known_nodes": len(self.known_nodes),
             "jobs": len(self.jobs),
-            "leased_jobs": len(self.leased_jobs),
+            "queued_jobs": queued_jobs,
+            "leased_jobs": active_leases,
+            "total_leases": len(self.leased_jobs),
             "completed_jobs": completed_jobs,
             "credits": dict(self.credits),
         }
+
+    def node_summaries(self) -> list[dict[str, Any]]:
+        summaries = []
+        for node_id, identity in self.known_nodes.items():
+            capabilities = self.node_capabilities.get(node_id, {})
+            summaries.append(
+                {
+                    "node_id": node_id,
+                    "public_key": identity.public_key,
+                    "credits": self.credits.get(node_id, 0),
+                    "supported_job_types": capabilities.get("supported_job_types", []),
+                    "hardware": capabilities.get("hardware", {}),
+                }
+            )
+        return sorted(summaries, key=lambda item: item["node_id"])
+
+    def job_summaries(self) -> list[dict[str, Any]]:
+        summaries = []
+        for job_id, job in self.jobs.items():
+            result_count = len(self.results.get(job_id, []))
+            leased_to = self.leased_jobs.get(job_id)
+            if result_count:
+                status = "completed"
+            elif leased_to:
+                status = "leased"
+            else:
+                status = "queued"
+            summaries.append(
+                {
+                    "job_id": job_id,
+                    "job_type": job.job_type,
+                    "model_id": job.model_id,
+                    "status": status,
+                    "leased_to": leased_to,
+                    "reward": job.reward,
+                    "deadline": job.deadline,
+                    "result_count": result_count,
+                    "verification_strategy": job.verification_strategy,
+                    "payload": job.payload,
+                }
+            )
+        return sorted(summaries, key=lambda item: item["job_id"])
+
+    def result_summaries(self) -> list[dict[str, Any]]:
+        summaries = []
+        for job_id, results in self.results.items():
+            for result in results:
+                job = self.jobs.get(job_id)
+                summaries.append(
+                    {
+                        "job_id": job_id,
+                        "job_type": job.job_type if job else None,
+                        "node_id": result.node_id,
+                        "output": result.output,
+                        "output_hash": result.output_hash,
+                        "runtime_seconds": result.runtime_seconds,
+                        "created_at": result.created_at,
+                    }
+                )
+        return sorted(summaries, key=lambda item: (item["created_at"], item["job_id"]))
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "status": self.status(),
+            "nodes": self.node_summaries(),
+            "jobs": self.job_summaries(),
+            "results": self.result_summaries(),
+        }
+
+    def _node_supports_job(self, node_id: str, job: JobPacket) -> bool:
+        capabilities = self.node_capabilities.get(node_id, {})
+        supported_job_types = capabilities.get("supported_job_types")
+        if not supported_job_types:
+            return False
+        return job.job_type in supported_job_types

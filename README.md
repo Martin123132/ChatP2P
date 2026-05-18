@@ -34,6 +34,25 @@ chatp2p worker run-once
 
 The coordinator stores state in `.mesh/coordinator.sqlite3` by default, so registered nodes, jobs, leases, results, and credits survive restarts.
 
+Open the coordinator dashboard:
+
+```text
+http://127.0.0.1:8765/dashboard
+```
+
+Useful local API endpoints:
+
+- `GET /api/snapshot`
+- `GET /api/nodes`
+- `GET /api/jobs`
+- `GET /api/results`
+
+Drain a seeded queue with one worker:
+
+```bash
+chatp2p worker loop --max-jobs 4 --stop-when-idle
+```
+
 ## Product Direction
 
 The first product goal is a one-click node that lets normal machines contribute useful work: deterministic evals, inference jobs, dataset review, verification, model feedback, and later distributed fine-tuning.

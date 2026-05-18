@@ -98,37 +98,58 @@ def run_worker_once(args: argparse.Namespace) -> None:
     worker = WorkerNode(identity=identity)
     client = CoordinatorClient(args.coordinator)
 
-    registration = NodeRegistration.create(node=identity, capabilities=worker.capabilities())
+    _register_worker(client, worker)
+    result = _run_one_remote_job(client, worker)
+    print(json.dumps(result, indent=2, sort_keys=True))
+
+
+def _register_worker(client: CoordinatorClient, worker: WorkerNode) -> None:
+    registration = NodeRegistration.create(node=worker.identity, capabilities=worker.capabilities())
     register_response = client.register(registration)
     if not register_response.get("accepted"):
         raise SystemExit(f"registration rejected: {register_response}")
 
-    job = client.next_job(identity.node_id)
+
+def _run_one_remote_job(client: CoordinatorClient, worker: WorkerNode) -> dict:
+    job = client.next_job(worker.identity.node_id)
     if job is None:
-        print(json.dumps({"worker": identity.node_id, "job": None}, indent=2, sort_keys=True))
-        return
+        return {"worker": worker.identity.node_id, "job": None, "status": "idle"}
 
     result = worker.run_job(job)
     submit_response = client.submit_result(result)
-    print(
-        json.dumps(
-            {
-                "worker": identity.node_id,
-                "job_id": job.job_id,
-                "job_type": job.job_type,
-                "result_accepted": submit_response.get("accepted"),
-                "credits": submit_response.get("credits"),
-                "output": result.output,
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
+    return {
+        "worker": worker.identity.node_id,
+        "job_id": job.job_id,
+        "job_type": job.job_type,
+        "result_accepted": submit_response.get("accepted"),
+        "credits": submit_response.get("credits"),
+        "output": result.output,
+        "status": "completed" if submit_response.get("accepted") else "rejected",
+    }
 
 
 def run_worker_loop(args: argparse.Namespace) -> None:
+    identity = _load_or_create_identity(Path(args.home), "worker")
+    worker = WorkerNode(identity=identity)
+    client = CoordinatorClient(args.coordinator)
+    _register_worker(client, worker)
+
+    completed = 0
     while True:
-        run_worker_once(args)
+        result = _run_one_remote_job(client, worker)
+        timestamp = time.strftime("%H:%M:%S")
+        if result["status"] == "idle":
+            print(f"[{timestamp}] {identity.node_id} idle")
+            if args.stop_when_idle:
+                return
+        else:
+            completed += 1
+            print(
+                f"[{timestamp}] {identity.node_id} {result['status']} "
+                f"{result['job_type']} {result['job_id']} credits={result['credits']}"
+            )
+            if args.max_jobs is not None and completed >= args.max_jobs:
+                return
         time.sleep(args.interval)
 
 
@@ -167,6 +188,8 @@ def build_parser() -> argparse.ArgumentParser:
     loop_parser.add_argument("--home", default=".mesh", help="Directory for worker identity")
     loop_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
     loop_parser.add_argument("--interval", default=5.0, type=float, help="Seconds between polling attempts")
+    loop_parser.add_argument("--max-jobs", default=None, type=int, help="Stop after completing this many jobs")
+    loop_parser.add_argument("--stop-when-idle", action="store_true", help="Stop once the coordinator has no job")
     loop_parser.set_defaults(func=run_worker_loop)
 
     return parser

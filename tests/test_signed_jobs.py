@@ -67,3 +67,17 @@ def test_coordinator_rejects_tampered_registration():
 
     assert coordinator.register_signed_node(registration) is False
     assert worker_identity.node_id not in coordinator.known_nodes
+
+
+def test_coordinator_leases_only_supported_job_types():
+    worker_identity = NodeIdentity.generate(prefix="worker")
+    registration = NodeRegistration.create(
+        node=worker_identity,
+        capabilities={"supported_job_types": ["inference.echo.v1"]},
+    )
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+
+    assert coordinator.register_signed_node(registration)
+    coordinator.create_deterministic_eval_jobs()
+
+    assert coordinator.lease_next_job(worker_identity.node_id) is None

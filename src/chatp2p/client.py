@@ -31,6 +31,18 @@ class CoordinatorClient:
     def health(self) -> dict[str, Any]:
         return self._request("GET", "/health")
 
+    def snapshot(self) -> dict[str, Any]:
+        return self._request("GET", "/api/snapshot")
+
+    def nodes(self) -> dict[str, Any]:
+        return self._request("GET", "/api/nodes")
+
+    def jobs(self) -> dict[str, Any]:
+        return self._request("GET", "/api/jobs")
+
+    def results(self) -> dict[str, Any]:
+        return self._request("GET", "/api/results")
+
     def register(self, registration: NodeRegistration) -> dict[str, Any]:
         return self._request("POST", "/nodes/register", registration.to_dict())
 

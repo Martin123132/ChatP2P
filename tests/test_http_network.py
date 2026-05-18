@@ -1,4 +1,5 @@
 import threading
+from urllib.request import urlopen
 
 from chatp2p.client import CoordinatorClient
 from chatp2p.coordinator import Coordinator
@@ -38,6 +39,16 @@ def test_http_worker_registers_leases_job_and_submits_result():
         health = client.health()
         assert health["known_nodes"] == 1
         assert health["completed_jobs"] == 1
+
+        snapshot = client.snapshot()
+        assert len(snapshot["nodes"]) == 1
+        assert len(snapshot["jobs"]) == 4
+        assert len(snapshot["results"]) == 1
+
+        with urlopen(f"http://{host}:{port}/dashboard", timeout=10) as response:
+            dashboard = response.read().decode("utf-8")
+        assert "ChatP2P Coordinator" in dashboard
+        assert "Recent Results" in dashboard
     finally:
         server.shutdown()
         server.server_close()
