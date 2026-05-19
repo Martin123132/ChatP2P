@@ -130,26 +130,43 @@ The Ollama proof preflights `/api/tags`, starts a local coordinator, registers s
 
 ## Public Alpha Seed Mode
 
-Do not expose a coordinator to the internet without an admission token. Write an operator config:
+Do not expose a coordinator to the internet without an admission token. Bootstrap an operator config and invite file:
 
 ```bash
-chatp2p operator write-config --output D:\ChatP2PData\operator-config.json --admission-token "change-this-long-token"
+chatp2p operator bootstrap-alpha --config D:\ChatP2PData\operator-config.json --invite D:\ChatP2PData\alpha-invite.json --coordinator-url http://YOUR_HOST:8765
 ```
 
-Start a coordinator with the config:
+This writes a private operator config and a `chatp2p.alpha-invite.v1` JSON invite. The command generates a strong admission token unless you pass `--admission-token`.
+
+Start the public-alpha coordinator intentionally:
 
 ```bash
-chatp2p coordinator serve --host 0.0.0.0 --port 8765 --home D:\ChatP2PData\.mesh --operator-config D:\ChatP2PData\operator-config.json
+chatp2p node up --home D:\ChatP2PData\.mesh --role coordinator --host 0.0.0.0 --port 8765 --operator-config D:\ChatP2PData\operator-config.json --force
 ```
 
-Workers and job producers pass the same token:
+Share only the invite file with accepted contributors. A contributor joins with:
+
+```bash
+chatp2p node join --invite alpha-invite.json --home .mesh
+```
+
+`node join` creates or reuses a worker identity, runs `node benchmark` if no capability profile exists, checks coordinator health, starts a managed background worker, and waits for it to appear live. Logs are written under `HOME\logs`.
+
+Troubleshooting:
+
+- token rejected: ask the operator for a fresh invite file
+- coordinator unreachable: confirm the `coordinator` URL in the invite is reachable from your machine
+- missing Ollama: deterministic and echo jobs still work, but Ollama jobs need Ollama running locally
+- stale capabilities: run `chatp2p node benchmark --home .mesh` again after installing Ollama or pulling models
+
+Workers and job producers can still pass the token manually when needed:
 
 ```bash
 chatp2p worker loop --coordinator http://YOUR_HOST:8765 --admission-token "change-this-long-token"
 chatp2p job create-echo --coordinator http://YOUR_HOST:8765 --admission-token "change-this-long-token" --prompt "hello mesh"
 ```
 
-Public alpha mode requires the token for node registration and job creation, limits request body size, limits public job payload size, and restricts job types to the operator allow-list.
+Public alpha mode requires the token for node registration and job creation, limits request body size, limits public job payload size, and restricts job types to the operator allow-list. It does not open firewall ports, configure routers, or create public tunnels.
 
 Generic JSON job creation is also available:
 

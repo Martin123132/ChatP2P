@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .alpha import AlphaJoinConfig, DEFAULT_ALPHA_NOTES, bootstrap_alpha, run_alpha_join
 from .benchmark import CAPABILITY_PROFILE_NAME, load_node_capabilities, run_node_benchmark, save_node_benchmark
 from .client import CoordinatorClient
 from .coordinator import Coordinator
@@ -428,6 +429,24 @@ def write_operator_config_command(args: argparse.Namespace) -> None:
     print(json.dumps({"saved": str(path), "operator": config.public_summary()}, indent=2, sort_keys=True))
 
 
+def bootstrap_alpha_command(args: argparse.Namespace) -> None:
+    try:
+        report = bootstrap_alpha(
+            config_path=Path(args.config),
+            invite_path=Path(args.invite),
+            coordinator_url=args.coordinator_url,
+            admission_token=args.admission_token,
+            max_request_bytes=args.max_request_bytes,
+            max_job_payload_bytes=args.max_job_payload_bytes,
+            allowed_job_types=tuple(args.allowed_job_type or OperatorConfig.default().allowed_job_types),
+            notes=args.notes,
+            force=args.force,
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
 def run_proof_swarm(args: argparse.Namespace) -> None:
     config = SwarmProofConfig(
         workers=args.workers,
@@ -498,6 +517,26 @@ def run_node_doctor_command(args: argparse.Namespace) -> None:
             timeout_seconds=args.timeout_seconds,
         )
     )
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def run_node_join_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=Path(args.invite),
+                home=Path(args.home),
+                ollama_base_url=args.ollama_base_url,
+                worker_interval=args.worker_interval,
+                startup_timeout_seconds=args.startup_timeout_seconds,
+                cpu_duration_seconds=args.cpu_duration_seconds,
+                force=args.force,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
     print(json.dumps(report, indent=2, sort_keys=True))
     if not report["ok"]:
         raise SystemExit(1)
@@ -706,6 +745,30 @@ def build_parser() -> argparse.ArgumentParser:
     node_parser = subcommands.add_parser("node", help="Local node commands")
     node_subcommands = node_parser.add_subparsers(dest="node_command", required=True)
 
+    join_parser = node_subcommands.add_parser("join", help="Join a public-alpha coordinator from an invite file")
+    join_parser.add_argument("--invite", required=True, help="Path to a chatp2p.alpha-invite.v1 JSON invite")
+    join_parser.add_argument("--home", default=".mesh", help="Directory for node identity, capabilities, run state, and logs")
+    join_parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="Local Ollama base URL for inference.ollama.v1 jobs",
+    )
+    join_parser.add_argument("--worker-interval", default=5.0, type=float, help="Seconds between worker polling attempts")
+    join_parser.add_argument(
+        "--startup-timeout-seconds",
+        default=15.0,
+        type=float,
+        help="Seconds to wait for the worker to register and become live",
+    )
+    join_parser.add_argument(
+        "--cpu-duration-seconds",
+        default=0.25,
+        type=float,
+        help="Seconds to spend benchmarking if this node has no saved benchmark profile",
+    )
+    join_parser.add_argument("--force", action="store_true", help="Replace an existing managed worker process")
+    join_parser.set_defaults(func=run_node_join_command)
+
     up_parser = node_subcommands.add_parser("up", help="Start managed background coordinator and worker processes")
     up_parser.add_argument("--home", default=".mesh", help="Directory for node identity, database, run state, and logs")
     up_parser.add_argument(
@@ -883,6 +946,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     operator_config_parser.add_argument("--force", action="store_true", help="Replace an existing config")
     operator_config_parser.set_defaults(func=write_operator_config_command)
+
+    bootstrap_alpha_parser = operator_subcommands.add_parser(
+        "bootstrap-alpha",
+        help="Write public-alpha operator config and invite files",
+    )
+    bootstrap_alpha_parser.add_argument("--config", required=True, help="Path for operator config JSON")
+    bootstrap_alpha_parser.add_argument("--invite", required=True, help="Path for alpha invite JSON")
+    bootstrap_alpha_parser.add_argument(
+        "--coordinator-url",
+        required=True,
+        help="Public URL contributors should use to reach this coordinator",
+    )
+    bootstrap_alpha_parser.add_argument(
+        "--admission-token",
+        default=None,
+        help="Shared admission token. Generated when omitted",
+    )
+    bootstrap_alpha_parser.add_argument(
+        "--max-request-bytes",
+        default=256 * 1024,
+        type=int,
+        help="Maximum JSON request body size accepted by the coordinator",
+    )
+    bootstrap_alpha_parser.add_argument(
+        "--max-job-payload-bytes",
+        default=16 * 1024,
+        type=int,
+        help="Maximum job payload JSON size accepted by public job creation",
+    )
+    bootstrap_alpha_parser.add_argument(
+        "--allowed-job-type",
+        action="append",
+        default=None,
+        help="Allowed public job type. Can be passed more than once",
+    )
+    bootstrap_alpha_parser.add_argument(
+        "--notes",
+        default=DEFAULT_ALPHA_NOTES,
+        help="Notes stored in the invite for contributors",
+    )
+    bootstrap_alpha_parser.add_argument("--force", action="store_true", help="Replace existing config/invite files")
+    bootstrap_alpha_parser.set_defaults(func=bootstrap_alpha_command)
 
     coordinator_parser = subcommands.add_parser("coordinator", help="Coordinator commands")
     coordinator_subcommands = coordinator_parser.add_subparsers(dest="coordinator_command", required=True)
