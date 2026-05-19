@@ -13,7 +13,14 @@ from chatp2p.crypto import NodeIdentity
 from chatp2p.worker import WorkerNode
 
 
-def _benchmark_report(*, cpu_count=4, ram_total_mb=8_000, cpu_score=10_000, gpu_vram_mb=0):
+def _benchmark_report(
+    *,
+    cpu_count=4,
+    ram_total_mb=8_000,
+    cpu_score=10_000,
+    gpu_vram_mb=0,
+    ollama_available=False,
+):
     gpu_available = gpu_vram_mb > 0
     report = {
         "hardware": {
@@ -28,7 +35,9 @@ def _benchmark_report(*, cpu_count=4, ram_total_mb=8_000, cpu_score=10_000, gpu_
             "total_vram_mb": gpu_vram_mb if gpu_available else None,
         },
         "benchmark": {"cpu_iterations_per_second": cpu_score},
-        "model_runtimes": {},
+        "model_runtimes": {
+            "ollama": {"available": ollama_available, "path": "/usr/bin/ollama" if ollama_available else None}
+        },
     }
     report["capability_tier"] = classify_capability_tier(report)
     return report
@@ -42,7 +51,7 @@ def test_capability_tiers_classify_common_machine_shapes():
 
 
 def test_saved_benchmark_loads_as_worker_capabilities(tmp_path):
-    report = _benchmark_report(cpu_count=8, ram_total_mb=16_000)
+    report = _benchmark_report(cpu_count=8, ram_total_mb=16_000, ollama_available=True)
     report["capabilities"] = capabilities_from_benchmark(report)
 
     save_node_benchmark(report, tmp_path / "node-capabilities.json")
@@ -52,6 +61,7 @@ def test_saved_benchmark_loads_as_worker_capabilities(tmp_path):
     assert capabilities["capability_tier"] == "gaming_laptop"
     assert capabilities["hardware"]["capability_tier"] == "gaming_laptop"
     assert "eval.deterministic.v1" in capabilities["supported_job_types"]
+    assert "inference.ollama.v1" in capabilities["supported_job_types"]
 
 
 def test_node_benchmark_report_is_json_serializable():

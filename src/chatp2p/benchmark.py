@@ -16,6 +16,7 @@ from typing import Any
 CAPABILITY_PROFILE_NAME = "node-capabilities.json"
 CAPABILITY_TIERS = ["light", "standard", "gaming_laptop", "gpu_worker"]
 DEFAULT_SUPPORTED_JOB_TYPES = ["eval.math.v1", "eval.deterministic.v1", "inference.echo.v1"]
+OLLAMA_JOB_TYPE = "inference.ollama.v1"
 
 
 def run_node_benchmark(cpu_duration_seconds: float = 0.25) -> dict[str, Any]:
@@ -158,13 +159,17 @@ def capabilities_from_benchmark(report: dict[str, Any]) -> dict[str, Any]:
     tier = report.get("capability_tier") or classify_capability_tier(report)
     hardware = dict(report.get("hardware", {}))
     hardware["capability_tier"] = tier
+    model_runtimes = dict(report.get("model_runtimes", {}))
+    supported_job_types = list(DEFAULT_SUPPORTED_JOB_TYPES)
+    if model_runtimes.get("ollama", {}).get("available"):
+        supported_job_types.append(OLLAMA_JOB_TYPE)
     return {
-        "supported_job_types": list(DEFAULT_SUPPORTED_JOB_TYPES),
+        "supported_job_types": supported_job_types,
         "capability_tier": tier,
         "hardware": hardware,
         "benchmark": dict(report.get("benchmark", {})),
         "gpu": dict(report.get("gpu", {})),
-        "model_runtimes": dict(report.get("model_runtimes", {})),
+        "model_runtimes": model_runtimes,
     }
 
 

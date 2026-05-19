@@ -74,6 +74,9 @@ class CoordinatorClient:
         job_type: str,
         payload: dict[str, Any],
         model_id: str | None = None,
+        resource_requirements: dict[str, Any] | None = None,
+        expected_output_schema: dict[str, Any] | None = None,
+        verification_strategy: str | None = None,
         reward: int = 1,
         ttl_seconds: int = 300,
     ) -> JobPacket:
@@ -85,6 +88,12 @@ class CoordinatorClient:
         }
         if model_id is not None:
             request["model_id"] = model_id
+        if resource_requirements is not None:
+            request["resource_requirements"] = resource_requirements
+        if expected_output_schema is not None:
+            request["expected_output_schema"] = expected_output_schema
+        if verification_strategy is not None:
+            request["verification_strategy"] = verification_strategy
         response = self._request("POST", "/jobs", request)
         return JobPacket.from_dict(response["job"])
 

@@ -217,6 +217,26 @@ class Coordinator:
             reward=1,
         )
 
+    def create_ollama_inference_job(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        temperature: float | None = None,
+        reward: int = 1,
+        ttl_seconds: int = 300,
+    ) -> JobPacket:
+        payload: dict[str, Any] = {"model": model, "prompt": prompt}
+        if temperature is not None:
+            payload["temperature"] = temperature
+        return self.create_job(
+            job_type="inference.ollama.v1",
+            model_id=model,
+            payload=payload,
+            reward=reward,
+            ttl_seconds=ttl_seconds,
+        )
+
     def create_job(
         self,
         *,
@@ -273,6 +293,17 @@ class Coordinator:
                 "expected_output_schema": {"required": ["answer", "confidence"]},
                 "verification_strategy": "signature-and-schema-check",
             }
+        if job_type == "inference.ollama.v1":
+            return {
+                "model_id": payload["model"],
+                "resource_requirements": {
+                    "runtime": "ollama",
+                    "min_capability_tier": "standard",
+                    "network": "local-ollama",
+                },
+                "expected_output_schema": {"required": ["answer", "model", "confidence"]},
+                "verification_strategy": "signature-and-schema-check",
+            }
         raise ValueError(f"unsupported job_type: {job_type}")
 
     def _validate_payload(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -284,6 +315,8 @@ class Coordinator:
             return self._validate_deterministic_payload(payload)
         if job_type == "inference.echo.v1":
             return self._validate_echo_payload(payload)
+        if job_type == "inference.ollama.v1":
+            return self._validate_ollama_payload(payload)
         raise ValueError(f"unsupported job_type: {job_type}")
 
     def _validate_math_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -299,6 +332,23 @@ class Coordinator:
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("inference.echo.v1 requires a non-empty prompt string")
         return {"prompt": prompt}
+
+    def _validate_ollama_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        model = payload.get("model")
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("inference.ollama.v1 requires a non-empty model string")
+        prompt = payload.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("inference.ollama.v1 requires a non-empty prompt string")
+        normalized: dict[str, Any] = {"model": model.strip(), "prompt": prompt}
+        if "temperature" in payload:
+            temperature = payload["temperature"]
+            if isinstance(temperature, bool) or not isinstance(temperature, int | float):
+                raise ValueError("inference.ollama.v1 temperature must be a number")
+            if temperature < 0 or temperature > 2:
+                raise ValueError("inference.ollama.v1 temperature must be between 0 and 2")
+            normalized["temperature"] = temperature
+        return normalized
 
     def _validate_deterministic_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         task = payload.get("task")

@@ -71,7 +71,11 @@ chatp2p job create-deterministic --task arithmetic --operation add --operands 7 
 chatp2p job create-deterministic --task number_theory --value 97
 chatp2p job create-deterministic --task text --value "open     compute mesh"
 chatp2p job create-echo --prompt "hello mesh"
+chatp2p job create-ollama --model llama3.2:3b --prompt "Explain peer-to-peer AI in one paragraph"
 ```
+
+`inference.ollama.v1` jobs are leased only to workers that advertised Ollama support from `chatp2p node benchmark`.
+Workers call local Ollama at `http://127.0.0.1:11434` by default; override that with `--ollama-base-url` on `chatp2p worker run-once` or `chatp2p worker loop`.
 
 Inspect jobs and state:
 

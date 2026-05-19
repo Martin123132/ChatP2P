@@ -6,12 +6,14 @@ import argparse
 import json
 import time
 from pathlib import Path
+from typing import Any
 
 from .benchmark import CAPABILITY_PROFILE_NAME, load_node_capabilities, run_node_benchmark, save_node_benchmark
 from .client import CoordinatorClient
 from .coordinator import Coordinator
 from .crypto import NodeIdentity
 from .http_api import create_coordinator_http_server
+from .ollama import DEFAULT_OLLAMA_BASE_URL
 from .packets import NodeRegistration
 from .proof import SwarmProofConfig, proof_summary, run_swarm_proof
 from .storage import SQLiteCoordinatorStore
@@ -35,9 +37,13 @@ def _load_or_create_identity(home: Path, name: str) -> NodeIdentity:
     return identity
 
 
-def _load_worker(home: Path) -> WorkerNode:
+def _load_worker(home: Path, ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL) -> WorkerNode:
     identity = _load_or_create_identity(home, "worker")
-    return WorkerNode(identity=identity, capability_profile=load_node_capabilities(home))
+    return WorkerNode(
+        identity=identity,
+        capability_profile=load_node_capabilities(home),
+        ollama_base_url=ollama_base_url,
+    )
 
 
 def _parse_json_value(raw: str):
@@ -196,7 +202,7 @@ def serve_coordinator(args: argparse.Namespace) -> None:
 
 
 def run_worker_once(args: argparse.Namespace) -> None:
-    worker = _load_worker(Path(args.home))
+    worker = _load_worker(Path(args.home), ollama_base_url=args.ollama_base_url)
     client = CoordinatorClient(args.coordinator)
 
     _register_worker(client, worker)
@@ -230,7 +236,7 @@ def _run_one_remote_job(client: CoordinatorClient, worker: WorkerNode) -> dict:
 
 
 def run_worker_loop(args: argparse.Namespace) -> None:
-    worker = _load_worker(Path(args.home))
+    worker = _load_worker(Path(args.home), ollama_base_url=args.ollama_base_url)
     identity = worker.identity
     client = CoordinatorClient(args.coordinator)
     _register_worker(client, worker)
@@ -272,6 +278,20 @@ def create_echo_job(args: argparse.Namespace) -> None:
     job = client.create_job(
         job_type="inference.echo.v1",
         payload={"prompt": args.prompt},
+        reward=args.reward,
+        ttl_seconds=args.ttl_seconds,
+    )
+    print(json.dumps({"created": True, "job": job.to_dict()}, indent=2, sort_keys=True))
+
+
+def create_ollama_job(args: argparse.Namespace) -> None:
+    client = CoordinatorClient(args.coordinator)
+    payload: dict[str, Any] = {"model": args.model, "prompt": args.prompt}
+    if args.temperature is not None:
+        payload["temperature"] = args.temperature
+    job = client.create_job(
+        job_type="inference.ollama.v1",
+        payload=payload,
         reward=args.reward,
         ttl_seconds=args.ttl_seconds,
     )
@@ -408,11 +428,21 @@ def build_parser() -> argparse.ArgumentParser:
     once_parser = worker_subcommands.add_parser("run-once", help="Register, lease one job, run it, submit result")
     once_parser.add_argument("--home", default=".mesh", help="Directory for worker identity")
     once_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    once_parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="Local Ollama base URL for inference.ollama.v1 jobs",
+    )
     once_parser.set_defaults(func=run_worker_once)
 
     loop_parser = worker_subcommands.add_parser("loop", help="Continuously poll for jobs")
     loop_parser.add_argument("--home", default=".mesh", help="Directory for worker identity")
     loop_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    loop_parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="Local Ollama base URL for inference.ollama.v1 jobs",
+    )
     loop_parser.add_argument("--interval", default=5.0, type=float, help="Seconds between polling attempts")
     loop_parser.add_argument("--max-jobs", default=None, type=int, help="Stop after completing this many jobs")
     loop_parser.add_argument("--stop-when-idle", action="store_true", help="Stop once the coordinator has no job")
@@ -436,6 +466,15 @@ def build_parser() -> argparse.ArgumentParser:
     echo_parser.add_argument("--reward", default=1, type=int, help="Credits awarded for accepted result")
     echo_parser.add_argument("--ttl-seconds", default=300, type=int, help="Job lifetime in seconds")
     echo_parser.set_defaults(func=create_echo_job)
+
+    ollama_parser = job_subcommands.add_parser("create-ollama", help="Create a local Ollama inference job")
+    ollama_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    ollama_parser.add_argument("--model", required=True, help="Ollama model name, such as llama3.2:3b")
+    ollama_parser.add_argument("--prompt", required=True, help="Prompt to send to Ollama")
+    ollama_parser.add_argument("--temperature", default=None, type=float, help="Optional Ollama temperature")
+    ollama_parser.add_argument("--reward", default=1, type=int, help="Credits awarded for accepted result")
+    ollama_parser.add_argument("--ttl-seconds", default=300, type=int, help="Job lifetime in seconds")
+    ollama_parser.set_defaults(func=create_ollama_job)
 
     deterministic_parser = job_subcommands.add_parser(
         "create-deterministic",

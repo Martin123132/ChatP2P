@@ -8,6 +8,7 @@ from typing import Any
 
 from .benchmark import capabilities_from_benchmark, collect_hardware_profile
 from .crypto import NodeIdentity
+from .ollama import DEFAULT_OLLAMA_BASE_URL, generate_ollama
 from .packets import JobPacket, JobResult
 
 
@@ -21,6 +22,7 @@ def collect_hardware_attestation() -> dict[str, Any]:
 class WorkerNode:
     identity: NodeIdentity
     capability_profile: dict[str, Any] | None = None
+    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
 
     def capabilities(self) -> dict[str, Any]:
         if self.capability_profile is not None:
@@ -66,6 +68,13 @@ class WorkerNode:
                 "confidence": 1.0,
                 "notes": "Echo inference is a transport and signing smoke test.",
             }
+        if job.job_type == "inference.ollama.v1":
+            return generate_ollama(
+                model=job.payload["model"],
+                prompt=job.payload["prompt"],
+                temperature=job.payload.get("temperature"),
+                base_url=self.ollama_base_url,
+            )
         raise ValueError(f"Unsupported job type: {job.job_type}")
 
     def _run_math_eval(self, payload: dict[str, Any]) -> dict[str, Any]:
