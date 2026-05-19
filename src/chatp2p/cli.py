@@ -15,6 +15,7 @@ from .crypto import NodeIdentity
 from .doctor import NodeDoctorConfig, run_node_doctor
 from .http_api import create_coordinator_http_server
 from .ollama import DEFAULT_OLLAMA_BASE_URL
+from .operator_config import OperatorConfig, write_operator_config
 from .packets import NodeRegistration
 from .proof import OllamaProofConfig, SwarmProofConfig, proof_summary, run_ollama_proof, run_swarm_proof
 from .storage import SQLiteCoordinatorStore
@@ -44,6 +45,29 @@ def _load_worker(home: Path, ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL) -> 
         identity=identity,
         capability_profile=load_node_capabilities(home),
         ollama_base_url=ollama_base_url,
+    )
+
+
+def _coordinator_client(args: argparse.Namespace) -> CoordinatorClient:
+    return CoordinatorClient(
+        args.coordinator,
+        admission_token=getattr(args, "admission_token", None),
+    )
+
+
+def _operator_config_from_args(args: argparse.Namespace) -> OperatorConfig:
+    config = (
+        OperatorConfig.from_file(Path(args.operator_config))
+        if args.operator_config
+        else OperatorConfig.default()
+    )
+    public_alpha = True if args.public_alpha or args.admission_token else None
+    return config.with_overrides(
+        public_alpha=public_alpha,
+        admission_token=args.admission_token,
+        max_request_bytes=args.max_request_bytes,
+        max_job_payload_bytes=args.max_job_payload_bytes,
+        allowed_job_types=args.allowed_job_type,
     )
 
 
@@ -175,6 +199,10 @@ def serve_coordinator(args: argparse.Namespace) -> None:
     home = Path(args.home)
     identity = _load_or_create_identity(home, "coordinator")
     db_path = Path(args.db) if args.db else home / "coordinator.sqlite3"
+    try:
+        operator_config = _operator_config_from_args(args)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     coordinator = Coordinator(
         identity=identity,
         store=SQLiteCoordinatorStore(db_path),
@@ -186,10 +214,16 @@ def serve_coordinator(args: argparse.Namespace) -> None:
     if args.seed_eval_suite:
         coordinator.create_deterministic_eval_jobs()
 
-    server = create_coordinator_http_server(coordinator, host=args.host, port=args.port)
+    server = create_coordinator_http_server(
+        coordinator,
+        host=args.host,
+        port=args.port,
+        operator_config=operator_config,
+    )
     print(f"coordinator: {identity.node_id}")
     print(f"listening: http://{args.host}:{args.port}")
     print(f"database: {db_path}")
+    print(f"operator: {json.dumps(operator_config.public_summary(), sort_keys=True)}")
     if args.seed_math_job:
         print("seeded: eval.math.v1")
     if args.seed_eval_suite:
@@ -204,7 +238,7 @@ def serve_coordinator(args: argparse.Namespace) -> None:
 
 def run_worker_once(args: argparse.Namespace) -> None:
     worker = _load_worker(Path(args.home), ollama_base_url=args.ollama_base_url)
-    client = CoordinatorClient(args.coordinator)
+    client = _coordinator_client(args)
 
     _register_worker(client, worker)
     result = _run_one_remote_job(client, worker)
@@ -239,7 +273,7 @@ def _run_one_remote_job(client: CoordinatorClient, worker: WorkerNode) -> dict:
 def run_worker_loop(args: argparse.Namespace) -> None:
     worker = _load_worker(Path(args.home), ollama_base_url=args.ollama_base_url)
     identity = worker.identity
-    client = CoordinatorClient(args.coordinator)
+    client = _coordinator_client(args)
     _register_worker(client, worker)
 
     completed = 0
@@ -263,7 +297,7 @@ def run_worker_loop(args: argparse.Namespace) -> None:
 
 def create_generic_job(args: argparse.Namespace) -> None:
     payload = json.loads(args.payload_json)
-    client = CoordinatorClient(args.coordinator)
+    client = _coordinator_client(args)
     job = client.create_job(
         job_type=args.job_type,
         payload=payload,
@@ -275,7 +309,7 @@ def create_generic_job(args: argparse.Namespace) -> None:
 
 
 def create_echo_job(args: argparse.Namespace) -> None:
-    client = CoordinatorClient(args.coordinator)
+    client = _coordinator_client(args)
     job = client.create_job(
         job_type="inference.echo.v1",
         payload={"prompt": args.prompt},
@@ -286,7 +320,7 @@ def create_echo_job(args: argparse.Namespace) -> None:
 
 
 def create_ollama_job(args: argparse.Namespace) -> None:
-    client = CoordinatorClient(args.coordinator)
+    client = _coordinator_client(args)
     payload: dict[str, Any] = {"model": args.model, "prompt": args.prompt}
     if args.temperature is not None:
         payload["temperature"] = args.temperature
@@ -300,7 +334,7 @@ def create_ollama_job(args: argparse.Namespace) -> None:
 
 
 def create_deterministic_job(args: argparse.Namespace) -> None:
-    client = CoordinatorClient(args.coordinator)
+    client = _coordinator_client(args)
     payload = _build_deterministic_payload(args)
     job = client.create_job(
         job_type="eval.deterministic.v1",
@@ -312,7 +346,7 @@ def create_deterministic_job(args: argparse.Namespace) -> None:
 
 
 def create_demo_suite(args: argparse.Namespace) -> None:
-    client = CoordinatorClient(args.coordinator)
+    client = _coordinator_client(args)
     jobs = client.create_demo_suite()
     print(
         json.dumps(
@@ -324,18 +358,37 @@ def create_demo_suite(args: argparse.Namespace) -> None:
 
 
 def list_jobs(args: argparse.Namespace) -> None:
-    client = CoordinatorClient(args.coordinator)
+    client = _coordinator_client(args)
     print(json.dumps(client.jobs(), indent=2, sort_keys=True))
 
 
 def show_snapshot(args: argparse.Namespace) -> None:
-    client = CoordinatorClient(args.coordinator)
+    client = _coordinator_client(args)
     print(json.dumps(client.snapshot(), indent=2, sort_keys=True))
 
 
 def show_reputation(args: argparse.Namespace) -> None:
-    client = CoordinatorClient(args.coordinator)
+    client = _coordinator_client(args)
     print(json.dumps(client.reputation(), indent=2, sort_keys=True))
+
+
+def write_operator_config_command(args: argparse.Namespace) -> None:
+    config = OperatorConfig(
+        public_alpha=True,
+        admission_token=args.admission_token,
+        max_request_bytes=args.max_request_bytes,
+        max_job_payload_bytes=args.max_job_payload_bytes,
+        allowed_job_types=tuple(args.allowed_job_type or OperatorConfig.default().allowed_job_types),
+    )
+    try:
+        config.validate()
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    path = Path(args.output)
+    if path.exists() and not args.force:
+        raise SystemExit(f"Operator config already exists at {path}. Use --force to replace it.")
+    write_operator_config(path, config)
+    print(json.dumps({"saved": str(path), "operator": config.public_summary()}, indent=2, sort_keys=True))
 
 
 def run_proof_swarm(args: argparse.Namespace) -> None:
@@ -480,6 +533,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor_parser.set_defaults(func=run_node_doctor_command)
 
+    operator_parser = subcommands.add_parser("operator", help="Operator config commands")
+    operator_subcommands = operator_parser.add_subparsers(dest="operator_command", required=True)
+    operator_config_parser = operator_subcommands.add_parser(
+        "write-config",
+        help="Write a public-alpha operator config file",
+    )
+    operator_config_parser.add_argument("--output", required=True, help="Path for operator config JSON")
+    operator_config_parser.add_argument("--admission-token", required=True, help="Shared admission token")
+    operator_config_parser.add_argument(
+        "--max-request-bytes",
+        default=256 * 1024,
+        type=int,
+        help="Maximum JSON request body size accepted by the coordinator",
+    )
+    operator_config_parser.add_argument(
+        "--max-job-payload-bytes",
+        default=16 * 1024,
+        type=int,
+        help="Maximum job payload JSON size accepted by public job creation",
+    )
+    operator_config_parser.add_argument(
+        "--allowed-job-type",
+        action="append",
+        default=None,
+        help="Allowed public job type. Can be passed more than once",
+    )
+    operator_config_parser.add_argument("--force", action="store_true", help="Replace an existing config")
+    operator_config_parser.set_defaults(func=write_operator_config_command)
+
     coordinator_parser = subcommands.add_parser("coordinator", help="Coordinator commands")
     coordinator_subcommands = coordinator_parser.add_subparsers(dest="coordinator_command", required=True)
     serve_parser = coordinator_subcommands.add_parser("serve", help="Run a local HTTP coordinator")
@@ -487,6 +569,31 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--host", default="127.0.0.1", help="Host to bind")
     serve_parser.add_argument("--port", default=8765, type=int, help="Port to bind")
     serve_parser.add_argument("--db", default=None, help="SQLite database path")
+    serve_parser.add_argument("--operator-config", default=None, help="Operator config JSON path")
+    serve_parser.add_argument(
+        "--public-alpha",
+        action="store_true",
+        help="Require admission token for node registration and job creation",
+    )
+    serve_parser.add_argument("--admission-token", default=None, help="Shared admission token for public alpha")
+    serve_parser.add_argument(
+        "--max-request-bytes",
+        default=None,
+        type=int,
+        help="Override maximum JSON request body size",
+    )
+    serve_parser.add_argument(
+        "--max-job-payload-bytes",
+        default=None,
+        type=int,
+        help="Override maximum public job payload JSON size",
+    )
+    serve_parser.add_argument(
+        "--allowed-job-type",
+        action="append",
+        default=None,
+        help="Override allowed public job type. Can be passed more than once",
+    )
     serve_parser.add_argument(
         "--lease-timeout-seconds",
         default=30.0,
@@ -508,6 +615,7 @@ def build_parser() -> argparse.ArgumentParser:
     once_parser = worker_subcommands.add_parser("run-once", help="Register, lease one job, run it, submit result")
     once_parser.add_argument("--home", default=".mesh", help="Directory for worker identity")
     once_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    once_parser.add_argument("--admission-token", default=None, help="Admission token for public alpha coordinators")
     once_parser.add_argument(
         "--ollama-base-url",
         default=DEFAULT_OLLAMA_BASE_URL,
@@ -518,6 +626,7 @@ def build_parser() -> argparse.ArgumentParser:
     loop_parser = worker_subcommands.add_parser("loop", help="Continuously poll for jobs")
     loop_parser.add_argument("--home", default=".mesh", help="Directory for worker identity")
     loop_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    loop_parser.add_argument("--admission-token", default=None, help="Admission token for public alpha coordinators")
     loop_parser.add_argument(
         "--ollama-base-url",
         default=DEFAULT_OLLAMA_BASE_URL,
@@ -533,6 +642,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     generic_parser = job_subcommands.add_parser("create", help="Create a job from a JSON payload")
     generic_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    generic_parser.add_argument("--admission-token", default=None, help="Admission token for public alpha coordinators")
     generic_parser.add_argument("--job-type", required=True, help="Job type, such as eval.deterministic.v1")
     generic_parser.add_argument("--payload-json", required=True, help="JSON object payload")
     generic_parser.add_argument("--model-id", default=None, help="Optional model id override")
@@ -542,6 +652,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     echo_parser = job_subcommands.add_parser("create-echo", help="Create an echo inference smoke-test job")
     echo_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    echo_parser.add_argument("--admission-token", default=None, help="Admission token for public alpha coordinators")
     echo_parser.add_argument("--prompt", required=True, help="Prompt to echo")
     echo_parser.add_argument("--reward", default=1, type=int, help="Credits awarded for accepted result")
     echo_parser.add_argument("--ttl-seconds", default=300, type=int, help="Job lifetime in seconds")
@@ -549,6 +660,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ollama_parser = job_subcommands.add_parser("create-ollama", help="Create a local Ollama inference job")
     ollama_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    ollama_parser.add_argument("--admission-token", default=None, help="Admission token for public alpha coordinators")
     ollama_parser.add_argument("--model", required=True, help="Ollama model name, such as llama3.2:3b")
     ollama_parser.add_argument("--prompt", required=True, help="Prompt to send to Ollama")
     ollama_parser.add_argument("--temperature", default=None, type=float, help="Optional Ollama temperature")
@@ -561,6 +673,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Create a deterministic eval job",
     )
     deterministic_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    deterministic_parser.add_argument(
+        "--admission-token",
+        default=None,
+        help="Admission token for public alpha coordinators",
+    )
     deterministic_parser.add_argument("--task", required=True, choices=["arithmetic", "number_theory", "text"])
     deterministic_parser.add_argument("--operation", choices=["add", "subtract", "multiply", "divide"])
     deterministic_parser.add_argument("--operands", nargs=2, metavar=("LEFT", "RIGHT"), help="Arithmetic operands")
@@ -572,18 +689,26 @@ def build_parser() -> argparse.ArgumentParser:
 
     suite_parser = job_subcommands.add_parser("create-suite", help="Create the deterministic demo eval suite")
     suite_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    suite_parser.add_argument("--admission-token", default=None, help="Admission token for public alpha coordinators")
     suite_parser.set_defaults(func=create_demo_suite)
 
     list_parser = job_subcommands.add_parser("list", help="List jobs")
     list_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    list_parser.add_argument("--admission-token", default=None, help="Admission token for public alpha coordinators")
     list_parser.set_defaults(func=list_jobs)
 
     snapshot_parser = job_subcommands.add_parser("snapshot", help="Show coordinator snapshot")
     snapshot_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    snapshot_parser.add_argument("--admission-token", default=None, help="Admission token for public alpha coordinators")
     snapshot_parser.set_defaults(func=show_snapshot)
 
     reputation_parser = job_subcommands.add_parser("reputation", help="Show node reputation")
     reputation_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    reputation_parser.add_argument(
+        "--admission-token",
+        default=None,
+        help="Admission token for public alpha coordinators",
+    )
     reputation_parser.set_defaults(func=show_reputation)
 
     proof_parser = subcommands.add_parser("proof", help="Run local proof harnesses")

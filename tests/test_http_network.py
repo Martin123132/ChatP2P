@@ -7,6 +7,7 @@ from chatp2p.client import CoordinatorClient
 from chatp2p.coordinator import Coordinator
 from chatp2p.crypto import NodeIdentity
 from chatp2p.http_api import create_coordinator_http_server
+from chatp2p.operator_config import OperatorConfig
 from chatp2p.packets import NodeHeartbeat, NodeRegistration
 from chatp2p.worker import WorkerNode
 
@@ -162,6 +163,114 @@ def test_http_rejects_unsigned_liveness_and_legacy_job_pull():
             assert exc.code == 403
         else:
             raise AssertionError("Expected spoofed heartbeat to be rejected")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_public_alpha_requires_admission_token_for_registration_and_job_creation():
+    coordinator_identity = NodeIdentity.generate(prefix="coordinator")
+    coordinator = Coordinator(identity=coordinator_identity)
+    operator_config = OperatorConfig(public_alpha=True, admission_token="alpha-token-123")
+    server = create_coordinator_http_server(
+        coordinator,
+        host="127.0.0.1",
+        port=0,
+        operator_config=operator_config,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.server_address
+        base_url = f"http://{host}:{port}"
+        worker_identity = NodeIdentity.generate(prefix="worker")
+        worker = WorkerNode(identity=worker_identity)
+        registration = NodeRegistration.create(node=worker_identity, capabilities=worker.capabilities())
+
+        try:
+            CoordinatorClient(base_url).register(registration)
+        except HTTPError as exc:
+            assert exc.code == 403
+        else:
+            raise AssertionError("Expected registration without admission token to fail")
+
+        client = CoordinatorClient(base_url, admission_token="alpha-token-123")
+        assert client.register(registration)["accepted"] is True
+
+        job_payload = {
+            "task": "arithmetic",
+            "operation": "add",
+            "operands": [1, 2],
+            "expected": 3,
+        }
+        try:
+            CoordinatorClient(base_url).create_job(
+                job_type="eval.deterministic.v1",
+                payload=job_payload,
+            )
+        except HTTPError as exc:
+            assert exc.code == 403
+        else:
+            raise AssertionError("Expected job creation without admission token to fail")
+
+        job = client.create_job(job_type="eval.deterministic.v1", payload=job_payload)
+        assert job.verify_signature()
+
+        health = client.health()
+        assert health["operator"]["public_alpha"] is True
+        assert health["operator"]["admission_token_required"] is True
+        assert "admission_token" not in health["operator"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_public_alpha_rejects_disallowed_and_oversized_jobs():
+    coordinator_identity = NodeIdentity.generate(prefix="coordinator")
+    coordinator = Coordinator(identity=coordinator_identity)
+    operator_config = OperatorConfig(
+        public_alpha=True,
+        admission_token="alpha-token-123",
+        max_job_payload_bytes=256,
+        allowed_job_types=("eval.deterministic.v1",),
+    )
+    server = create_coordinator_http_server(
+        coordinator,
+        host="127.0.0.1",
+        port=0,
+        operator_config=operator_config,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.server_address
+        client = CoordinatorClient(f"http://{host}:{port}", admission_token="alpha-token-123")
+
+        try:
+            client.create_job(job_type="inference.echo.v1", payload={"prompt": "blocked"})
+        except HTTPError as exc:
+            assert exc.code == 403
+        else:
+            raise AssertionError("Expected disallowed job type to fail")
+
+        try:
+            client.create_job(
+                job_type="eval.deterministic.v1",
+                payload={
+                    "task": "text",
+                    "operation": "normalize_whitespace",
+                    "value": "x" * 512,
+                    "expected": "x" * 512,
+                },
+            )
+        except HTTPError as exc:
+            assert exc.code == 413
+        else:
+            raise AssertionError("Expected oversized job payload to fail")
     finally:
         server.shutdown()
         server.server_close()

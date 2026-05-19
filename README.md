@@ -118,6 +118,29 @@ chatp2p proof ollama --model llama3.2:3b --workers 4 --jobs 8 --report .mesh/pro
 
 The Ollama proof preflights `/api/tags`, starts a local coordinator, registers separate worker identities that advertise the requested model, creates signed `inference.ollama.v1` jobs, and records result previews in the JSON report. Add `--mismatched-workers 1` to prove workers without the requested model register successfully but do not receive those jobs.
 
+## Public Alpha Seed Mode
+
+Do not expose a coordinator to the internet without an admission token. Write an operator config:
+
+```bash
+chatp2p operator write-config --output D:\ChatP2PData\operator-config.json --admission-token "change-this-long-token"
+```
+
+Start a coordinator with the config:
+
+```bash
+chatp2p coordinator serve --host 0.0.0.0 --port 8765 --home D:\ChatP2PData\.mesh --operator-config D:\ChatP2PData\operator-config.json
+```
+
+Workers and job producers pass the same token:
+
+```bash
+chatp2p worker loop --coordinator http://YOUR_HOST:8765 --admission-token "change-this-long-token"
+chatp2p job create-echo --coordinator http://YOUR_HOST:8765 --admission-token "change-this-long-token" --prompt "hello mesh"
+```
+
+Public alpha mode requires the token for node registration and job creation, limits request body size, limits public job payload size, and restricts job types to the operator allow-list.
+
 Generic JSON job creation is also available:
 
 ```bash

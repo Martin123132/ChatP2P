@@ -19,16 +19,20 @@ from .packets import (
 
 
 class CoordinatorClient:
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, admission_token: str | None = None):
         self.base_url = base_url.rstrip("/")
+        self.admission_token = admission_token
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = None if payload is None else json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self.admission_token:
+            headers["X-ChatP2P-Admission-Token"] = self.admission_token
         request = Request(
             f"{self.base_url}{path}",
             data=body,
             method=method,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         with urlopen(request, timeout=10) as response:
             raw = response.read()

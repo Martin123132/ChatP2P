@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .coordinator import Coordinator
+from .operator_config import OperatorConfig
 from .packets import JobLeaseAcknowledgement, JobLeaseRequest, JobResult, NodeHeartbeat, NodeRegistration
 
 
@@ -31,10 +32,26 @@ def _html_response(handler: BaseHTTPRequestHandler, status: int, markup: str) ->
     handler.wfile.write(body)
 
 
-def _read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+class HTTPRequestRejected(ValueError):
+    def __init__(self, status: int, payload: dict[str, Any]):
+        super().__init__(payload.get("error", "request rejected"))
+        self.status = status
+        self.payload = payload
+
+
+def _read_json(handler: BaseHTTPRequestHandler, *, max_bytes: int) -> dict[str, Any]:
     content_length = int(handler.headers.get("Content-Length", "0"))
     if content_length == 0:
         return {}
+    if content_length > max_bytes:
+        raise HTTPRequestRejected(
+            413,
+            {
+                "accepted": False,
+                "error": f"request body exceeds max_request_bytes ({max_bytes})",
+                "max_request_bytes": max_bytes,
+            },
+        )
     raw = handler.rfile.read(content_length)
     return json.loads(raw.decode("utf-8"))
 
@@ -352,11 +369,80 @@ def create_coordinator_http_server(
     coordinator: Coordinator,
     host: str = "127.0.0.1",
     port: int = 8765,
+    operator_config: OperatorConfig | None = None,
 ) -> ThreadingHTTPServer:
     lock = threading.Lock()
+    config = operator_config or OperatorConfig.default()
 
     class CoordinatorHandler(BaseHTTPRequestHandler):
         server_version = "ChatP2PHTTP/0.1"
+
+        def _read_json_or_reject(self) -> dict[str, Any] | None:
+            try:
+                return _read_json(self, max_bytes=config.max_request_bytes)
+            except HTTPRequestRejected as exc:
+                _json_response(self, exc.status, exc.payload)
+            except json.JSONDecodeError as exc:
+                _json_response(self, 400, {"accepted": False, "error": str(exc)})
+            return None
+
+        def _admission_token(self) -> str | None:
+            token = self.headers.get("X-ChatP2P-Admission-Token")
+            if token:
+                return token.strip()
+            authorization = self.headers.get("Authorization")
+            if authorization and authorization.lower().startswith("bearer "):
+                return authorization[7:].strip()
+            return None
+
+        def _admission_allowed(self, path: str) -> bool:
+            if not config.admission_required_for(path):
+                return True
+            if config.token_matches(self._admission_token()):
+                return True
+            _json_response(
+                self,
+                403,
+                {
+                    "accepted": False,
+                    "error": "admission token required",
+                    "public_alpha": config.public_summary(),
+                },
+            )
+            return False
+
+        def _validate_job_creation(self, request: dict[str, Any]) -> bool:
+            job_type = request.get("job_type")
+            if job_type not in config.allowed_job_types:
+                _json_response(
+                    self,
+                    403,
+                    {
+                        "created": False,
+                        "error": f"job_type {job_type!r} is not allowed by operator policy",
+                        "allowed_job_types": list(config.allowed_job_types),
+                    },
+                )
+                return False
+
+            payload = request.get("payload")
+            payload_size = len(json.dumps(payload, sort_keys=True).encode("utf-8"))
+            if payload_size > config.max_job_payload_bytes:
+                _json_response(
+                    self,
+                    413,
+                    {
+                        "created": False,
+                        "error": (
+                            f"job payload exceeds max_job_payload_bytes "
+                            f"({config.max_job_payload_bytes})"
+                        ),
+                        "payload_bytes": payload_size,
+                        "max_job_payload_bytes": config.max_job_payload_bytes,
+                    },
+                )
+                return False
+            return True
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
@@ -369,12 +455,16 @@ def create_coordinator_http_server(
 
             if parsed.path == "/health":
                 with lock:
-                    _json_response(self, 200, coordinator.status())
+                    status = coordinator.status()
+                    status["operator"] = config.public_summary()
+                    _json_response(self, 200, status)
                 return
 
             if parsed.path == "/api/status":
                 with lock:
-                    _json_response(self, 200, coordinator.status())
+                    status = coordinator.status()
+                    status["operator"] = config.public_summary()
+                    _json_response(self, 200, status)
                 return
 
             if parsed.path == "/api/nodes":
@@ -412,9 +502,14 @@ def create_coordinator_http_server(
             parsed = urlparse(self.path)
 
             if parsed.path == "/nodes/register":
+                if not self._admission_allowed(parsed.path):
+                    return
+                request = self._read_json_or_reject()
+                if request is None:
+                    return
                 try:
-                    registration = NodeRegistration.from_dict(_read_json(self))
-                except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                    registration = NodeRegistration.from_dict(request)
+                except (KeyError, TypeError) as exc:
                     _json_response(self, 400, {"accepted": False, "error": str(exc)})
                     return
                 with lock:
@@ -425,9 +520,12 @@ def create_coordinator_http_server(
                 return
 
             if parsed.path == "/nodes/heartbeat":
+                request = self._read_json_or_reject()
+                if request is None:
+                    return
                 try:
-                    heartbeat = NodeHeartbeat.from_dict(_read_json(self))
-                except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                    heartbeat = NodeHeartbeat.from_dict(request)
+                except (KeyError, TypeError) as exc:
                     _json_response(self, 400, {"accepted": False, "error": str(exc)})
                     return
                 with lock:
@@ -442,9 +540,12 @@ def create_coordinator_http_server(
                 return
 
             if parsed.path == "/jobs/next":
+                request_body = self._read_json_or_reject()
+                if request_body is None:
+                    return
                 try:
-                    lease_request = JobLeaseRequest.from_dict(_read_json(self))
-                except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                    lease_request = JobLeaseRequest.from_dict(request_body)
+                except (KeyError, TypeError) as exc:
                     _json_response(self, 400, {"accepted": False, "error": str(exc)})
                     return
                 with lock:
@@ -465,9 +566,12 @@ def create_coordinator_http_server(
                 return
 
             if parsed.path == "/jobs/lease/ack":
+                request = self._read_json_or_reject()
+                if request is None:
+                    return
                 try:
-                    acknowledgement = JobLeaseAcknowledgement.from_dict(_read_json(self))
-                except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                    acknowledgement = JobLeaseAcknowledgement.from_dict(request)
+                except (KeyError, TypeError) as exc:
                     _json_response(self, 400, {"accepted": False, "error": str(exc)})
                     return
                 with lock:
@@ -491,9 +595,12 @@ def create_coordinator_http_server(
                 return
 
             if parsed.path == "/jobs/result":
+                request = self._read_json_or_reject()
+                if request is None:
+                    return
                 try:
-                    result = JobResult.from_dict(_read_json(self))
-                except (KeyError, TypeError, json.JSONDecodeError) as exc:
+                    result = JobResult.from_dict(request)
+                except (KeyError, TypeError) as exc:
                     _json_response(self, 400, {"accepted": False, "error": str(exc)})
                     return
                 with lock:
@@ -504,8 +611,14 @@ def create_coordinator_http_server(
                 return
 
             if parsed.path == "/jobs":
+                if not self._admission_allowed(parsed.path):
+                    return
+                request = self._read_json_or_reject()
+                if request is None:
+                    return
+                if not self._validate_job_creation(request):
+                    return
                 try:
-                    request = _read_json(self)
                     with lock:
                         job = coordinator.create_job(
                             job_type=request["job_type"],
@@ -517,19 +630,23 @@ def create_coordinator_http_server(
                             reward=int(request.get("reward", 1)),
                             ttl_seconds=int(request.get("ttl_seconds", 300)),
                         )
-                except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                except (KeyError, TypeError, ValueError) as exc:
                     _json_response(self, 400, {"created": False, "error": str(exc)})
                     return
                 _json_response(self, 201, {"created": True, "job": job.to_dict()})
                 return
 
             if parsed.path == "/jobs/demo-math":
+                if not self._admission_allowed(parsed.path):
+                    return
                 with lock:
                     job = coordinator.create_math_eval_job()
                 _json_response(self, 201, {"job": job.to_dict()})
                 return
 
             if parsed.path == "/jobs/demo-suite":
+                if not self._admission_allowed(parsed.path):
+                    return
                 with lock:
                     jobs = coordinator.create_deterministic_eval_jobs()
                 _json_response(self, 201, {"jobs": [job.to_dict() for job in jobs]})
