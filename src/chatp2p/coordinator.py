@@ -591,6 +591,7 @@ class Coordinator:
         verification_summaries = [self.verification_summary(job_id) for job_id in self.jobs]
         verified_jobs = sum(1 for summary in verification_summaries if summary["status"] == "verified")
         disputed_jobs = sum(1 for summary in verification_summaries if summary["status"] == "disputed")
+        expired_jobs = sum(1 for summary in verification_summaries if summary["status"] == "expired")
         completed_jobs = verified_jobs + disputed_jobs
         queued_jobs = sum(1 for summary in verification_summaries if summary["status"] == "queued")
         pending_jobs = sum(1 for summary in verification_summaries if summary["status"] == "pending")
@@ -615,6 +616,7 @@ class Coordinator:
             "completed_jobs": completed_jobs,
             "verified_jobs": verified_jobs,
             "disputed_jobs": disputed_jobs,
+            "expired_jobs": expired_jobs,
             "credits": dict(self.credits),
             "leasing_policy": self.leasing_policy(),
         }
@@ -873,6 +875,8 @@ class Coordinator:
             status = "verified"
         elif len(results) >= max_results:
             status = "disputed"
+        elif job.deadline < time.time():
+            status = "expired"
         elif results:
             status = "pending"
         elif self._active_leases(job_id):
@@ -890,7 +894,7 @@ class Coordinator:
         }
 
     def _job_is_terminal(self, job_id: str) -> bool:
-        return self.verification_summary(job_id)["status"] in {"verified", "disputed"}
+        return self.verification_summary(job_id)["status"] in {"verified", "disputed", "expired"}
 
     def _active_leases(self, job_id: str, now: float | None = None) -> set[str]:
         timestamp = now if now is not None else time.time()

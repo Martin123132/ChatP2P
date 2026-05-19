@@ -545,6 +545,22 @@ def test_expired_lease_requeues_job_and_rejects_late_result():
     assert coordinator.verification_summary(job.job_id)["status"] == "verified"
 
 
+def test_expired_job_is_not_leased(monkeypatch):
+    monkeypatch.setattr("chatp2p.packets.time.time", lambda: 100.0)
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    worker_identity = NodeIdentity.generate(prefix="worker")
+    worker = WorkerNode(identity=worker_identity)
+    coordinator.register_node(worker_identity.public(), capabilities=worker.capabilities())
+    job = coordinator.create_echo_inference_job("too late")
+    monkeypatch.undo()
+
+    monkeypatch.setattr("chatp2p.coordinator.time.time", lambda: job.deadline + 1)
+
+    assert coordinator.verification_summary(job.job_id)["status"] == "expired"
+    assert coordinator.status()["expired_jobs"] == 1
+    assert coordinator.lease_next_job(worker_identity.node_id) is None
+
+
 def test_node_liveness_updates_when_worker_polls():
     coordinator = Coordinator(
         identity=NodeIdentity.generate(prefix="coordinator"),

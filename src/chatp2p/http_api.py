@@ -81,6 +81,7 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
         ("Expired Leases", "expired_leases"),
         ("Verified", "verified_jobs"),
         ("Disputed", "disputed_jobs"),
+        ("Expired Jobs", "expired_jobs"),
     ]
     metrics = "\n".join(
         f"""
@@ -272,6 +273,7 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
     .pending {{ background: var(--gray); }}
     .verified {{ background: var(--green); }}
     .disputed {{ background: var(--red); }}
+    .expired {{ background: var(--red); }}
     .rep {{
       display: inline-block;
       min-width: 66px;

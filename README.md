@@ -163,6 +163,7 @@ Current job states:
 - `pending`: at least one result exists, but quorum is not reached
 - `verified`: enough matching results exist
 - `disputed`: max verification attempts used without quorum
+- `expired`: job deadline passed before terminal verification
 
 ## Reputation
 
