@@ -15,7 +15,7 @@ from .crypto import NodeIdentity
 from .http_api import create_coordinator_http_server
 from .ollama import DEFAULT_OLLAMA_BASE_URL
 from .packets import NodeRegistration
-from .proof import SwarmProofConfig, proof_summary, run_swarm_proof
+from .proof import OllamaProofConfig, SwarmProofConfig, proof_summary, run_ollama_proof, run_swarm_proof
 from .storage import SQLiteCoordinatorStore
 from .worker import WorkerNode
 
@@ -359,6 +359,32 @@ def run_proof_swarm(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def run_proof_ollama(args: argparse.Namespace) -> None:
+    config = OllamaProofConfig(
+        workers=args.workers,
+        jobs=args.jobs,
+        model=args.model,
+        prompt=args.prompt,
+        work_dir=Path(args.work_dir),
+        report_path=Path(args.report),
+        timeout_seconds=args.timeout_seconds,
+        lease_timeout_seconds=args.lease_timeout_seconds,
+        poll_interval=args.poll_interval,
+        worker_interval=args.worker_interval,
+        ollama_base_url=args.ollama_base_url,
+        temperature=args.temperature,
+        mismatched_workers=args.mismatched_workers,
+    )
+    try:
+        report = run_ollama_proof(config)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    print(json.dumps(proof_summary(report), indent=2, sort_keys=True))
+    if not report["passed"]:
+        raise SystemExit(1)
+
+
 def run_node_benchmark_command(args: argparse.Namespace) -> None:
     home = Path(args.home)
     report = run_node_benchmark(
@@ -557,6 +583,62 @@ def build_parser() -> argparse.ArgumentParser:
         help="Workers that acknowledge one lease and disappear to prove lease recovery",
     )
     swarm_parser.set_defaults(func=run_proof_swarm)
+
+    ollama_proof_parser = proof_subcommands.add_parser(
+        "ollama",
+        help="Run a local multi-process Ollama inference proof",
+    )
+    ollama_proof_parser.add_argument("--workers", default=4, type=int, help="Number of worker processes to launch")
+    ollama_proof_parser.add_argument("--jobs", default=8, type=int, help="Number of Ollama inference jobs to create")
+    ollama_proof_parser.add_argument("--model", required=True, help="Required local Ollama model name")
+    ollama_proof_parser.add_argument(
+        "--prompt",
+        default="Explain peer-to-peer AI in one concise sentence.",
+        help="Base prompt to send to Ollama for each proof job",
+    )
+    ollama_proof_parser.add_argument("--temperature", default=None, type=float, help="Optional Ollama temperature")
+    ollama_proof_parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="Local Ollama base URL",
+    )
+    ollama_proof_parser.add_argument("--work-dir", default=".mesh/proof", help="Directory for proof run state")
+    ollama_proof_parser.add_argument(
+        "--report",
+        default=".mesh/proof/ollama-report.json",
+        help="Path for the JSON proof report",
+    )
+    ollama_proof_parser.add_argument(
+        "--timeout-seconds",
+        default=180.0,
+        type=float,
+        help="Maximum proof runtime before marking the run failed",
+    )
+    ollama_proof_parser.add_argument(
+        "--lease-timeout-seconds",
+        default=60.0,
+        type=float,
+        help="Seconds before unfinished leases are released to other workers",
+    )
+    ollama_proof_parser.add_argument(
+        "--poll-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between parent snapshot polls",
+    )
+    ollama_proof_parser.add_argument(
+        "--worker-interval",
+        default=0.25,
+        type=float,
+        help="Seconds idle workers wait between job polls",
+    )
+    ollama_proof_parser.add_argument(
+        "--mismatched-workers",
+        default=0,
+        type=int,
+        help="Workers that advertise a different Ollama model to prove model-aware routing",
+    )
+    ollama_proof_parser.set_defaults(func=run_proof_ollama)
 
     return parser
 

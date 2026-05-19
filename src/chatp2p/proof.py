@@ -16,6 +16,7 @@ from .client import CoordinatorClient
 from .coordinator import Coordinator
 from .crypto import NodeIdentity
 from .http_api import create_coordinator_http_server
+from .ollama import DEFAULT_OLLAMA_BASE_URL, OllamaError, list_ollama_models
 from .packets import NodeRegistration
 from .storage import SQLiteCoordinatorStore
 from .worker import WorkerNode
@@ -32,6 +33,23 @@ class SwarmProofConfig:
     poll_interval: float = 0.5
     worker_interval: float = 0.1
     fault_timeout_workers: int = 0
+
+
+@dataclass(frozen=True)
+class OllamaProofConfig:
+    workers: int = 4
+    jobs: int = 8
+    model: str = ""
+    prompt: str = "Explain peer-to-peer AI in one concise sentence."
+    work_dir: Path = Path(".mesh/proof")
+    report_path: Path = Path(".mesh/proof/ollama-report.json")
+    timeout_seconds: float = 180.0
+    lease_timeout_seconds: float = 60.0
+    poll_interval: float = 0.5
+    worker_interval: float = 0.25
+    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
+    temperature: float | None = None
+    mismatched_workers: int = 0
 
 
 def run_swarm_proof(config: SwarmProofConfig) -> dict[str, Any]:
@@ -83,6 +101,9 @@ def run_swarm_proof(config: SwarmProofConfig) -> dict[str, Any]:
                     indexes=range(fault_count),
                     interval=config.worker_interval,
                     fault_once=True,
+                    capability_profile=None,
+                    ollama_base_url=DEFAULT_OLLAMA_BASE_URL,
+                    role="fault-timeout",
                 )
             )
             deadline = time.time() + min(15.0, max(5.0, config.lease_timeout_seconds * 3))
@@ -100,6 +121,9 @@ def run_swarm_proof(config: SwarmProofConfig) -> dict[str, Any]:
                 indexes=range(fault_count, config.workers),
                 interval=config.worker_interval,
                 fault_once=False,
+                capability_profile=None,
+                ollama_base_url=DEFAULT_OLLAMA_BASE_URL,
+                role="worker",
             )
         )
 
@@ -156,6 +180,177 @@ def run_swarm_proof(config: SwarmProofConfig) -> dict[str, Any]:
         worker_reports=worker_reports,
         timed_out=timed_out,
         terminal=terminal,
+        proof_kind="swarm",
+    )
+    config.report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    return report
+
+
+def run_ollama_proof(config: OllamaProofConfig) -> dict[str, Any]:
+    """Run a local multi-process proof using real Ollama inference jobs."""
+
+    _validate_ollama_config(config)
+    model = config.model.strip()
+    prompt = config.prompt.strip()
+    try:
+        available_models = list_ollama_models(base_url=config.ollama_base_url)
+    except OllamaError as exc:
+        raise ValueError(f"Ollama model discovery failed: {exc}") from exc
+    if model not in available_models:
+        models = ", ".join(available_models) if available_models else "none"
+        raise ValueError(
+            f"Ollama at {config.ollama_base_url} does not advertise model {model!r}. "
+            f"Available models: {models}"
+        )
+
+    run_id = f"ollama_proof_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    run_dir = config.work_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    config.report_path.parent.mkdir(parents=True, exist_ok=True)
+
+    started_at = time.time()
+    coordinator_identity = NodeIdentity.generate(prefix="coordinator")
+    coordinator = Coordinator(
+        identity=coordinator_identity,
+        store=SQLiteCoordinatorStore(run_dir / "coordinator.sqlite3"),
+        lease_timeout_seconds=config.lease_timeout_seconds,
+        node_stale_seconds=max(config.lease_timeout_seconds * 4, 10.0),
+    )
+    for index in range(config.jobs):
+        coordinator.create_ollama_inference_job(
+            model=model,
+            prompt=_ollama_proof_prompt(prompt, index),
+            temperature=config.temperature,
+            ttl_seconds=max(300, int(config.timeout_seconds + 60)),
+        )
+
+    server = create_coordinator_http_server(coordinator, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    base_url = f"http://{host}:{port}"
+
+    matching_profile = _ollama_capability_profile(
+        models=available_models,
+        base_url=config.ollama_base_url,
+    )
+    mismatch_model = f"missing-for-{model}"
+    mismatched_profile = _ollama_capability_profile(
+        models=[mismatch_model],
+        base_url=config.ollama_base_url,
+    )
+
+    context = multiprocessing.get_context("spawn")
+    stop_event = context.Event()
+    result_queue = context.Queue()
+    processes: list[multiprocessing.Process] = []
+    worker_reports: dict[int, dict[str, Any]] = {}
+
+    try:
+        if config.mismatched_workers:
+            processes.extend(
+                _start_worker_processes(
+                    context=context,
+                    base_url=base_url,
+                    run_dir=run_dir,
+                    stop_event=stop_event,
+                    result_queue=result_queue,
+                    indexes=range(config.mismatched_workers),
+                    interval=config.worker_interval,
+                    fault_once=False,
+                    capability_profile=mismatched_profile,
+                    ollama_base_url=config.ollama_base_url,
+                    role="ollama-mismatch",
+                )
+            )
+
+        processes.extend(
+            _start_worker_processes(
+                context=context,
+                base_url=base_url,
+                run_dir=run_dir,
+                stop_event=stop_event,
+                result_queue=result_queue,
+                indexes=range(config.mismatched_workers, config.workers),
+                interval=config.worker_interval,
+                fault_once=False,
+                capability_profile=matching_profile,
+                ollama_base_url=config.ollama_base_url,
+                role="ollama-worker",
+            )
+        )
+
+        client = CoordinatorClient(base_url)
+        final_snapshot = client.snapshot()
+        terminal = False
+        timed_out = False
+        deadline = started_at + config.timeout_seconds
+        while True:
+            worker_reports.update(_drain_worker_reports(result_queue))
+            final_snapshot = client.snapshot()
+            status = final_snapshot["status"]
+            terminal = status["verified_jobs"] + status["disputed_jobs"] >= config.jobs
+            if terminal:
+                break
+            if time.time() >= deadline:
+                timed_out = True
+                break
+            time.sleep(config.poll_interval)
+    finally:
+        stop_event.set()
+        for process in processes:
+            process.join(timeout=5)
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=2)
+        worker_reports.update(_drain_worker_reports(result_queue))
+        try:
+            final_snapshot = CoordinatorClient(base_url).snapshot()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    finished_at = time.time()
+    for process in processes:
+        if process.pid is None:
+            continue
+        report = worker_reports.setdefault(
+            _worker_index_from_name(process.name),
+            {"worker_index": _worker_index_from_name(process.name), "errors": []},
+        )
+        report["process_exitcode"] = process.exitcode
+
+    report = _build_report(
+        config=config,
+        run_id=run_id,
+        run_dir=run_dir,
+        coordinator_url=base_url,
+        started_at=started_at,
+        finished_at=finished_at,
+        final_snapshot=final_snapshot,
+        worker_reports=worker_reports,
+        timed_out=timed_out,
+        terminal=terminal,
+        proof_kind="ollama",
+        extra_parameters={
+            "model": config.model,
+            "prompt": prompt,
+            "temperature": config.temperature,
+            "ollama_base_url": config.ollama_base_url,
+            "mismatched_workers": config.mismatched_workers,
+        },
+        extra_report_fields={
+            "ollama": {
+                "base_url": config.ollama_base_url,
+                "model": model,
+                "available_models": available_models,
+                "matching_workers": config.workers - config.mismatched_workers,
+                "mismatched_workers": config.mismatched_workers,
+            },
+            "ollama_results": _ollama_result_summaries(final_snapshot),
+        },
     )
     config.report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     return report
@@ -164,8 +359,9 @@ def run_swarm_proof(config: SwarmProofConfig) -> dict[str, Any]:
 def proof_summary(report: dict[str, Any]) -> dict[str, Any]:
     """Return a small CLI-friendly summary for a full proof report."""
 
-    return {
+    summary = {
         "passed": report["passed"],
+        "proof_kind": report.get("proof_kind", "swarm"),
         "run_id": report["run_id"],
         "report": report["report_path"],
         "duration_seconds": report["duration_seconds"],
@@ -181,6 +377,10 @@ def proof_summary(report: dict[str, Any]) -> dict[str, Any]:
         "capability_tiers": report["capability_tiers"],
         "worker_error_count": len(report["worker_errors"]),
     }
+    if "ollama" in report:
+        summary["model"] = report["ollama"]["model"]
+        summary["ollama_base_url"] = report["ollama"]["base_url"]
+    return summary
 
 
 def _validate_config(config: SwarmProofConfig) -> None:
@@ -202,6 +402,33 @@ def _validate_config(config: SwarmProofConfig) -> None:
         raise ValueError("--fault-timeout-workers must leave at least one normal worker")
 
 
+def _validate_ollama_config(config: OllamaProofConfig) -> None:
+    if config.workers < 1:
+        raise ValueError("--workers must be at least 1")
+    if config.jobs < 1:
+        raise ValueError("--jobs must be at least 1")
+    if not config.model.strip():
+        raise ValueError("--model is required")
+    if not config.prompt.strip():
+        raise ValueError("--prompt must be non-empty")
+    if config.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0")
+    if config.lease_timeout_seconds <= 0:
+        raise ValueError("--lease-timeout-seconds must be greater than 0")
+    if config.poll_interval <= 0:
+        raise ValueError("--poll-interval must be greater than 0")
+    if config.worker_interval <= 0:
+        raise ValueError("--worker-interval must be greater than 0")
+    if config.temperature is not None and (
+        isinstance(config.temperature, bool) or config.temperature < 0 or config.temperature > 2
+    ):
+        raise ValueError("--temperature must be between 0 and 2")
+    if config.mismatched_workers < 0:
+        raise ValueError("--mismatched-workers cannot be negative")
+    if config.mismatched_workers >= config.workers:
+        raise ValueError("--mismatched-workers must leave at least one matching worker")
+
+
 def _start_worker_processes(
     *,
     context: multiprocessing.context.BaseContext,
@@ -212,6 +439,9 @@ def _start_worker_processes(
     indexes: range,
     interval: float,
     fault_once: bool,
+    capability_profile: dict[str, Any] | None,
+    ollama_base_url: str,
+    role: str,
 ) -> list[multiprocessing.Process]:
     processes = []
     for index in indexes:
@@ -226,6 +456,9 @@ def _start_worker_processes(
                 result_queue,
                 interval,
                 fault_once,
+                capability_profile,
+                ollama_base_url,
+                role,
             ),
         )
         process.start()
@@ -241,10 +474,13 @@ def _worker_process(
     result_queue: multiprocessing.Queue,
     interval: float,
     fault_once: bool,
+    capability_profile: dict[str, Any] | None,
+    ollama_base_url: str,
+    role: str,
 ) -> None:
     report: dict[str, Any] = {
         "worker_index": worker_index,
-        "role": "fault-timeout" if fault_once else "worker",
+        "role": role,
         "registered": False,
         "node_id": None,
         "completed_jobs": 0,
@@ -257,7 +493,11 @@ def _worker_process(
     }
     try:
         identity = _load_or_create_identity(Path(home), "worker")
-        worker = WorkerNode(identity=identity)
+        worker = WorkerNode(
+            identity=identity,
+            capability_profile=capability_profile,
+            ollama_base_url=ollama_base_url,
+        )
         client = CoordinatorClient(base_url)
         report["node_id"] = identity.node_id
         registration = NodeRegistration.create(node=identity, capabilities=worker.capabilities())
@@ -349,6 +589,60 @@ def _deterministic_payload(index: int) -> dict[str, Any]:
     }
 
 
+def _ollama_proof_prompt(prompt: str, index: int) -> str:
+    return f"{prompt.strip()}\n\nProof job #{index}: answer briefly."
+
+
+def _ollama_capability_profile(*, models: list[str], base_url: str) -> dict[str, Any]:
+    unique_models = sorted(set(models))
+    return {
+        "supported_job_types": [
+            "eval.math.v1",
+            "eval.deterministic.v1",
+            "inference.echo.v1",
+            "inference.ollama.v1",
+        ],
+        "ollama_models": unique_models,
+        "capability_tier": "standard",
+        "hardware": {
+            "system": "proof-harness",
+            "machine": "local-process",
+            "cpu_count": None,
+            "ram_total_mb": None,
+            "capability_tier": "standard",
+        },
+        "benchmark": {"cpu_iterations_per_second": 0},
+        "gpu": {"available": False, "provider": None, "devices": [], "total_vram_mb": None},
+        "model_runtimes": {
+            "ollama": {
+                "available": True,
+                "path": None,
+                "base_url": base_url,
+                "models": unique_models,
+            }
+        },
+    }
+
+
+def _ollama_result_summaries(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    summaries = []
+    for result in snapshot.get("results", []):
+        if result.get("job_type") != "inference.ollama.v1":
+            continue
+        output = result.get("output", {})
+        answer = str(output.get("answer", ""))
+        summaries.append(
+            {
+                "job_id": result.get("job_id"),
+                "node_id": result.get("node_id"),
+                "model": output.get("model"),
+                "answer_preview": answer[:240],
+                "runtime_seconds": result.get("runtime_seconds"),
+            }
+        )
+    return summaries
+
+
 def _drain_worker_reports(result_queue: multiprocessing.Queue) -> dict[int, dict[str, Any]]:
     reports = {}
     while True:
@@ -361,7 +655,7 @@ def _drain_worker_reports(result_queue: multiprocessing.Queue) -> dict[int, dict
 
 def _build_report(
     *,
-    config: SwarmProofConfig,
+    config: SwarmProofConfig | OllamaProofConfig,
     run_id: str,
     run_dir: Path,
     coordinator_url: str,
@@ -371,6 +665,9 @@ def _build_report(
     worker_reports: dict[int, dict[str, Any]],
     timed_out: bool,
     terminal: bool,
+    proof_kind: str,
+    extra_parameters: dict[str, Any] | None = None,
+    extra_report_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     status = final_snapshot["status"]
     duration = round(finished_at - started_at, 3)
@@ -401,8 +698,22 @@ def _build_report(
         and status["known_nodes"] == config.workers
         and not worker_errors
     )
-    return {
+    parameters = {
+        "workers": config.workers,
+        "jobs": config.jobs,
+        "timeout_seconds": config.timeout_seconds,
+        "lease_timeout_seconds": config.lease_timeout_seconds,
+        "poll_interval": config.poll_interval,
+        "worker_interval": config.worker_interval,
+    }
+    if hasattr(config, "fault_timeout_workers"):
+        parameters["fault_timeout_workers"] = config.fault_timeout_workers
+    if extra_parameters:
+        parameters.update(extra_parameters)
+
+    report = {
         "run_id": run_id,
+        "proof_kind": proof_kind,
         "started_at": round(started_at, 3),
         "finished_at": round(finished_at, 3),
         "duration_seconds": duration,
@@ -412,15 +723,7 @@ def _build_report(
         "coordinator_url": coordinator_url,
         "run_dir": str(run_dir),
         "report_path": str(config.report_path),
-        "parameters": {
-            "workers": config.workers,
-            "jobs": config.jobs,
-            "timeout_seconds": config.timeout_seconds,
-            "lease_timeout_seconds": config.lease_timeout_seconds,
-            "poll_interval": config.poll_interval,
-            "worker_interval": config.worker_interval,
-            "fault_timeout_workers": config.fault_timeout_workers,
-        },
+        "parameters": parameters,
         "workers_requested": config.workers,
         "workers_registered": status["known_nodes"],
         "jobs_created": config.jobs,
@@ -439,6 +742,9 @@ def _build_report(
         "worker_errors": worker_errors,
         "final_snapshot": final_snapshot,
     }
+    if extra_report_fields:
+        report.update(extra_report_fields)
+    return report
 
 
 def _worker_index_from_name(name: str | None) -> int:

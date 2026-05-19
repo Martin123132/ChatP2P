@@ -101,6 +101,15 @@ To prove lease recovery, make a few workers acknowledge a lease and disappear:
 chatp2p proof swarm --workers 25 --jobs 100 --fault-timeout-workers 2
 ```
 
+Run a local Ollama inference proof after pulling a model:
+
+```bash
+ollama pull llama3.2:3b
+chatp2p proof ollama --model llama3.2:3b --workers 4 --jobs 8 --report .mesh/proof/ollama-report.json
+```
+
+The Ollama proof preflights `/api/tags`, starts a local coordinator, registers separate worker identities that advertise the requested model, creates signed `inference.ollama.v1` jobs, and records result previews in the JSON report. Add `--mismatched-workers 1` to prove workers without the requested model register successfully but do not receive those jobs.
+
 Generic JSON job creation is also available:
 
 ```bash
