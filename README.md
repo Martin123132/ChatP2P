@@ -168,6 +168,20 @@ chatp2p job create-echo --coordinator http://YOUR_HOST:8765 --admission-token "c
 
 Public alpha mode requires the token for node registration and job creation, limits request body size, limits public job payload size, and restricts job types to the operator allow-list. It does not open firewall ports, configure routers, or create public tunnels.
 
+Before inviting contributors, run:
+
+```bash
+chatp2p operator alpha-preflight --config D:\ChatP2PData\operator-config.json --invite D:\ChatP2PData\alpha-invite.json --home D:\ChatP2PData\.mesh --report D:\ChatP2PData\alpha-preflight-report.json
+```
+
+After at least one contributor joins, prove the alpha can complete signed work:
+
+```bash
+chatp2p operator alpha-smoke --invite D:\ChatP2PData\alpha-invite.json --jobs 4 --min-live-workers 1 --min-accepted-results 1 --report D:\ChatP2PData\alpha-smoke-report.json
+```
+
+The full alpha runbook lives in [docs/ALPHA_RUNBOOK.md](docs/ALPHA_RUNBOOK.md).
+
 Generic JSON job creation is also available:
 
 ```bash

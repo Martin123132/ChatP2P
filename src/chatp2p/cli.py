@@ -9,7 +9,16 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .alpha import AlphaJoinConfig, DEFAULT_ALPHA_NOTES, bootstrap_alpha, run_alpha_join
+from .alpha import (
+    AlphaJoinConfig,
+    AlphaPreflightConfig,
+    AlphaSmokeConfig,
+    DEFAULT_ALPHA_NOTES,
+    bootstrap_alpha,
+    run_alpha_join,
+    run_alpha_preflight,
+    run_alpha_smoke,
+)
 from .benchmark import CAPABILITY_PROFILE_NAME, load_node_capabilities, run_node_benchmark, save_node_benchmark
 from .client import CoordinatorClient
 from .coordinator import Coordinator
@@ -445,6 +454,45 @@ def bootstrap_alpha_command(args: argparse.Namespace) -> None:
     except (OSError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
     print(json.dumps(report, indent=2, sort_keys=True))
+
+
+def alpha_preflight_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_alpha_preflight(
+            AlphaPreflightConfig(
+                config_path=Path(args.config),
+                invite_path=Path(args.invite),
+                home=Path(args.home),
+                report_path=Path(args.report),
+                timeout_seconds=args.timeout_seconds,
+            )
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def alpha_smoke_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_alpha_smoke(
+            AlphaSmokeConfig(
+                invite_path=Path(args.invite),
+                report_path=Path(args.report),
+                jobs=args.jobs,
+                min_live_workers=args.min_live_workers,
+                min_accepted_results=args.min_accepted_results,
+                min_verified_jobs=args.min_verified_jobs,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval=args.poll_interval,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
 
 
 def run_proof_swarm(args: argparse.Namespace) -> None:
@@ -988,6 +1036,61 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bootstrap_alpha_parser.add_argument("--force", action="store_true", help="Replace existing config/invite files")
     bootstrap_alpha_parser.set_defaults(func=bootstrap_alpha_command)
+
+    alpha_preflight_parser = operator_subcommands.add_parser(
+        "alpha-preflight",
+        help="Validate public-alpha config, invite, coordinator, and managed state",
+    )
+    alpha_preflight_parser.add_argument("--config", required=True, help="Path to operator config JSON")
+    alpha_preflight_parser.add_argument("--invite", required=True, help="Path to alpha invite JSON")
+    alpha_preflight_parser.add_argument("--home", required=True, help="Coordinator home directory")
+    alpha_preflight_parser.add_argument("--report", required=True, help="Path for preflight JSON report")
+    alpha_preflight_parser.add_argument(
+        "--timeout-seconds",
+        default=5.0,
+        type=float,
+        help="Timeout for coordinator health checks",
+    )
+    alpha_preflight_parser.set_defaults(func=alpha_preflight_command)
+
+    alpha_smoke_parser = operator_subcommands.add_parser(
+        "alpha-smoke",
+        help="Create deterministic jobs and prove live workers can return accepted results",
+    )
+    alpha_smoke_parser.add_argument("--invite", required=True, help="Path to alpha invite JSON")
+    alpha_smoke_parser.add_argument("--jobs", default=4, type=int, help="Deterministic eval jobs to create")
+    alpha_smoke_parser.add_argument(
+        "--min-live-workers",
+        default=1,
+        type=int,
+        help="Minimum live workers required for pass",
+    )
+    alpha_smoke_parser.add_argument(
+        "--min-accepted-results",
+        default=1,
+        type=int,
+        help="Minimum accepted results on smoke-created jobs required for pass",
+    )
+    alpha_smoke_parser.add_argument(
+        "--min-verified-jobs",
+        default=0,
+        type=int,
+        help="Minimum verified smoke-created jobs required for pass",
+    )
+    alpha_smoke_parser.add_argument(
+        "--timeout-seconds",
+        default=90.0,
+        type=float,
+        help="Maximum time to wait for smoke thresholds",
+    )
+    alpha_smoke_parser.add_argument(
+        "--poll-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between coordinator snapshot polls",
+    )
+    alpha_smoke_parser.add_argument("--report", required=True, help="Path for smoke JSON report")
+    alpha_smoke_parser.set_defaults(func=alpha_smoke_command)
 
     coordinator_parser = subcommands.add_parser("coordinator", help="Coordinator commands")
     coordinator_subcommands = coordinator_parser.add_subparsers(dest="coordinator_command", required=True)

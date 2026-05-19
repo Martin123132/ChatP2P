@@ -3,11 +3,17 @@ import threading
 
 from chatp2p.alpha import (
     ALPHA_INVITE_SCHEMA,
+    ALPHA_PREFLIGHT_REPORT_SCHEMA,
+    ALPHA_SMOKE_REPORT_SCHEMA,
     AlphaInvite,
     AlphaJoinConfig,
+    AlphaPreflightConfig,
+    AlphaSmokeConfig,
     bootstrap_alpha,
     load_alpha_invite,
     run_alpha_join,
+    run_alpha_preflight,
+    run_alpha_smoke,
     write_alpha_invite,
 )
 from chatp2p.benchmark import CAPABILITY_PROFILE_NAME, capabilities_from_benchmark, save_node_benchmark
@@ -16,7 +22,7 @@ from chatp2p.coordinator import Coordinator
 from chatp2p.crypto import NodeIdentity
 from chatp2p.http_api import create_coordinator_http_server
 from chatp2p.node_runtime import managed_process_status, stop_managed_process
-from chatp2p.operator_config import OperatorConfig
+from chatp2p.operator_config import OperatorConfig, write_operator_config
 
 
 def _benchmark_report():
@@ -217,3 +223,200 @@ def test_node_join_reports_unreachable_coordinator_without_starting_worker(tmp_p
     assert report["ok"] is False
     assert report["status"] == "coordinator_unreachable"
     assert managed_process_status(home=home, role="worker")["managed"] is False
+
+
+def test_alpha_preflight_passes_and_warns_for_local_invite_url(tmp_path):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    config_path = tmp_path / "operator-config.json"
+    invite_path = tmp_path / "alpha-invite.json"
+    report_path = tmp_path / "alpha-preflight-report.json"
+    write_operator_config(config_path, OperatorConfig(public_alpha=True, admission_token=token))
+    write_alpha_invite(invite_path, AlphaInvite.create(coordinator=coordinator_url, admission_token=token))
+
+    try:
+        report = run_alpha_preflight(
+            AlphaPreflightConfig(
+                config_path=config_path,
+                invite_path=invite_path,
+                home=tmp_path / ".mesh",
+                report_path=report_path,
+            )
+        )
+    finally:
+        _stop_server(server, thread)
+
+    checks = {check["id"]: check["status"] for check in report["checks"]}
+    assert report["schema"] == ALPHA_PREFLIGHT_REPORT_SCHEMA
+    assert report["ok"] is True
+    assert checks["invite_token_matches_config"] == "pass"
+    assert checks["coordinator_public_alpha"] == "pass"
+    assert checks["invite_url_shareable"] == "warn"
+    assert report_path.exists()
+    assert token not in json.dumps(report)
+
+
+def test_alpha_preflight_fails_for_bad_config_wrong_token_and_public_alpha_disabled(tmp_path):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    bad_config_path = tmp_path / "bad-config.json"
+    wrong_invite_path = tmp_path / "wrong-invite.json"
+    bad_config_path.write_text("{not-json", encoding="utf-8")
+    write_alpha_invite(
+        wrong_invite_path,
+        AlphaInvite.create(coordinator=coordinator_url, admission_token="wrong-token-123"),
+    )
+
+    try:
+        bad_config_report = run_alpha_preflight(
+            AlphaPreflightConfig(
+                config_path=bad_config_path,
+                invite_path=wrong_invite_path,
+                home=tmp_path / ".mesh",
+                report_path=tmp_path / "bad-config-report.json",
+            )
+        )
+    finally:
+        _stop_server(server, thread)
+
+    checks = {check["id"]: check["status"] for check in bad_config_report["checks"]}
+    assert bad_config_report["ok"] is False
+    assert checks["operator_config"] == "fail"
+
+    server, thread, coordinator_url = _start_public_alpha(token)
+    config_path = tmp_path / "operator-config.json"
+    write_operator_config(config_path, OperatorConfig(public_alpha=True, admission_token=token))
+    try:
+        wrong_token_report = run_alpha_preflight(
+            AlphaPreflightConfig(
+                config_path=config_path,
+                invite_path=wrong_invite_path,
+                home=tmp_path / ".mesh",
+                report_path=tmp_path / "wrong-token-report.json",
+            )
+        )
+    finally:
+        _stop_server(server, thread)
+
+    checks = {check["id"]: check["status"] for check in wrong_token_report["checks"]}
+    assert wrong_token_report["ok"] is False
+    assert checks["invite_token_matches_config"] == "fail"
+    assert token not in json.dumps(wrong_token_report)
+    assert "wrong-token-123" not in json.dumps(wrong_token_report)
+
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    server = create_coordinator_http_server(coordinator, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    write_alpha_invite(
+        wrong_invite_path,
+        AlphaInvite.create(coordinator=f"http://{host}:{port}", admission_token=token),
+    )
+    try:
+        disabled_report = run_alpha_preflight(
+            AlphaPreflightConfig(
+                config_path=config_path,
+                invite_path=wrong_invite_path,
+                home=tmp_path / ".mesh",
+                report_path=tmp_path / "disabled-report.json",
+            )
+        )
+    finally:
+        _stop_server(server, thread)
+
+    checks = {check["id"]: check["status"] for check in disabled_report["checks"]}
+    assert disabled_report["ok"] is False
+    assert checks["coordinator_public_alpha"] == "fail"
+
+
+def test_alpha_smoke_creates_jobs_and_observes_accepted_results(tmp_path):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    home = tmp_path / ".mesh"
+    invite_path = tmp_path / "alpha-invite.json"
+    report_path = tmp_path / "alpha-smoke-report.json"
+    write_alpha_invite(invite_path, AlphaInvite.create(coordinator=coordinator_url, admission_token=token))
+    _save_benchmark(home)
+
+    try:
+        join_report = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=invite_path,
+                home=home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        smoke_report = run_alpha_smoke(
+            AlphaSmokeConfig(
+                invite_path=invite_path,
+                jobs=2,
+                min_live_workers=1,
+                min_accepted_results=1,
+                min_verified_jobs=0,
+                timeout_seconds=10.0,
+                poll_interval=0.2,
+                report_path=report_path,
+            )
+        )
+    finally:
+        stop_managed_process(home=home, role="worker")
+        _stop_server(server, thread)
+
+    assert join_report["ok"] is True
+    assert smoke_report["schema"] == ALPHA_SMOKE_REPORT_SCHEMA
+    assert smoke_report["ok"] is True
+    assert smoke_report["criteria"]["live_workers"]["passed"] is True
+    assert smoke_report["criteria"]["accepted_results"]["actual"] >= 1
+    assert smoke_report["criteria"]["disputed_jobs"]["actual"] == 0
+    assert report_path.exists()
+    assert token not in json.dumps(smoke_report)
+
+
+def test_alpha_smoke_fails_without_live_workers_and_with_wrong_token(tmp_path):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    invite_path = tmp_path / "alpha-invite.json"
+    write_alpha_invite(invite_path, AlphaInvite.create(coordinator=coordinator_url, admission_token=token))
+
+    try:
+        no_worker_report = run_alpha_smoke(
+            AlphaSmokeConfig(
+                invite_path=invite_path,
+                jobs=1,
+                min_live_workers=1,
+                min_accepted_results=1,
+                timeout_seconds=1.0,
+                poll_interval=0.2,
+                report_path=tmp_path / "no-worker-report.json",
+            )
+        )
+    finally:
+        _stop_server(server, thread)
+
+    assert no_worker_report["ok"] is False
+    assert no_worker_report["criteria"]["live_workers"]["passed"] is False
+
+    server, thread, coordinator_url = _start_public_alpha(token)
+    write_alpha_invite(
+        invite_path,
+        AlphaInvite.create(coordinator=coordinator_url, admission_token="wrong-token-123"),
+    )
+    try:
+        wrong_token_report = run_alpha_smoke(
+            AlphaSmokeConfig(
+                invite_path=invite_path,
+                jobs=1,
+                timeout_seconds=1.0,
+                poll_interval=0.2,
+                report_path=tmp_path / "wrong-token-report.json",
+            )
+        )
+    finally:
+        _stop_server(server, thread)
+
+    assert wrong_token_report["ok"] is False
+    assert wrong_token_report["created_jobs"] == []
+    assert "wrong-token-123" not in json.dumps(wrong_token_report)

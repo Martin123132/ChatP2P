@@ -22,7 +22,10 @@ from .operator_config import DEFAULT_ALLOWED_JOB_TYPES, OperatorConfig, write_op
 
 
 ALPHA_INVITE_SCHEMA = "chatp2p.alpha-invite.v1"
+ALPHA_PREFLIGHT_REPORT_SCHEMA = "chatp2p.alpha-preflight-report.v1"
+ALPHA_SMOKE_REPORT_SCHEMA = "chatp2p.alpha-smoke-report.v1"
 DEFAULT_ALPHA_NOTES = "ChatP2P public alpha invite. Keep this file private; it contains the admission token."
+LOCAL_INVITE_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,27 @@ class AlphaJoinConfig:
     force: bool = False
 
 
+@dataclass(frozen=True)
+class AlphaPreflightConfig:
+    config_path: Path
+    invite_path: Path
+    home: Path
+    report_path: Path
+    timeout_seconds: float = 5.0
+
+
+@dataclass(frozen=True)
+class AlphaSmokeConfig:
+    invite_path: Path
+    report_path: Path
+    jobs: int = 4
+    min_live_workers: int = 1
+    min_accepted_results: int = 1
+    min_verified_jobs: int = 0
+    timeout_seconds: float = 90.0
+    poll_interval: float = 0.5
+
+
 def generate_admission_token() -> str:
     return secrets.token_urlsafe(32)
 
@@ -175,6 +199,209 @@ def bootstrap_alpha(
         "operator": operator_config.public_summary(),
         "invite_summary": invite.public_summary(),
     }
+
+
+def run_alpha_preflight(config: AlphaPreflightConfig) -> dict[str, Any]:
+    if config.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0")
+
+    checks: list[dict[str, Any]] = []
+    operator_config = _load_operator_config_for_report(config.config_path, checks)
+    invite = _load_invite_for_report(config.invite_path, checks)
+
+    if operator_config is not None:
+        checks.append(
+            _alpha_check(
+                "operator_public_alpha",
+                "pass" if operator_config.public_alpha else "fail",
+                "Operator config enables public alpha."
+                if operator_config.public_alpha
+                else "Operator config does not enable public alpha.",
+                details={"public_alpha": operator_config.public_alpha},
+            )
+        )
+        checks.append(
+            _alpha_check(
+                "operator_token_present",
+                "pass" if operator_config.admission_token else "fail",
+                "Operator config has an admission token."
+                if operator_config.admission_token
+                else "Operator config is missing an admission token.",
+                details={"token_present": operator_config.admission_token is not None},
+            )
+        )
+
+    if operator_config is not None and invite is not None:
+        token_matches = secrets.compare_digest(
+            operator_config.admission_token or "",
+            invite.admission_token,
+        )
+        checks.append(
+            _alpha_check(
+                "invite_token_matches_config",
+                "pass" if token_matches else "fail",
+                "Invite admission token matches the operator config."
+                if token_matches
+                else "Invite admission token does not match the operator config.",
+                details={
+                    "config_token_present": operator_config.admission_token is not None,
+                    "invite_token_present": bool(invite.admission_token),
+                    "token_matches": token_matches,
+                },
+            )
+        )
+
+        allowed_matches = operator_config.allowed_job_types == invite.allowed_job_types
+        checks.append(
+            _alpha_check(
+                "invite_allowed_job_types_match_config",
+                "pass" if allowed_matches else "fail",
+                "Invite allowed job types match the operator config."
+                if allowed_matches
+                else "Invite allowed job types do not match the operator config.",
+                details={
+                    "config_allowed_job_types": list(operator_config.allowed_job_types),
+                    "invite_allowed_job_types": list(invite.allowed_job_types),
+                },
+            )
+        )
+
+        checks.append(_invite_url_check(invite))
+        health = _coordinator_health(invite, timeout_seconds=config.timeout_seconds)
+    elif invite is not None:
+        checks.append(_invite_url_check(invite))
+        health = _coordinator_health(invite, timeout_seconds=config.timeout_seconds)
+    else:
+        health = {"ok": False, "url": None, "error": "invite could not be loaded"}
+
+    checks.append(_coordinator_health_check(health))
+    checks.extend(_coordinator_operator_checks(health, operator_config))
+
+    managed_processes = _managed_processes_for_report(config.home)
+    checks.append(_managed_coordinator_check(managed_processes))
+
+    report = _alpha_report(
+        schema=ALPHA_PREFLIGHT_REPORT_SCHEMA,
+        config={
+            "config_path": str(config.config_path),
+            "invite_path": str(config.invite_path),
+            "home": str(config.home.expanduser().resolve()),
+            "timeout_seconds": config.timeout_seconds,
+        },
+        checks=checks,
+        details={
+            "operator": operator_config.public_summary() if operator_config else None,
+            "invite": invite.public_summary() if invite else None,
+            "token": {
+                "config_token_present": operator_config.admission_token is not None
+                if operator_config
+                else False,
+                "invite_token_present": bool(invite.admission_token) if invite else False,
+                "token_matches": (
+                    secrets.compare_digest(operator_config.admission_token or "", invite.admission_token)
+                    if operator_config and invite
+                    else False
+                ),
+            },
+            "coordinator_health": health,
+            "managed_processes": managed_processes,
+        },
+    )
+    _write_json_report(config.report_path, report)
+    return report
+
+
+def run_alpha_smoke(config: AlphaSmokeConfig) -> dict[str, Any]:
+    _validate_smoke_config(config)
+    invite = load_alpha_invite(config.invite_path)
+    started_at = time.time()
+    client = CoordinatorClient(invite.coordinator, admission_token=invite.admission_token)
+    errors: list[str] = []
+    created_jobs: list[dict[str, Any]] = []
+    final_snapshot: dict[str, Any] | None = None
+    criteria: dict[str, Any] | None = None
+
+    try:
+        initial_snapshot = client.snapshot()
+    except Exception as exc:
+        report = _smoke_report(
+            config=config,
+            invite=invite,
+            duration_seconds=time.time() - started_at,
+            created_jobs=[],
+            criteria={
+                "live_workers": {"actual": 0, "required": config.min_live_workers, "passed": False},
+                "accepted_results": {"actual": 0, "required": config.min_accepted_results, "passed": False},
+                "verified_jobs": {"actual": 0, "required": config.min_verified_jobs, "passed": False},
+                "disputed_jobs": {"actual": 0, "required": 0, "passed": False},
+            },
+            final_snapshot=None,
+            errors=[f"{type(exc).__name__}: {exc}"],
+        )
+        _write_json_report(config.report_path, report)
+        return report
+
+    initial_result_ids = _result_ids(initial_snapshot)
+    try:
+        for index in range(config.jobs):
+            job = client.create_job(
+                job_type="eval.deterministic.v1",
+                payload=_smoke_payload(index),
+                ttl_seconds=300,
+            )
+            created_jobs.append(
+                {
+                    "job_id": job.job_id,
+                    "job_type": job.job_type,
+                    "verification_strategy": job.verification_strategy,
+                }
+            )
+    except Exception as exc:
+        errors.append(f"{type(exc).__name__}: {exc}")
+
+    created_job_ids = {job["job_id"] for job in created_jobs}
+    deadline = started_at + config.timeout_seconds
+    while time.time() <= deadline and created_jobs and not errors:
+        try:
+            final_snapshot = client.snapshot()
+            criteria = _smoke_criteria(final_snapshot, created_job_ids, initial_result_ids, config)
+            if all(item["passed"] for item in criteria.values()):
+                break
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+            break
+        time.sleep(config.poll_interval)
+
+    if final_snapshot is None and not errors:
+        try:
+            final_snapshot = client.snapshot()
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    if final_snapshot is not None:
+        criteria = _smoke_criteria(final_snapshot, created_job_ids, initial_result_ids, config)
+    elif criteria is None:
+        criteria = {
+            "live_workers": {"actual": 0, "required": config.min_live_workers, "passed": False},
+            "accepted_results": {"actual": 0, "required": config.min_accepted_results, "passed": False},
+            "verified_jobs": {"actual": 0, "required": config.min_verified_jobs, "passed": False},
+            "disputed_jobs": {"actual": 0, "required": 0, "passed": False},
+        }
+
+    if created_jobs and not errors and not all(item["passed"] for item in criteria.values()):
+        errors.append("smoke proof thresholds were not met before timeout")
+
+    report = _smoke_report(
+        config=config,
+        invite=invite,
+        duration_seconds=time.time() - started_at,
+        created_jobs=created_jobs,
+        criteria=criteria,
+        final_snapshot=final_snapshot,
+        errors=errors,
+    )
+    _write_json_report(config.report_path, report)
+    return report
 
 
 def run_alpha_join(config: AlphaJoinConfig) -> dict[str, Any]:
@@ -246,6 +473,56 @@ def _load_or_create_worker_identity(home: Path) -> NodeIdentity:
     return identity
 
 
+def _load_operator_config_for_report(path: Path, checks: list[dict[str, Any]]) -> OperatorConfig | None:
+    try:
+        operator_config = OperatorConfig.from_file(path)
+    except Exception as exc:
+        checks.append(
+            _alpha_check(
+                "operator_config",
+                "fail",
+                f"Operator config could not be loaded: {type(exc).__name__}: {exc}",
+                details={"path": str(path)},
+            )
+        )
+        return None
+
+    checks.append(
+        _alpha_check(
+            "operator_config",
+            "pass",
+            "Operator config loaded and validated.",
+            details={"path": str(path), "operator": operator_config.public_summary()},
+        )
+    )
+    return operator_config
+
+
+def _load_invite_for_report(path: Path, checks: list[dict[str, Any]]) -> AlphaInvite | None:
+    try:
+        invite = load_alpha_invite(path)
+    except Exception as exc:
+        checks.append(
+            _alpha_check(
+                "alpha_invite",
+                "fail",
+                f"Alpha invite could not be loaded: {type(exc).__name__}: {exc}",
+                details={"path": str(path)},
+            )
+        )
+        return None
+
+    checks.append(
+        _alpha_check(
+            "alpha_invite",
+            "pass",
+            "Alpha invite loaded and validated.",
+            details={"path": str(path), "invite": invite.public_summary()},
+        )
+    )
+    return invite
+
+
 def _ensure_benchmark_profile(config: AlphaJoinConfig) -> dict[str, Any]:
     home = config.home.expanduser().resolve()
     path = home / CAPABILITY_PROFILE_NAME
@@ -293,6 +570,115 @@ def _coordinator_health(invite: AlphaInvite, *, timeout_seconds: float) -> dict[
     return {"ok": True, "url": invite.coordinator, "payload": payload}
 
 
+def _invite_url_check(invite: AlphaInvite) -> dict[str, Any]:
+    parsed = urlparse(invite.coordinator)
+    hostname = parsed.hostname or ""
+    if hostname.lower() in LOCAL_INVITE_HOSTS:
+        return _alpha_check(
+            "invite_url_shareable",
+            "warn",
+            "Invite coordinator URL is local-only and will not work for outside contributors.",
+            details={"coordinator": invite.coordinator, "hostname": hostname},
+        )
+    return _alpha_check(
+        "invite_url_shareable",
+        "pass",
+        "Invite coordinator URL looks shareable.",
+        details={"coordinator": invite.coordinator, "hostname": hostname},
+    )
+
+
+def _coordinator_health_check(health: dict[str, Any]) -> dict[str, Any]:
+    return _alpha_check(
+        "coordinator_health",
+        "pass" if health.get("ok") else "fail",
+        "Coordinator health endpoint is reachable."
+        if health.get("ok")
+        else "Coordinator health endpoint is not reachable.",
+        details=health,
+    )
+
+
+def _coordinator_operator_checks(
+    health: dict[str, Any],
+    operator_config: OperatorConfig | None,
+) -> list[dict[str, Any]]:
+    if not health.get("ok"):
+        return []
+
+    operator = health.get("payload", {}).get("operator", {})
+    checks = [
+        _alpha_check(
+            "coordinator_public_alpha",
+            "pass" if operator.get("public_alpha") and operator.get("admission_token_required") else "fail",
+            "Coordinator is running in public-alpha mode."
+            if operator.get("public_alpha") and operator.get("admission_token_required")
+            else "Coordinator is not running in public-alpha mode.",
+            details={"operator": operator},
+        ),
+        _alpha_check(
+            "coordinator_token_redacted",
+            "pass" if "admission_token" not in operator else "fail",
+            "Coordinator public health summary redacts the admission token."
+            if "admission_token" not in operator
+            else "Coordinator public health summary exposes the admission token.",
+            details={"token_exposed": "admission_token" in operator},
+        ),
+    ]
+
+    if operator_config is not None:
+        health_allowed = tuple(operator.get("allowed_job_types", []))
+        allowed_match = health_allowed == operator_config.allowed_job_types
+        checks.append(
+            _alpha_check(
+                "coordinator_allowed_job_types_match_config",
+                "pass" if allowed_match else "fail",
+                "Coordinator allowed job types match the operator config."
+                if allowed_match
+                else "Coordinator allowed job types do not match the operator config.",
+                details={
+                    "config_allowed_job_types": list(operator_config.allowed_job_types),
+                    "coordinator_allowed_job_types": list(health_allowed),
+                },
+            )
+        )
+
+    return checks
+
+
+def _managed_processes_for_report(home: Path) -> list[dict[str, Any]]:
+    from .node_runtime import managed_processes_status
+
+    return managed_processes_status(home=home)
+
+
+def _managed_coordinator_check(managed_processes: list[dict[str, Any]]) -> dict[str, Any]:
+    coordinator_status = next(
+        (process for process in managed_processes if process.get("role") == "coordinator"),
+        None,
+    )
+    if not coordinator_status or not coordinator_status.get("managed"):
+        return _alpha_check(
+            "managed_coordinator",
+            "warn",
+            "Coordinator is not managed by chatp2p node up for this home.",
+            details={"coordinator": coordinator_status},
+        )
+    if coordinator_status.get("alive"):
+        return _alpha_check(
+            "managed_coordinator",
+            "pass",
+            "Managed coordinator process is alive.",
+            details={"coordinator": coordinator_status},
+        )
+    return _alpha_check(
+        "managed_coordinator",
+        "fail",
+        "Managed coordinator state exists but the process is not alive.",
+        details={"coordinator": coordinator_status},
+    )
+
+
 def _wait_for_worker_live(
     *,
     home: Path,
@@ -333,6 +719,183 @@ def _wait_for_worker_live(
         "snapshot_status": last_snapshot_status,
         "worker_process": managed_process_status(home=home, role="worker"),
     }
+
+
+def _validate_smoke_config(config: AlphaSmokeConfig) -> None:
+    if config.jobs < 1:
+        raise ValueError("--jobs must be at least 1")
+    if config.min_live_workers < 0:
+        raise ValueError("--min-live-workers cannot be negative")
+    if config.min_accepted_results < 0:
+        raise ValueError("--min-accepted-results cannot be negative")
+    if config.min_verified_jobs < 0:
+        raise ValueError("--min-verified-jobs cannot be negative")
+    if config.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0")
+    if config.poll_interval <= 0:
+        raise ValueError("--poll-interval must be greater than 0")
+
+
+def _smoke_payload(index: int) -> dict[str, Any]:
+    left = index + 11
+    right = (index * 3) + 5
+    return {
+        "task": "arithmetic",
+        "operation": "add",
+        "operands": [left, right],
+        "expected": left + right,
+    }
+
+
+def _result_ids(snapshot: dict[str, Any]) -> set[tuple[str, str, str]]:
+    return {
+        (
+            str(result.get("job_id")),
+            str(result.get("node_id")),
+            str(result.get("output_hash")),
+        )
+        for result in snapshot.get("results", [])
+    }
+
+
+def _smoke_criteria(
+    snapshot: dict[str, Any],
+    created_job_ids: set[str],
+    initial_result_ids: set[tuple[str, str, str]],
+    config: AlphaSmokeConfig,
+) -> dict[str, Any]:
+    status = snapshot.get("status", {})
+    created_jobs = [
+        job for job in snapshot.get("jobs", [])
+        if job.get("job_id") in created_job_ids
+    ]
+    new_created_results = [
+        result for result in snapshot.get("results", [])
+        if result.get("job_id") in created_job_ids
+        and (
+            str(result.get("job_id")),
+            str(result.get("node_id")),
+            str(result.get("output_hash")),
+        )
+        not in initial_result_ids
+    ]
+    live_workers = int(status.get("live_nodes") or 0)
+    accepted_results = len(new_created_results)
+    verified_jobs = sum(1 for job in created_jobs if job.get("status") == "verified")
+    disputed_jobs = sum(1 for job in created_jobs if job.get("status") == "disputed")
+    return {
+        "live_workers": {
+            "actual": live_workers,
+            "required": config.min_live_workers,
+            "passed": live_workers >= config.min_live_workers,
+        },
+        "accepted_results": {
+            "actual": accepted_results,
+            "required": config.min_accepted_results,
+            "passed": accepted_results >= config.min_accepted_results,
+        },
+        "verified_jobs": {
+            "actual": verified_jobs,
+            "required": config.min_verified_jobs,
+            "passed": verified_jobs >= config.min_verified_jobs,
+        },
+        "disputed_jobs": {
+            "actual": disputed_jobs,
+            "required": 0,
+            "passed": disputed_jobs == 0,
+        },
+    }
+
+
+def _smoke_report(
+    *,
+    config: AlphaSmokeConfig,
+    invite: AlphaInvite,
+    duration_seconds: float,
+    created_jobs: list[dict[str, Any]],
+    criteria: dict[str, Any],
+    final_snapshot: dict[str, Any] | None,
+    errors: list[str],
+) -> dict[str, Any]:
+    ok = not errors and all(item["passed"] for item in criteria.values())
+    created_job_ids = {job["job_id"] for job in created_jobs}
+    final_created_jobs = (
+        [
+            job for job in final_snapshot.get("jobs", [])
+            if job.get("job_id") in created_job_ids
+        ]
+        if final_snapshot
+        else []
+    )
+    return {
+        "schema": ALPHA_SMOKE_REPORT_SCHEMA,
+        "ok": ok,
+        "status": "pass" if ok else "fail",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(duration_seconds, 3),
+        "invite": invite.public_summary(),
+        "parameters": {
+            "jobs": config.jobs,
+            "min_live_workers": config.min_live_workers,
+            "min_accepted_results": config.min_accepted_results,
+            "min_verified_jobs": config.min_verified_jobs,
+            "timeout_seconds": config.timeout_seconds,
+            "poll_interval": config.poll_interval,
+        },
+        "created_jobs": created_jobs,
+        "created_job_statuses": final_created_jobs,
+        "criteria": criteria,
+        "errors": errors,
+        "final_snapshot": final_snapshot,
+    }
+
+
+def _alpha_report(
+    *,
+    schema: str,
+    config: dict[str, Any],
+    checks: list[dict[str, Any]],
+    details: dict[str, Any],
+) -> dict[str, Any]:
+    counts = _check_counts(checks)
+    ok = counts["fail"] == 0
+    return {
+        "schema": schema,
+        "ok": ok,
+        "status": "pass" if ok else "fail",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "counts": counts,
+        "config": config,
+        "checks": checks,
+        **details,
+    }
+
+
+def _alpha_check(
+    check_id: str,
+    status: str,
+    message: str,
+    *,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    check = {"id": check_id, "status": status, "message": message}
+    if details is not None:
+        check["details"] = details
+    return check
+
+
+def _check_counts(checks: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"pass": 0, "warn": 0, "fail": 0}
+    for check in checks:
+        status = check.get("status")
+        if status in counts:
+            counts[status] += 1
+    return counts
+
+
+def _write_json_report(path: Path, report: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _worker_loop_argv(config: AlphaJoinConfig, invite: AlphaInvite) -> list[str]:
