@@ -7,11 +7,12 @@ import pytest
 from chatp2p.benchmark import capabilities_from_benchmark
 from chatp2p.coordinator import Coordinator
 from chatp2p.crypto import NodeIdentity
-from chatp2p.ollama import OllamaError
+from chatp2p.ollama import OllamaError, list_ollama_models
 from chatp2p.worker import WorkerNode
 
 
-def _ollama_capabilities(available=True):
+def _ollama_capabilities(available=True, models=None):
+    models = ["tiny-test-model"] if models is None and available else (models or [])
     return capabilities_from_benchmark(
         {
             "hardware": {
@@ -27,13 +28,18 @@ def _ollama_capabilities(available=True):
             },
             "benchmark": {"cpu_iterations_per_second": 10_000},
             "model_runtimes": {
-                "ollama": {"available": available, "path": "/usr/bin/ollama" if available else None}
+                "ollama": {
+                    "available": available,
+                    "path": "/usr/bin/ollama" if available else None,
+                    "models": models,
+                }
             },
         }
     )
 
 
-def _start_fake_ollama(response_body, status=200):
+def _start_fake_ollama(response_body, status=200, models=None):
+    models = ["tiny-test-model"] if models is None else models
     requests = []
 
     class FakeOllamaHandler(BaseHTTPRequestHandler):
@@ -45,6 +51,18 @@ def _start_fake_ollama(response_body, status=200):
             self.end_headers()
             self.wfile.write(json.dumps(response_body).encode("utf-8"))
 
+        def do_GET(self):
+            if self.path != "/api/tags":
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(
+                json.dumps({"models": [{"name": model} for model in models]}).encode("utf-8")
+            )
+
         def log_message(self, format, *args):
             return
 
@@ -53,6 +71,19 @@ def _start_fake_ollama(response_body, status=200):
     thread.start()
     host, port = server.server_address
     return server, thread, f"http://{host}:{port}", requests
+
+
+def test_list_ollama_models_reads_tags_endpoint():
+    server, thread, base_url, _requests = _start_fake_ollama(
+        {"model": "tiny-test-model", "response": "ok", "done": True},
+        models=["mistral:7b", "llama3.2:3b"],
+    )
+    try:
+        assert list_ollama_models(base_url=base_url) == ["llama3.2:3b", "mistral:7b"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_worker_runs_ollama_job_against_fake_server():
@@ -79,6 +110,8 @@ def test_worker_runs_ollama_job_against_fake_server():
             prompt="Explain the mesh",
             temperature=0.2,
         )
+
+        assert job.resource_requirements["ollama_model"] == "tiny-test-model"
 
         leased = coordinator.lease_next_job(worker_identity.node_id)
         assert leased is not None
@@ -112,6 +145,26 @@ def test_ollama_job_requires_ollama_capable_worker():
 
     assert "inference.ollama.v1" not in worker.capabilities()["supported_job_types"]
     assert coordinator.lease_next_job(worker_identity.node_id) is None
+
+
+def test_ollama_job_requires_requested_local_model():
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    wrong_model_identity = NodeIdentity.generate(prefix="worker")
+    right_model_identity = NodeIdentity.generate(prefix="worker")
+    coordinator.register_node(
+        wrong_model_identity.public(),
+        capabilities=_ollama_capabilities(models=["mistral:7b"]),
+    )
+    coordinator.register_node(
+        right_model_identity.public(),
+        capabilities=_ollama_capabilities(models=["tiny-test-model"]),
+    )
+    coordinator.create_ollama_inference_job(model="tiny-test-model", prompt="hello")
+
+    assert coordinator.lease_next_job(wrong_model_identity.node_id) is None
+    leased = coordinator.lease_next_job(right_model_identity.node_id)
+    assert leased is not None
+    assert leased.payload["model"] == "tiny-test-model"
 
 
 def test_ollama_payload_validation():

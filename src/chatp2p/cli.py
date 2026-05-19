@@ -361,7 +361,10 @@ def run_proof_swarm(args: argparse.Namespace) -> None:
 
 def run_node_benchmark_command(args: argparse.Namespace) -> None:
     home = Path(args.home)
-    report = run_node_benchmark(cpu_duration_seconds=args.cpu_duration_seconds)
+    report = run_node_benchmark(
+        cpu_duration_seconds=args.cpu_duration_seconds,
+        ollama_base_url=args.ollama_base_url,
+    )
     output = Path(args.output) if args.output else _capabilities_path(home)
     save_node_benchmark(report, output)
     print(json.dumps({"saved": str(output), **report}, indent=2, sort_keys=True))
@@ -397,6 +400,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.25,
         type=float,
         help="Seconds to spend on the tiny CPU benchmark",
+    )
+    benchmark_parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="Local Ollama base URL for model discovery",
     )
     benchmark_parser.set_defaults(func=run_node_benchmark_command)
 

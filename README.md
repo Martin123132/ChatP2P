@@ -39,7 +39,7 @@ Benchmark a worker machine before registering it:
 chatp2p node benchmark
 ```
 
-This saves `.mesh/node-capabilities.json`. Worker commands automatically advertise the saved capability profile, including hardware, CPU score, GPU detection, local model runtime detection, and a capability tier such as `light`, `standard`, `gaming_laptop`, or `gpu_worker`.
+This saves `.mesh/node-capabilities.json`. Worker commands automatically advertise the saved capability profile, including hardware, CPU score, GPU detection, local model runtime detection, downloaded Ollama models, and a capability tier such as `light`, `standard`, `gaming_laptop`, or `gpu_worker`.
 
 The coordinator stores state in `.mesh/coordinator.sqlite3` by default, so registered nodes, jobs, leases, results, and credits survive restarts.
 Leases expire after 30 seconds by default and can be tuned with `--lease-timeout-seconds`.
@@ -74,7 +74,7 @@ chatp2p job create-echo --prompt "hello mesh"
 chatp2p job create-ollama --model llama3.2:3b --prompt "Explain peer-to-peer AI in one paragraph"
 ```
 
-`inference.ollama.v1` jobs are leased only to workers that advertised Ollama support from `chatp2p node benchmark`.
+`inference.ollama.v1` jobs are leased only to workers that advertised Ollama support and the requested local model from `chatp2p node benchmark`.
 Workers call local Ollama at `http://127.0.0.1:11434` by default; override that with `--ollama-base-url` on `chatp2p worker run-once` or `chatp2p worker loop`.
 
 Inspect jobs and state:

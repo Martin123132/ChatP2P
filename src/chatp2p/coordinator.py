@@ -255,12 +255,20 @@ class Coordinator:
         normalized_payload = self._validate_payload(job_type, payload)
         defaults = self._job_defaults(job_type, normalized_payload)
 
+        effective_resource_requirements = (
+            dict(defaults["resource_requirements"])
+            if resource_requirements is None
+            else {**defaults["resource_requirements"], **resource_requirements}
+        )
+        if job_type == "inference.ollama.v1":
+            effective_resource_requirements["ollama_model"] = normalized_payload["model"]
+
         job = JobPacket.create(
             coordinator=self.identity,
             job_type=job_type,
             model_id=model_id or defaults["model_id"],
             payload=normalized_payload,
-            resource_requirements=resource_requirements or defaults["resource_requirements"],
+            resource_requirements=effective_resource_requirements,
             expected_output_schema=expected_output_schema or defaults["expected_output_schema"],
             verification_strategy=verification_strategy or defaults["verification_strategy"],
             reward=reward,
@@ -298,6 +306,7 @@ class Coordinator:
                 "model_id": payload["model"],
                 "resource_requirements": {
                     "runtime": "ollama",
+                    "ollama_model": payload["model"],
                     "min_capability_tier": "standard",
                     "network": "local-ollama",
                 },
@@ -760,6 +769,10 @@ class Coordinator:
             return False
         if job.job_type not in supported_job_types:
             return False
+        if job.job_type == "inference.ollama.v1":
+            required_model = job.resource_requirements.get("ollama_model") or job.payload.get("model")
+            if required_model not in capabilities.get("ollama_models", []):
+                return False
         required_tier = job.resource_requirements.get("min_capability_tier")
         return tier_meets_requirement(capabilities.get("capability_tier"), required_tier)
 

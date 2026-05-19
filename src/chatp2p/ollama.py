@@ -69,3 +69,43 @@ def generate_ollama(
             "eval_duration": data.get("eval_duration"),
         },
     }
+
+
+def list_ollama_models(
+    *,
+    base_url: str = DEFAULT_OLLAMA_BASE_URL,
+    timeout_seconds: float = 2.0,
+) -> list[str]:
+    request = Request(
+        f"{base_url.rstrip('/')}/api/tags",
+        method="GET",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read()
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise OllamaError(f"Ollama tags request failed with HTTP {exc.code}: {detail}") from exc
+    except URLError as exc:
+        raise OllamaError(f"Ollama is not reachable at {base_url}: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise OllamaError(f"Ollama tags request timed out after {timeout_seconds}s") from exc
+
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except json.JSONDecodeError as exc:
+        raise OllamaError("Ollama tags returned invalid JSON") from exc
+
+    models = data.get("models")
+    if not isinstance(models, list):
+        raise OllamaError("Ollama tags response did not include a models list")
+
+    names = []
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        name = model.get("name") or model.get("model")
+        if isinstance(name, str) and name.strip():
+            names.append(name.strip())
+    return sorted(set(names))

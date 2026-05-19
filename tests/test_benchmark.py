@@ -20,7 +20,9 @@ def _benchmark_report(
     cpu_score=10_000,
     gpu_vram_mb=0,
     ollama_available=False,
+    ollama_models=None,
 ):
+    ollama_models = [] if ollama_models is None else ollama_models
     gpu_available = gpu_vram_mb > 0
     report = {
         "hardware": {
@@ -36,7 +38,11 @@ def _benchmark_report(
         },
         "benchmark": {"cpu_iterations_per_second": cpu_score},
         "model_runtimes": {
-            "ollama": {"available": ollama_available, "path": "/usr/bin/ollama" if ollama_available else None}
+            "ollama": {
+                "available": ollama_available,
+                "path": "/usr/bin/ollama" if ollama_available else None,
+                "models": ollama_models,
+            }
         },
     }
     report["capability_tier"] = classify_capability_tier(report)
@@ -51,7 +57,12 @@ def test_capability_tiers_classify_common_machine_shapes():
 
 
 def test_saved_benchmark_loads_as_worker_capabilities(tmp_path):
-    report = _benchmark_report(cpu_count=8, ram_total_mb=16_000, ollama_available=True)
+    report = _benchmark_report(
+        cpu_count=8,
+        ram_total_mb=16_000,
+        ollama_available=True,
+        ollama_models=["llama3.2:3b"],
+    )
     report["capabilities"] = capabilities_from_benchmark(report)
 
     save_node_benchmark(report, tmp_path / "node-capabilities.json")
@@ -60,6 +71,7 @@ def test_saved_benchmark_loads_as_worker_capabilities(tmp_path):
     assert capabilities is not None
     assert capabilities["capability_tier"] == "gaming_laptop"
     assert capabilities["hardware"]["capability_tier"] == "gaming_laptop"
+    assert capabilities["ollama_models"] == ["llama3.2:3b"]
     assert "eval.deterministic.v1" in capabilities["supported_job_types"]
     assert "inference.ollama.v1" in capabilities["supported_job_types"]
 

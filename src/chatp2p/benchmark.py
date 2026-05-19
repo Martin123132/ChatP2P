@@ -13,13 +13,18 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .ollama import DEFAULT_OLLAMA_BASE_URL, OllamaError, list_ollama_models
+
 CAPABILITY_PROFILE_NAME = "node-capabilities.json"
 CAPABILITY_TIERS = ["light", "standard", "gaming_laptop", "gpu_worker"]
 DEFAULT_SUPPORTED_JOB_TYPES = ["eval.math.v1", "eval.deterministic.v1", "inference.echo.v1"]
 OLLAMA_JOB_TYPE = "inference.ollama.v1"
 
 
-def run_node_benchmark(cpu_duration_seconds: float = 0.25) -> dict[str, Any]:
+def run_node_benchmark(
+    cpu_duration_seconds: float = 0.25,
+    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
+) -> dict[str, Any]:
     """Collect a small local capability report without third-party dependencies."""
 
     hardware = collect_hardware_profile()
@@ -28,7 +33,7 @@ def run_node_benchmark(cpu_duration_seconds: float = 0.25) -> dict[str, Any]:
         "cpu_iterations_per_second": measure_cpu_iterations(cpu_duration_seconds),
     }
     gpu = detect_gpu_profile()
-    model_runtimes = detect_model_runtimes()
+    model_runtimes = detect_model_runtimes(ollama_base_url=ollama_base_url)
     report = {
         "schema": "chatp2p.node-benchmark.v1",
         "created_at": round(time.time(), 3),
@@ -127,9 +132,21 @@ def detect_gpu_profile() -> dict[str, Any]:
     }
 
 
-def detect_model_runtimes() -> dict[str, Any]:
+def detect_model_runtimes(ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL) -> dict[str, Any]:
+    ollama = _runtime_entry("ollama")
+    ollama["base_url"] = ollama_base_url
+    if ollama["available"]:
+        try:
+            ollama["models"] = list_ollama_models(base_url=ollama_base_url)
+            ollama["model_discovery_error"] = None
+        except OllamaError as exc:
+            ollama["models"] = []
+            ollama["model_discovery_error"] = str(exc)
+    else:
+        ollama["models"] = []
+        ollama["model_discovery_error"] = None
     return {
-        "ollama": _runtime_entry("ollama"),
+        "ollama": ollama,
         "llama_cpp": _first_runtime_entry(["llama-cli", "llama-server"]),
         "vllm": _python_module_available("vllm"),
     }
@@ -160,11 +177,13 @@ def capabilities_from_benchmark(report: dict[str, Any]) -> dict[str, Any]:
     hardware = dict(report.get("hardware", {}))
     hardware["capability_tier"] = tier
     model_runtimes = dict(report.get("model_runtimes", {}))
+    ollama_models = list(model_runtimes.get("ollama", {}).get("models", []))
     supported_job_types = list(DEFAULT_SUPPORTED_JOB_TYPES)
-    if model_runtimes.get("ollama", {}).get("available"):
+    if model_runtimes.get("ollama", {}).get("available") and ollama_models:
         supported_job_types.append(OLLAMA_JOB_TYPE)
     return {
         "supported_job_types": supported_job_types,
+        "ollama_models": ollama_models,
         "capability_tier": tier,
         "hardware": hardware,
         "benchmark": dict(report.get("benchmark", {})),
