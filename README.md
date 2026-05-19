@@ -49,6 +49,16 @@ chatp2p node doctor --model llama3.2:3b
 
 The doctor prints JSON checks for worker identity, saved benchmark profile, Ollama reachability, requested model availability, advertised model routing, and coordinator reachability. Use `--skip-coordinator` when you only want local machine checks.
 
+Run a local coordinator and worker in the background:
+
+```bash
+chatp2p node up --home D:\ChatP2PData\.mesh --role both
+chatp2p node status --home D:\ChatP2PData\.mesh
+chatp2p node down --home D:\ChatP2PData\.mesh
+```
+
+Managed node state is written under `HOME\run`, and stdout/stderr logs are written under `HOME\logs`. Use `--force` on `node up` to replace an already-managed background process.
+
 The coordinator stores state in `.mesh/coordinator.sqlite3` by default, so registered nodes, jobs, leases, results, and credits survive restarts.
 Leases expire after 30 seconds by default and can be tuned with `--lease-timeout-seconds`.
 

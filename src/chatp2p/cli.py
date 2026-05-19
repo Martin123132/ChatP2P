@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,13 @@ from .coordinator import Coordinator
 from .crypto import NodeIdentity
 from .doctor import NodeDoctorConfig, run_node_doctor
 from .http_api import create_coordinator_http_server
+from .node_runtime import (
+    MANAGED_ROLES,
+    default_coordinator_url,
+    managed_processes_status,
+    start_managed_process,
+    stop_managed_process,
+)
 from .ollama import DEFAULT_OLLAMA_BASE_URL
 from .operator_config import OperatorConfig, write_operator_config
 from .packets import NodeRegistration
@@ -53,6 +61,35 @@ def _coordinator_client(args: argparse.Namespace) -> CoordinatorClient:
         args.coordinator,
         admission_token=getattr(args, "admission_token", None),
     )
+
+
+def _selected_managed_roles(role: str) -> tuple[str, ...]:
+    return MANAGED_ROLES if role == "both" else (role,)
+
+
+def _append_optional_arg(argv: list[str], flag: str, value: Any) -> None:
+    if value is not None:
+        argv.extend([flag, str(value)])
+
+
+def _append_repeated_arg(argv: list[str], flag: str, values: list[str] | None) -> None:
+    for value in values or []:
+        argv.extend([flag, value])
+
+
+def _admission_token_for_worker(args: argparse.Namespace) -> str | None:
+    if args.admission_token:
+        return args.admission_token
+    if not args.operator_config:
+        return None
+    try:
+        return OperatorConfig.from_file(Path(args.operator_config)).admission_token
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"could not read operator config token: {exc}") from exc
+
+
+def _coordinator_url_from_node_args(args: argparse.Namespace) -> str:
+    return args.coordinator or default_coordinator_url(args.host, args.port)
 
 
 def _operator_config_from_args(args: argparse.Namespace) -> OperatorConfig:
@@ -466,6 +503,193 @@ def run_node_doctor_command(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def run_node_up_command(args: argparse.Namespace) -> None:
+    home = Path(args.home)
+    roles = _selected_managed_roles(args.role)
+    coordinator_url = _coordinator_url_from_node_args(args)
+    results: list[dict[str, Any]] = []
+    health: dict[str, Any] | None = None
+
+    if "coordinator" in roles:
+        coordinator_argv = _build_managed_coordinator_argv(args)
+        results.append(
+            start_managed_process(
+                home=home,
+                role="coordinator",
+                argv=coordinator_argv,
+                coordinator_url=coordinator_url,
+                force=args.force,
+                extra_state={"listen": {"host": args.host, "port": args.port}},
+            )
+        )
+
+    health = _wait_for_coordinator_health(
+        coordinator_url=coordinator_url,
+        admission_token=args.admission_token,
+        timeout_seconds=args.startup_timeout_seconds,
+        poll_interval=0.2,
+    )
+    if not health["ok"]:
+        report = {
+            "ok": False,
+            "home": str(home.expanduser().resolve()),
+            "role": args.role,
+            "coordinator": coordinator_url,
+            "results": results,
+            "coordinator_health": health,
+        }
+        print(json.dumps(report, indent=2, sort_keys=True))
+        raise SystemExit(1)
+
+    if "worker" in roles:
+        worker_argv = _build_managed_worker_argv(args, coordinator_url)
+        results.append(
+            start_managed_process(
+                home=home,
+                role="worker",
+                argv=worker_argv,
+                coordinator_url=coordinator_url,
+                force=args.force,
+                extra_state={"worker_interval": args.worker_interval},
+            )
+        )
+
+    report = {
+        "ok": True,
+        "home": str(home.expanduser().resolve()),
+        "role": args.role,
+        "coordinator": coordinator_url,
+        "results": results,
+        "coordinator_health": health,
+    }
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
+def run_node_down_command(args: argparse.Namespace) -> None:
+    home = Path(args.home)
+    results = [
+        stop_managed_process(home=home, role=role, timeout_seconds=args.timeout_seconds)
+        for role in _selected_managed_roles(args.role)
+    ]
+    print(
+        json.dumps(
+            {
+                "ok": all(result["status"] in {"stopped", "not_managed"} for result in results),
+                "home": str(home.expanduser().resolve()),
+                "role": args.role,
+                "results": results,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if any(result["status"] == "stop_timeout" for result in results):
+        raise SystemExit(1)
+
+
+def run_node_status_command(args: argparse.Namespace) -> None:
+    home = Path(args.home)
+    coordinator_url = _coordinator_url_from_node_args(args)
+    health = None
+    if not args.skip_health:
+        health = _coordinator_health(coordinator_url=coordinator_url, admission_token=args.admission_token)
+    processes = managed_processes_status(home=home)
+    print(
+        json.dumps(
+            {
+                "ok": all(process["alive"] for process in processes if process["managed"]),
+                "home": str(home.expanduser().resolve()),
+                "coordinator": coordinator_url,
+                "processes": processes,
+                "coordinator_health": health,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+def _build_managed_coordinator_argv(args: argparse.Namespace) -> list[str]:
+    argv = [
+        sys.executable,
+        "-m",
+        "chatp2p.cli",
+        "coordinator",
+        "serve",
+        "--home",
+        str(Path(args.home)),
+        "--host",
+        args.host,
+        "--port",
+        str(args.port),
+        "--lease-timeout-seconds",
+        str(args.lease_timeout_seconds),
+        "--node-stale-seconds",
+        str(args.node_stale_seconds),
+    ]
+    _append_optional_arg(argv, "--operator-config", args.operator_config)
+    if args.public_alpha:
+        argv.append("--public-alpha")
+    _append_optional_arg(argv, "--admission-token", args.admission_token)
+    _append_optional_arg(argv, "--max-request-bytes", args.max_request_bytes)
+    _append_optional_arg(argv, "--max-job-payload-bytes", args.max_job_payload_bytes)
+    _append_repeated_arg(argv, "--allowed-job-type", args.allowed_job_type)
+    if args.seed_math_job:
+        argv.append("--seed-math-job")
+    if args.seed_eval_suite:
+        argv.append("--seed-eval-suite")
+    return argv
+
+
+def _build_managed_worker_argv(args: argparse.Namespace, coordinator_url: str) -> list[str]:
+    argv = [
+        sys.executable,
+        "-m",
+        "chatp2p.cli",
+        "worker",
+        "loop",
+        "--home",
+        str(Path(args.home)),
+        "--coordinator",
+        coordinator_url,
+        "--ollama-base-url",
+        args.ollama_base_url,
+        "--interval",
+        str(args.worker_interval),
+    ]
+    _append_optional_arg(argv, "--admission-token", _admission_token_for_worker(args))
+    return argv
+
+
+def _wait_for_coordinator_health(
+    *,
+    coordinator_url: str,
+    admission_token: str | None,
+    timeout_seconds: float,
+    poll_interval: float,
+) -> dict[str, Any]:
+    deadline = time.time() + max(timeout_seconds, 0)
+    last_error = "not attempted"
+    while time.time() <= deadline:
+        health = _coordinator_health(coordinator_url=coordinator_url, admission_token=admission_token)
+        if health["ok"]:
+            return health
+        last_error = health["error"]
+        time.sleep(poll_interval)
+    return {"ok": False, "url": coordinator_url, "error": last_error}
+
+
+def _coordinator_health(*, coordinator_url: str, admission_token: str | None) -> dict[str, Any]:
+    try:
+        return {
+            "ok": True,
+            "url": coordinator_url,
+            "payload": CoordinatorClient(coordinator_url, admission_token=admission_token).health(),
+        }
+    except Exception as exc:
+        return {"ok": False, "url": coordinator_url, "error": f"{type(exc).__name__}: {exc}"}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="chatp2p", description="ChatP2P prototype")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -481,6 +705,104 @@ def build_parser() -> argparse.ArgumentParser:
 
     node_parser = subcommands.add_parser("node", help="Local node commands")
     node_subcommands = node_parser.add_subparsers(dest="node_command", required=True)
+
+    up_parser = node_subcommands.add_parser("up", help="Start managed background coordinator and worker processes")
+    up_parser.add_argument("--home", default=".mesh", help="Directory for node identity, database, run state, and logs")
+    up_parser.add_argument(
+        "--role",
+        default="both",
+        choices=["both", "coordinator", "worker"],
+        help="Managed process role to start",
+    )
+    up_parser.add_argument("--host", default="127.0.0.1", help="Coordinator host to bind")
+    up_parser.add_argument("--port", default=8765, type=int, help="Coordinator port to bind")
+    up_parser.add_argument(
+        "--coordinator",
+        default=None,
+        help="Coordinator URL for the worker. Defaults to the local host/port",
+    )
+    up_parser.add_argument("--operator-config", default=None, help="Operator config JSON path")
+    up_parser.add_argument(
+        "--public-alpha",
+        action="store_true",
+        help="Require admission token for node registration and job creation",
+    )
+    up_parser.add_argument("--admission-token", default=None, help="Shared admission token for public alpha")
+    up_parser.add_argument(
+        "--max-request-bytes",
+        default=None,
+        type=int,
+        help="Override maximum JSON request body size",
+    )
+    up_parser.add_argument(
+        "--max-job-payload-bytes",
+        default=None,
+        type=int,
+        help="Override maximum public job payload JSON size",
+    )
+    up_parser.add_argument(
+        "--allowed-job-type",
+        action="append",
+        default=None,
+        help="Override allowed public job type. Can be passed more than once",
+    )
+    up_parser.add_argument(
+        "--lease-timeout-seconds",
+        default=30.0,
+        type=float,
+        help="Seconds before an unfinished lease is released for another worker",
+    )
+    up_parser.add_argument(
+        "--node-stale-seconds",
+        default=60.0,
+        type=float,
+        help="Seconds after last activity before a node is marked stale",
+    )
+    up_parser.add_argument("--seed-math-job", action="store_true", help="Create one math eval job on coordinator startup")
+    up_parser.add_argument(
+        "--seed-eval-suite",
+        action="store_true",
+        help="Create deterministic eval jobs on coordinator startup",
+    )
+    up_parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="Local Ollama base URL for inference.ollama.v1 jobs",
+    )
+    up_parser.add_argument("--worker-interval", default=5.0, type=float, help="Seconds between worker polling attempts")
+    up_parser.add_argument(
+        "--startup-timeout-seconds",
+        default=10.0,
+        type=float,
+        help="Seconds to wait for coordinator health before starting a worker",
+    )
+    up_parser.add_argument("--force", action="store_true", help="Stop and replace existing managed processes")
+    up_parser.set_defaults(func=run_node_up_command)
+
+    down_parser = node_subcommands.add_parser("down", help="Stop managed background node processes")
+    down_parser.add_argument("--home", default=".mesh", help="Directory for node run state")
+    down_parser.add_argument(
+        "--role",
+        default="both",
+        choices=["both", "coordinator", "worker"],
+        help="Managed process role to stop",
+    )
+    down_parser.add_argument("--timeout-seconds", default=5.0, type=float, help="Seconds to wait for process exit")
+    down_parser.set_defaults(func=run_node_down_command)
+
+    status_parser = node_subcommands.add_parser("status", help="Show managed background node status")
+    status_parser.add_argument("--home", default=".mesh", help="Directory for node run state")
+    status_parser.add_argument("--host", default="127.0.0.1", help="Coordinator host used when deriving a URL")
+    status_parser.add_argument("--port", default=8765, type=int, help="Coordinator port used when deriving a URL")
+    status_parser.add_argument(
+        "--coordinator",
+        default=None,
+        help="Coordinator base URL to check. Defaults to the local host/port",
+    )
+    status_parser.add_argument("--admission-token", default=None, help="Admission token for public alpha coordinators")
+    status_parser.add_argument("--skip-health", action="store_true", help="Skip coordinator health check")
+    status_parser.set_defaults(func=run_node_status_command)
+
     benchmark_parser = node_subcommands.add_parser(
         "benchmark",
         help="Benchmark this machine and save worker capabilities",

@@ -1,0 +1,85 @@
+import sys
+
+from chatp2p.cli import build_parser
+from chatp2p.node_runtime import (
+    default_coordinator_url,
+    managed_process_status,
+    process_alive,
+    redact_command_args,
+    start_managed_process,
+    stop_managed_process,
+)
+
+
+def test_managed_process_lifecycle(tmp_path):
+    home = tmp_path / ".mesh"
+    argv = [sys.executable, "-c", "import time; time.sleep(30)"]
+
+    result = start_managed_process(
+        home=home,
+        role="worker",
+        argv=argv,
+        coordinator_url="http://127.0.0.1:8765",
+    )
+    pid = result["state"]["pid"]
+
+    try:
+        assert result["status"] == "started"
+        assert process_alive(pid)
+        status = managed_process_status(home=home, role="worker")
+        assert status["managed"] is True
+        assert status["alive"] is True
+        assert status["coordinator"] == "http://127.0.0.1:8765"
+
+        duplicate = start_managed_process(
+            home=home,
+            role="worker",
+            argv=argv,
+            coordinator_url="http://127.0.0.1:8765",
+        )
+        assert duplicate["status"] == "already_running"
+        assert duplicate["state"]["pid"] == pid
+    finally:
+        stopped = stop_managed_process(home=home, role="worker", timeout_seconds=5)
+
+    assert stopped["status"] == "stopped"
+    assert stopped["alive"] is False
+    assert managed_process_status(home=home, role="worker")["managed"] is False
+
+
+def test_managed_process_helpers_redact_and_derive_url():
+    assert default_coordinator_url("0.0.0.0", 8765) == "http://127.0.0.1:8765"
+    assert default_coordinator_url("::1", 8765) == "http://[::1]:8765"
+    assert redact_command_args(["worker", "--admission-token", "secret", "--interval", "5"]) == [
+        "worker",
+        "--admission-token",
+        "<redacted>",
+        "--interval",
+        "5",
+    ]
+    assert redact_command_args(["worker", "--admission-token=secret"]) == [
+        "worker",
+        "--admission-token=<redacted>",
+    ]
+
+
+def test_node_managed_commands_parse(tmp_path):
+    parser = build_parser()
+    up_args = parser.parse_args(
+        [
+            "node",
+            "up",
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--role",
+            "worker",
+            "--coordinator",
+            "http://127.0.0.1:8765",
+        ]
+    )
+    status_args = parser.parse_args(["node", "status", "--home", str(tmp_path / ".mesh")])
+    down_args = parser.parse_args(["node", "down", "--home", str(tmp_path / ".mesh")])
+
+    assert up_args.func.__name__ == "run_node_up_command"
+    assert status_args.func.__name__ == "run_node_status_command"
+    assert down_args.func.__name__ == "run_node_down_command"
