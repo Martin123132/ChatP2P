@@ -12,6 +12,7 @@ from .benchmark import CAPABILITY_PROFILE_NAME, load_node_capabilities, run_node
 from .client import CoordinatorClient
 from .coordinator import Coordinator
 from .crypto import NodeIdentity
+from .doctor import NodeDoctorConfig, run_node_doctor
 from .http_api import create_coordinator_http_server
 from .ollama import DEFAULT_OLLAMA_BASE_URL
 from .packets import NodeRegistration
@@ -396,6 +397,22 @@ def run_node_benchmark_command(args: argparse.Namespace) -> None:
     print(json.dumps({"saved": str(output), **report}, indent=2, sort_keys=True))
 
 
+def run_node_doctor_command(args: argparse.Namespace) -> None:
+    coordinator_url = None if args.skip_coordinator else args.coordinator
+    report = run_node_doctor(
+        NodeDoctorConfig(
+            home=Path(args.home),
+            model=args.model,
+            ollama_base_url=args.ollama_base_url,
+            coordinator_url=coordinator_url,
+            timeout_seconds=args.timeout_seconds,
+        )
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="chatp2p", description="ChatP2P prototype")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -433,6 +450,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Local Ollama base URL for model discovery",
     )
     benchmark_parser.set_defaults(func=run_node_benchmark_command)
+
+    doctor_parser = node_subcommands.add_parser(
+        "doctor",
+        help="Check whether this machine is ready to run as a ChatP2P node",
+    )
+    doctor_parser.add_argument("--home", default=".mesh", help="Directory for node identity and capabilities")
+    doctor_parser.add_argument("--model", default=None, help="Optional Ollama model that must be locally available")
+    doctor_parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="Local Ollama base URL for model discovery",
+    )
+    doctor_parser.add_argument(
+        "--coordinator",
+        default="http://127.0.0.1:8765",
+        help="Coordinator base URL to check",
+    )
+    doctor_parser.add_argument(
+        "--skip-coordinator",
+        action="store_true",
+        help="Skip coordinator reachability check",
+    )
+    doctor_parser.add_argument(
+        "--timeout-seconds",
+        default=2.0,
+        type=float,
+        help="Timeout for local HTTP checks",
+    )
+    doctor_parser.set_defaults(func=run_node_doctor_command)
 
     coordinator_parser = subcommands.add_parser("coordinator", help="Coordinator commands")
     coordinator_subcommands = coordinator_parser.add_subparsers(dest="coordinator_command", required=True)

@@ -41,6 +41,14 @@ chatp2p node benchmark
 
 This saves `.mesh/node-capabilities.json`. Worker commands automatically advertise the saved capability profile, including hardware, CPU score, GPU detection, local model runtime detection, downloaded Ollama models, and a capability tier such as `light`, `standard`, `gaming_laptop`, or `gpu_worker`.
 
+Check whether this machine is ready to contribute work:
+
+```bash
+chatp2p node doctor --model llama3.2:3b
+```
+
+The doctor prints JSON checks for worker identity, saved benchmark profile, Ollama reachability, requested model availability, advertised model routing, and coordinator reachability. Use `--skip-coordinator` when you only want local machine checks.
+
 The coordinator stores state in `.mesh/coordinator.sqlite3` by default, so registered nodes, jobs, leases, results, and credits survive restarts.
 Leases expire after 30 seconds by default and can be tuned with `--lease-timeout-seconds`.
 
