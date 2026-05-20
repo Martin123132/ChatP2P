@@ -114,3 +114,25 @@ def test_operator_alpha_evidence_command_parses(tmp_path):
     )
 
     assert args.func.__name__ == "alpha_evidence_command"
+
+
+def test_operator_alpha_inference_proof_command_parses(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "alpha-inference-proof",
+            "--invite",
+            str(tmp_path / "alpha-invite.json"),
+            "--mode",
+            "auto",
+            "--model",
+            "tiny-test-model",
+            "--jobs",
+            "2",
+            "--report",
+            str(tmp_path / "alpha-inference-proof.json"),
+        ]
+    )
+
+    assert args.func.__name__ == "alpha_inference_proof_command"

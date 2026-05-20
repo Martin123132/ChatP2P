@@ -13,6 +13,7 @@ from urllib.error import HTTPError, URLError
 from .alpha import (
     AlphaDrillConfig,
     AlphaEvidenceConfig,
+    AlphaInferenceProofConfig,
     AlphaJoinConfig,
     AlphaPreflightConfig,
     AlphaRemoteProofConfig,
@@ -20,11 +21,13 @@ from .alpha import (
     AlphaSmokeConfig,
     AlphaStatusConfig,
     DEFAULT_ALPHA_NOTES,
+    DEFAULT_INFERENCE_PROOF_PROMPT,
     DEFAULT_OPERATOR_TASK_NAME,
     NodeWatchdogConfig,
     bootstrap_alpha,
     run_alpha_drill,
     run_alpha_evidence,
+    run_alpha_inference_proof,
     run_alpha_join,
     run_alpha_preflight,
     run_alpha_remote_proof,
@@ -536,6 +539,33 @@ def alpha_remote_proof_command(args: argparse.Namespace) -> None:
                 min_live_workers=args.min_live_workers,
                 min_accepted_results=args.min_accepted_results,
                 min_verified_jobs=args.min_verified_jobs,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval=args.poll_interval,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def alpha_inference_proof_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_alpha_inference_proof(
+            AlphaInferenceProofConfig(
+                invite_path=Path(args.invite),
+                report_path=Path(args.report),
+                jobs=args.jobs,
+                mode=args.mode,
+                model=args.model,
+                prompt=args.prompt,
+                temperature=args.temperature,
+                expected_worker_id=args.expected_worker_id,
+                min_live_workers=args.min_live_workers,
+                min_accepted_results=args.min_accepted_results,
+                min_verified_jobs=args.min_verified_jobs,
+                min_expected_worker_results=args.min_expected_worker_results,
                 timeout_seconds=args.timeout_seconds,
                 poll_interval=args.poll_interval,
             )
@@ -1777,6 +1807,83 @@ def build_parser() -> argparse.ArgumentParser:
     )
     alpha_remote_proof_parser.add_argument("--report", required=True, help="Path for remote proof JSON report")
     alpha_remote_proof_parser.set_defaults(func=alpha_remote_proof_command)
+
+    alpha_inference_proof_parser = operator_subcommands.add_parser(
+        "alpha-inference-proof",
+        help="Create inference-style jobs and prove alpha workers can return signed results",
+    )
+    alpha_inference_proof_parser.add_argument("--invite", required=True, help="Path to alpha invite JSON")
+    alpha_inference_proof_parser.add_argument(
+        "--jobs",
+        default=10,
+        type=int,
+        help="Inference proof jobs to create",
+    )
+    alpha_inference_proof_parser.add_argument(
+        "--mode",
+        choices=("echo", "ollama", "auto"),
+        default="echo",
+        help="Inference proof mode. Auto uses Ollama only when the requested model is advertised by a live node",
+    )
+    alpha_inference_proof_parser.add_argument(
+        "--model",
+        default=None,
+        help="Ollama model name for --mode ollama or optional --mode auto upgrade",
+    )
+    alpha_inference_proof_parser.add_argument(
+        "--prompt",
+        default=DEFAULT_INFERENCE_PROOF_PROMPT,
+        help="Base prompt for inference proof jobs",
+    )
+    alpha_inference_proof_parser.add_argument(
+        "--temperature",
+        default=None,
+        type=float,
+        help="Optional Ollama temperature",
+    )
+    alpha_inference_proof_parser.add_argument(
+        "--expected-worker-id",
+        default=None,
+        help="Worker node ID that must be live and should return proof results",
+    )
+    alpha_inference_proof_parser.add_argument(
+        "--min-live-workers",
+        default=1,
+        type=int,
+        help="Minimum live workers required for pass",
+    )
+    alpha_inference_proof_parser.add_argument(
+        "--min-accepted-results",
+        default=None,
+        type=int,
+        help="Minimum accepted results on proof-created jobs. Defaults to jobs",
+    )
+    alpha_inference_proof_parser.add_argument(
+        "--min-verified-jobs",
+        default=None,
+        type=int,
+        help="Minimum verified proof-created jobs. Defaults to jobs",
+    )
+    alpha_inference_proof_parser.add_argument(
+        "--min-expected-worker-results",
+        default=None,
+        type=int,
+        help="Minimum proof-created results from the expected worker. Defaults to 1 when expected worker is set",
+    )
+    alpha_inference_proof_parser.add_argument(
+        "--timeout-seconds",
+        default=120.0,
+        type=float,
+        help="Maximum time to wait for inference proof thresholds",
+    )
+    alpha_inference_proof_parser.add_argument(
+        "--poll-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between coordinator snapshot polls",
+    )
+    alpha_inference_proof_parser.add_argument("--report", required=True, help="Path for inference proof JSON report")
+    alpha_inference_proof_parser.set_defaults(func=alpha_inference_proof_command)
 
     alpha_drill_parser = operator_subcommands.add_parser(
         "alpha-drill",

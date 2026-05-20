@@ -33,9 +33,11 @@ ALPHA_ROUTE_REPORT_SCHEMA = "chatp2p.alpha-route-report.v1"
 ALPHA_REMOTE_PROOF_REPORT_SCHEMA = "chatp2p.alpha-remote-proof-report.v1"
 ALPHA_STATUS_REPORT_SCHEMA = "chatp2p.alpha-status-report.v1"
 ALPHA_EVIDENCE_PACK_SCHEMA = "chatp2p.alpha-evidence-pack.v1"
+ALPHA_INFERENCE_PROOF_REPORT_SCHEMA = "chatp2p.alpha-inference-proof-report.v1"
 NODE_WATCHDOG_REPORT_SCHEMA = "chatp2p.node-watchdog-report.v1"
 DEFAULT_ALPHA_NOTES = "ChatP2P public alpha invite. Keep this file private; it contains the admission token."
 DEFAULT_OPERATOR_TASK_NAME = "ChatP2P Operator Watchdog"
+DEFAULT_INFERENCE_PROOF_PROMPT = "ChatP2P alpha inference proof. Echo this signed work packet."
 LOCAL_INVITE_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
 TERMINAL_JOB_STATUSES = {"verified", "disputed", "expired"}
@@ -165,6 +167,24 @@ class AlphaRemoteProofConfig:
     min_accepted_results: int | None = None
     min_verified_jobs: int | None = None
     timeout_seconds: float = 180.0
+    poll_interval: float = 0.5
+
+
+@dataclass(frozen=True)
+class AlphaInferenceProofConfig:
+    invite_path: Path
+    report_path: Path
+    jobs: int = 10
+    mode: str = "echo"
+    model: str | None = None
+    prompt: str = DEFAULT_INFERENCE_PROOF_PROMPT
+    temperature: float | None = None
+    expected_worker_id: str | None = None
+    min_live_workers: int = 1
+    min_accepted_results: int | None = None
+    min_verified_jobs: int | None = None
+    min_expected_worker_results: int | None = None
+    timeout_seconds: float = 120.0
     poll_interval: float = 0.5
 
 
@@ -607,6 +627,128 @@ def run_alpha_remote_proof(config: AlphaRemoteProofConfig) -> dict[str, Any]:
         config=config,
         invite=invite,
         duration_seconds=time.time() - started_at,
+        initial_snapshot=initial_snapshot,
+        final_snapshot=final_snapshot,
+        created_jobs=created_jobs,
+        criteria=criteria,
+        errors=errors,
+        initial_result_ids=initial_result_ids,
+    )
+    _write_json_report(config.report_path, report)
+    return report
+
+
+def run_alpha_inference_proof(config: AlphaInferenceProofConfig) -> dict[str, Any]:
+    _validate_inference_proof_config(config)
+    invite = load_alpha_invite(config.invite_path)
+    started_at = time.time()
+    client = CoordinatorClient(invite.coordinator, admission_token=invite.admission_token)
+    errors: list[str] = []
+    created_jobs: list[dict[str, Any]] = []
+    initial_snapshot: dict[str, Any] | None = None
+    final_snapshot: dict[str, Any] | None = None
+    criteria: dict[str, Any] | None = None
+    initial_result_ids: set[tuple[str, str, str]] = set()
+    selected_job_type = "inference.echo.v1"
+    mode_decision: dict[str, Any] = {}
+
+    try:
+        initial_snapshot = client.snapshot()
+        initial_result_ids = _result_ids(initial_snapshot)
+        mode_decision = _inference_mode_decision(config, initial_snapshot)
+        selected_job_type = mode_decision["job_type"]
+    except Exception as exc:
+        report = _inference_proof_report(
+            config=config,
+            invite=invite,
+            duration_seconds=time.time() - started_at,
+            selected_job_type=selected_job_type,
+            mode_decision=mode_decision,
+            initial_snapshot=None,
+            final_snapshot=None,
+            created_jobs=[],
+            criteria=_inference_proof_empty_criteria(config),
+            errors=[f"{type(exc).__name__}: {exc}"],
+            initial_result_ids=initial_result_ids,
+        )
+        _write_json_report(config.report_path, report)
+        return report
+
+    if mode_decision.get("status") == "fail":
+        errors.append(mode_decision["message"])
+
+    try:
+        for index in range(config.jobs if not errors else 0):
+            job = client.create_job(
+                job_type=selected_job_type,
+                payload=_inference_proof_payload(config, selected_job_type, index),
+                ttl_seconds=300,
+            )
+            created_jobs.append(
+                {
+                    "job_id": job.job_id,
+                    "job_type": job.job_type,
+                    "model_id": job.model_id,
+                    "verification_strategy": job.verification_strategy,
+                }
+            )
+    except Exception as exc:
+        errors.append(f"{type(exc).__name__}: {exc}")
+
+    created_job_ids = {job["job_id"] for job in created_jobs}
+    deadline = started_at + config.timeout_seconds
+    while time.time() <= deadline and created_jobs and not errors:
+        try:
+            final_snapshot = client.snapshot()
+            criteria = _inference_proof_criteria(
+                final_snapshot,
+                created_job_ids,
+                initial_result_ids,
+                config,
+            )
+            if all(item["passed"] for item in criteria.values()):
+                break
+            if (
+                criteria["all_created_jobs_terminal"]["passed"]
+                and (
+                    not criteria["verified_jobs"]["passed"]
+                    or not criteria["disputed_jobs"]["passed"]
+                    or not criteria["expired_jobs"]["passed"]
+                )
+            ):
+                break
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+            break
+        time.sleep(config.poll_interval)
+
+    if final_snapshot is None:
+        try:
+            final_snapshot = client.snapshot()
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    if final_snapshot is not None:
+        criteria = _inference_proof_criteria(
+            final_snapshot,
+            created_job_ids,
+            initial_result_ids,
+            config,
+        )
+    elif criteria is None:
+        criteria = _inference_proof_empty_criteria(config)
+
+    if created_jobs and not errors and not all(item["passed"] for item in criteria.values()):
+        errors.append("inference proof criteria were not met before timeout")
+    if len(created_jobs) != config.jobs and not errors:
+        errors.append(f"created {len(created_jobs)} of {config.jobs} requested jobs")
+
+    report = _inference_proof_report(
+        config=config,
+        invite=invite,
+        duration_seconds=time.time() - started_at,
+        selected_job_type=selected_job_type,
+        mode_decision=mode_decision,
         initial_snapshot=initial_snapshot,
         final_snapshot=final_snapshot,
         created_jobs=created_jobs,
@@ -2241,6 +2383,35 @@ def _validate_remote_proof_config(config: AlphaRemoteProofConfig) -> None:
         raise ValueError("--expected-worker-id cannot be blank")
 
 
+def _validate_inference_proof_config(config: AlphaInferenceProofConfig) -> None:
+    if config.jobs < 1:
+        raise ValueError("--jobs must be at least 1")
+    if config.mode not in {"echo", "ollama", "auto"}:
+        raise ValueError("--mode must be echo, ollama, or auto")
+    if config.mode == "ollama" and not (config.model and config.model.strip()):
+        raise ValueError("--model is required when --mode ollama")
+    if config.model is not None and not config.model.strip():
+        raise ValueError("--model cannot be blank")
+    if not config.prompt.strip():
+        raise ValueError("--prompt cannot be blank")
+    if config.temperature is not None and not 0 <= config.temperature <= 2:
+        raise ValueError("--temperature must be between 0 and 2")
+    if config.min_live_workers < 0:
+        raise ValueError("--min-live-workers cannot be negative")
+    if config.min_accepted_results is not None and config.min_accepted_results < 0:
+        raise ValueError("--min-accepted-results cannot be negative")
+    if config.min_verified_jobs is not None and config.min_verified_jobs < 0:
+        raise ValueError("--min-verified-jobs cannot be negative")
+    if config.min_expected_worker_results is not None and config.min_expected_worker_results < 0:
+        raise ValueError("--min-expected-worker-results cannot be negative")
+    if config.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0")
+    if config.poll_interval <= 0:
+        raise ValueError("--poll-interval must be greater than 0")
+    if config.expected_worker_id is not None and not config.expected_worker_id.strip():
+        raise ValueError("--expected-worker-id cannot be blank")
+
+
 def _remote_proof_required_accepted_results(config: AlphaRemoteProofConfig) -> int:
     if config.min_accepted_results is not None:
         return config.min_accepted_results
@@ -2369,6 +2540,239 @@ def _remote_proof_criteria(
     }
 
 
+def _inference_mode_decision(
+    config: AlphaInferenceProofConfig,
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    if config.mode == "echo":
+        return {
+            "status": "pass",
+            "mode": config.mode,
+            "job_type": "inference.echo.v1",
+            "message": "Using echo inference proof.",
+            "ollama_capable_live_nodes": [],
+        }
+
+    model = config.model.strip() if config.model else None
+    capable_nodes = _live_nodes_with_ollama_model(snapshot, model) if model else []
+    if config.mode == "auto":
+        if model and capable_nodes:
+            return {
+                "status": "pass",
+                "mode": config.mode,
+                "job_type": "inference.ollama.v1",
+                "message": f"Using Ollama inference proof because {len(capable_nodes)} live node(s) advertise {model}.",
+                "model": model,
+                "ollama_capable_live_nodes": capable_nodes,
+            }
+        return {
+            "status": "warn",
+            "mode": config.mode,
+            "job_type": "inference.echo.v1",
+            "message": "Falling back to echo inference proof because no live node advertises the requested Ollama model.",
+            "model": model,
+            "ollama_capable_live_nodes": capable_nodes,
+        }
+
+    if not capable_nodes:
+        return {
+            "status": "fail",
+            "mode": config.mode,
+            "job_type": "inference.ollama.v1",
+            "message": f"No live worker advertises Ollama model {model!r}.",
+            "model": model,
+            "ollama_capable_live_nodes": capable_nodes,
+        }
+    return {
+        "status": "pass",
+        "mode": config.mode,
+        "job_type": "inference.ollama.v1",
+        "message": f"Using Ollama inference proof with {len(capable_nodes)} capable live node(s).",
+        "model": model,
+        "ollama_capable_live_nodes": capable_nodes,
+    }
+
+
+def _live_nodes_with_ollama_model(snapshot: dict[str, Any], model: str | None) -> list[dict[str, Any]]:
+    if model is None:
+        return []
+    capable = []
+    for node in snapshot.get("nodes", []):
+        if node.get("liveness_status") != "live":
+            continue
+        if "inference.ollama.v1" not in node.get("supported_job_types", []):
+            continue
+        models = _node_ollama_models(node)
+        if model not in models:
+            continue
+        capable.append(
+            {
+                "node_id": node.get("node_id"),
+                "capability_tier": node.get("capability_tier"),
+                "models": models,
+            }
+        )
+    return capable
+
+
+def _node_ollama_models(node: dict[str, Any]) -> list[str]:
+    top_level = node.get("ollama_models")
+    if isinstance(top_level, list):
+        return [str(model) for model in top_level]
+    models = (
+        node.get("model_runtimes", {})
+        .get("ollama", {})
+        .get("models", [])
+    )
+    return [str(model) for model in models] if isinstance(models, list) else []
+
+
+def _inference_proof_payload(
+    config: AlphaInferenceProofConfig,
+    job_type: str,
+    index: int,
+) -> dict[str, Any]:
+    prompt = f"{config.prompt.strip()}\n\nProof job {index + 1} of {config.jobs}."
+    if job_type == "inference.ollama.v1":
+        payload: dict[str, Any] = {"model": str(config.model).strip(), "prompt": prompt}
+        if config.temperature is not None:
+            payload["temperature"] = config.temperature
+        return payload
+    return {"prompt": prompt}
+
+
+def _inference_required_accepted_results(config: AlphaInferenceProofConfig) -> int:
+    if config.min_accepted_results is not None:
+        return config.min_accepted_results
+    return config.jobs
+
+
+def _inference_required_verified_jobs(config: AlphaInferenceProofConfig) -> int:
+    if config.min_verified_jobs is not None:
+        return config.min_verified_jobs
+    return config.jobs
+
+
+def _inference_required_expected_worker_results(config: AlphaInferenceProofConfig) -> int:
+    if config.min_expected_worker_results is not None:
+        return config.min_expected_worker_results
+    return 1 if config.expected_worker_id else 0
+
+
+def _inference_proof_empty_criteria(config: AlphaInferenceProofConfig) -> dict[str, Any]:
+    expected_worker_required = _inference_required_expected_worker_results(config)
+    return {
+        "created_jobs": {"actual": 0, "required": config.jobs, "passed": False},
+        "live_workers": {"actual": 0, "required": config.min_live_workers, "passed": False},
+        "accepted_results": {
+            "actual": 0,
+            "required": _inference_required_accepted_results(config),
+            "passed": False,
+        },
+        "verified_jobs": {
+            "actual": 0,
+            "required": _inference_required_verified_jobs(config),
+            "passed": False,
+        },
+        "all_created_jobs_terminal": {"actual": 0, "required": config.jobs, "passed": False},
+        "disputed_jobs": {"actual": 0, "required": 0, "passed": True},
+        "expired_jobs": {"actual": 0, "required": 0, "passed": True},
+        "incomplete_jobs": {"actual": config.jobs, "required": 0, "passed": False},
+        "expected_worker_live": {
+            "actual": 0,
+            "required": 1 if config.expected_worker_id else 0,
+            "passed": config.expected_worker_id is None,
+        },
+        "expected_worker_results": {
+            "actual": 0,
+            "required": expected_worker_required,
+            "passed": expected_worker_required == 0,
+        },
+    }
+
+
+def _inference_proof_criteria(
+    snapshot: dict[str, Any],
+    created_job_ids: set[str],
+    initial_result_ids: set[tuple[str, str, str]],
+    config: AlphaInferenceProofConfig,
+) -> dict[str, Any]:
+    status = snapshot.get("status", {})
+    created_jobs = _snapshot_jobs_for_ids(snapshot, created_job_ids)
+    created_results = _snapshot_results_for_ids(snapshot, created_job_ids, initial_result_ids)
+    status_counts = _job_status_counts(created_jobs)
+    live_workers = int(status.get("live_nodes") or 0)
+    accepted_results = len(created_results)
+    verified_jobs = status_counts["verified"]
+    disputed_jobs = status_counts["disputed"]
+    expired_jobs = status_counts["expired"]
+    terminal_jobs = sum(1 for job in created_jobs if job.get("status") in TERMINAL_JOB_STATUSES)
+    incomplete_jobs = sum(1 for job in created_jobs if job.get("status") not in TERMINAL_JOB_STATUSES)
+    expected_worker = _snapshot_node(snapshot, config.expected_worker_id) if config.expected_worker_id else None
+    expected_worker_live = int(
+        bool(expected_worker is not None and expected_worker.get("liveness_status") == "live")
+    )
+    expected_worker_results = (
+        sum(1 for result in created_results if result.get("node_id") == config.expected_worker_id)
+        if config.expected_worker_id
+        else 0
+    )
+    expected_worker_required = _inference_required_expected_worker_results(config)
+
+    return {
+        "created_jobs": {
+            "actual": len(created_job_ids),
+            "required": config.jobs,
+            "passed": len(created_job_ids) == config.jobs,
+        },
+        "live_workers": {
+            "actual": live_workers,
+            "required": config.min_live_workers,
+            "passed": live_workers >= config.min_live_workers,
+        },
+        "accepted_results": {
+            "actual": accepted_results,
+            "required": _inference_required_accepted_results(config),
+            "passed": accepted_results >= _inference_required_accepted_results(config),
+        },
+        "verified_jobs": {
+            "actual": verified_jobs,
+            "required": _inference_required_verified_jobs(config),
+            "passed": verified_jobs >= _inference_required_verified_jobs(config),
+        },
+        "all_created_jobs_terminal": {
+            "actual": terminal_jobs,
+            "required": len(created_job_ids),
+            "passed": bool(created_job_ids) and terminal_jobs == len(created_job_ids),
+        },
+        "disputed_jobs": {
+            "actual": disputed_jobs,
+            "required": 0,
+            "passed": disputed_jobs == 0,
+        },
+        "expired_jobs": {
+            "actual": expired_jobs,
+            "required": 0,
+            "passed": expired_jobs == 0,
+        },
+        "incomplete_jobs": {
+            "actual": incomplete_jobs,
+            "required": 0,
+            "passed": incomplete_jobs == 0,
+        },
+        "expected_worker_live": {
+            "actual": expected_worker_live,
+            "required": 1 if config.expected_worker_id else 0,
+            "passed": config.expected_worker_id is None or expected_worker_live >= 1,
+        },
+        "expected_worker_results": {
+            "actual": expected_worker_results,
+            "required": expected_worker_required,
+            "passed": expected_worker_results >= expected_worker_required,
+        },
+    }
+
+
 def _remote_proof_report(
     *,
     config: AlphaRemoteProofConfig,
@@ -2422,6 +2826,106 @@ def _remote_proof_report(
         "criteria": criteria,
         "errors": errors,
     }
+
+
+def _inference_proof_report(
+    *,
+    config: AlphaInferenceProofConfig,
+    invite: AlphaInvite,
+    duration_seconds: float,
+    selected_job_type: str,
+    mode_decision: dict[str, Any],
+    initial_snapshot: dict[str, Any] | None,
+    final_snapshot: dict[str, Any] | None,
+    created_jobs: list[dict[str, Any]],
+    criteria: dict[str, Any],
+    errors: list[str],
+    initial_result_ids: set[tuple[str, str, str]],
+) -> dict[str, Any]:
+    ok = not errors and all(item["passed"] for item in criteria.values())
+    created_job_ids = {job["job_id"] for job in created_jobs}
+    created_job_statuses = (
+        _snapshot_jobs_for_ids(final_snapshot, created_job_ids) if final_snapshot is not None else []
+    )
+    created_results = (
+        _snapshot_results_for_ids(final_snapshot, created_job_ids, initial_result_ids)
+        if final_snapshot is not None
+        else []
+    )
+    expected_worker = (
+        _remote_proof_expected_worker_summary(final_snapshot, config.expected_worker_id, created_results)
+        if config.expected_worker_id
+        else None
+    )
+    return {
+        "schema": ALPHA_INFERENCE_PROOF_REPORT_SCHEMA,
+        "ok": ok,
+        "status": "pass" if ok else "fail",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(duration_seconds, 3),
+        "invite": invite.public_summary(),
+        "parameters": {
+            "jobs": config.jobs,
+            "mode": config.mode,
+            "selected_job_type": selected_job_type,
+            "model": config.model,
+            "prompt": config.prompt,
+            "temperature": config.temperature,
+            "expected_worker_id": config.expected_worker_id,
+            "min_live_workers": config.min_live_workers,
+            "min_accepted_results": _inference_required_accepted_results(config),
+            "min_verified_jobs": _inference_required_verified_jobs(config),
+            "min_expected_worker_results": _inference_required_expected_worker_results(config),
+            "timeout_seconds": config.timeout_seconds,
+            "poll_interval": config.poll_interval,
+        },
+        "mode_decision": mode_decision,
+        "baseline": _snapshot_baseline(initial_snapshot),
+        "final_summary": _snapshot_baseline(final_snapshot),
+        "created_jobs": created_jobs,
+        "created_job_status_counts": _job_status_counts(created_job_statuses),
+        "created_job_statuses": created_job_statuses,
+        "created_results": _inference_result_summaries(created_results),
+        "result_node_counts": _result_node_counts(created_results),
+        "expected_worker": expected_worker,
+        "criteria": criteria,
+        "errors": errors,
+    }
+
+
+def _inference_result_summaries(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries = []
+    for result in results:
+        output = result.get("output", {})
+        answer = output.get("answer") if isinstance(output, dict) else None
+        summaries.append(
+            {
+                "job_id": result.get("job_id"),
+                "job_type": result.get("job_type"),
+                "node_id": result.get("node_id"),
+                "output_hash": result.get("output_hash"),
+                "runtime_seconds": result.get("runtime_seconds"),
+                "model": output.get("model") if isinstance(output, dict) else None,
+                "confidence": output.get("confidence") if isinstance(output, dict) else None,
+                "answer_preview": _preview_text(answer),
+            }
+        )
+    return summaries
+
+
+def _preview_text(value: Any, *, max_length: int = 200) -> str | None:
+    if value is None:
+        return None
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    return text if len(text) <= max_length else f"{text[:max_length]}..."
+
+
+def _result_node_counts(results: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for result in results:
+        node_id = str(result.get("node_id"))
+        counts[node_id] = counts.get(node_id, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _snapshot_baseline(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:

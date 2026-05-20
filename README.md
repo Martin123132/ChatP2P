@@ -198,6 +198,14 @@ chatp2p operator alpha-remote-proof --invite D:\ChatP2PData\alpha-invite.json --
 
 Pass means the expected worker was live, it returned at least one accepted result, every job created by the proof reached a terminal state, all proof-created jobs verified, and no proof-created jobs disputed or expired.
 
+For an inference-style proof, start with echo mode:
+
+```bash
+chatp2p operator alpha-inference-proof --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_... --jobs 10 --min-live-workers 2 --report D:\ChatP2PData\alpha-inference-proof-report.json
+```
+
+Echo mode creates signed `inference.echo.v1` jobs and verifies the result path that real model inference will use. When workers advertise a local Ollama model, use `--mode ollama --model MODEL`, or `--mode auto --model MODEL` to use Ollama only when a live capable node is present.
+
 For a quick health check, use:
 
 ```bash

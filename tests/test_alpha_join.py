@@ -5,6 +5,7 @@ import chatp2p.alpha as alpha_module
 from chatp2p.alpha import (
     ALPHA_DRILL_REPORT_SCHEMA,
     ALPHA_EVIDENCE_PACK_SCHEMA,
+    ALPHA_INFERENCE_PROOF_REPORT_SCHEMA,
     ALPHA_INVITE_SCHEMA,
     ALPHA_PREFLIGHT_REPORT_SCHEMA,
     ALPHA_REMOTE_PROOF_REPORT_SCHEMA,
@@ -13,6 +14,7 @@ from chatp2p.alpha import (
     ALPHA_STATUS_REPORT_SCHEMA,
     AlphaDrillConfig,
     AlphaEvidenceConfig,
+    AlphaInferenceProofConfig,
     AlphaInvite,
     AlphaJoinConfig,
     AlphaPreflightConfig,
@@ -26,6 +28,7 @@ from chatp2p.alpha import (
     load_alpha_invite,
     run_alpha_drill,
     run_alpha_evidence,
+    run_alpha_inference_proof,
     run_alpha_join,
     run_alpha_preflight,
     run_alpha_remote_proof,
@@ -581,6 +584,54 @@ def test_alpha_remote_proof_waits_for_verified_jobs_and_expected_worker(tmp_path
     assert proof_report["criteria"]["expired_jobs"]["actual"] == 0
     assert proof_report["expected_worker"]["node_id"] == partner_join["worker_node_id"]
     assert proof_report["baseline"]["job_count"] == 0
+    assert report_path.exists()
+    assert token not in json.dumps(proof_report)
+
+
+def test_alpha_inference_proof_runs_echo_jobs_and_tracks_expected_worker(tmp_path):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    home = tmp_path / ".mesh"
+    invite_path = tmp_path / "alpha-invite.json"
+    report_path = tmp_path / "alpha-inference-proof-report.json"
+    write_alpha_invite(invite_path, AlphaInvite.create(coordinator=coordinator_url, admission_token=token))
+    _save_benchmark(home)
+
+    try:
+        join_report = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=invite_path,
+                home=home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        proof_report = run_alpha_inference_proof(
+            AlphaInferenceProofConfig(
+                invite_path=invite_path,
+                report_path=report_path,
+                jobs=2,
+                mode="echo",
+                prompt="alpha echo proof",
+                expected_worker_id=join_report["worker_node_id"],
+                min_live_workers=1,
+                timeout_seconds=10.0,
+                poll_interval=0.2,
+            )
+        )
+    finally:
+        stop_managed_process(home=home, role="worker")
+        _stop_server(server, thread)
+
+    assert join_report["ok"] is True
+    assert proof_report["schema"] == ALPHA_INFERENCE_PROOF_REPORT_SCHEMA
+    assert proof_report["ok"] is True
+    assert proof_report["parameters"]["selected_job_type"] == "inference.echo.v1"
+    assert proof_report["criteria"]["verified_jobs"]["actual"] == 2
+    assert proof_report["criteria"]["expected_worker_results"]["actual"] == 2
+    assert proof_report["result_node_counts"] == {join_report["worker_node_id"]: 2}
+    assert proof_report["created_results"][0]["answer_preview"].startswith("alpha echo proof")
     assert report_path.exists()
     assert token not in json.dumps(proof_report)
 

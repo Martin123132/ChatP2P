@@ -127,6 +127,24 @@ Pass means:
 
 The report schema is `chatp2p.alpha-remote-proof-report.v1`. It includes pre-existing coordinator counts separately from the proof-created jobs, so old dashboard history does not hide whether this run passed.
 
+## Inference Proof
+
+After deterministic remote proof is passing, run an inference-style packet proof:
+
+```bash
+python -m chatp2p.cli operator alpha-inference-proof --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_87b5cefe53e67c6c --jobs 10 --min-live-workers 2 --report D:\ChatP2PData\alpha-inference-proof-report.json
+```
+
+The default mode is `echo`, which creates `inference.echo.v1` jobs. These jobs do not call a model, but they use the inference job schema, signed lease/result flow, worker dispatch path, and one-result verification strategy that model jobs use.
+
+When a live worker advertises a local Ollama model, run:
+
+```bash
+python -m chatp2p.cli operator alpha-inference-proof --invite D:\ChatP2PData\alpha-invite.json --mode ollama --model llama3.2:3b --jobs 2 --min-live-workers 1 --report D:\ChatP2PData\alpha-ollama-proof-report.json
+```
+
+Use `--mode auto --model MODEL` when you want the command to use Ollama if a live capable node advertises the model, and otherwise fall back to echo.
+
 ## Alpha Status
 
 Use this when you want a single redacted health report without creating new jobs:
