@@ -2,15 +2,18 @@ import json
 import threading
 
 from chatp2p.alpha import (
+    ALPHA_DRILL_REPORT_SCHEMA,
     ALPHA_INVITE_SCHEMA,
     ALPHA_PREFLIGHT_REPORT_SCHEMA,
     ALPHA_SMOKE_REPORT_SCHEMA,
+    AlphaDrillConfig,
     AlphaInvite,
     AlphaJoinConfig,
     AlphaPreflightConfig,
     AlphaSmokeConfig,
     bootstrap_alpha,
     load_alpha_invite,
+    run_alpha_drill,
     run_alpha_join,
     run_alpha_preflight,
     run_alpha_smoke,
@@ -373,6 +376,51 @@ def test_alpha_smoke_creates_jobs_and_observes_accepted_results(tmp_path):
     assert smoke_report["criteria"]["disputed_jobs"]["actual"] == 0
     assert report_path.exists()
     assert token not in json.dumps(smoke_report)
+
+
+def test_alpha_drill_starts_simulated_worker_and_verifies_jobs(tmp_path):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    home = tmp_path / ".mesh"
+    invite_path = tmp_path / "alpha-invite.json"
+    report_path = tmp_path / "alpha-drill-report.json"
+    write_alpha_invite(invite_path, AlphaInvite.create(coordinator=coordinator_url, admission_token=token))
+    _save_benchmark(home)
+
+    try:
+        report = run_alpha_drill(
+            AlphaDrillConfig(
+                home=home,
+                invite_path=invite_path,
+                report_path=report_path,
+                start_coordinator=False,
+                run_preflight=False,
+                simulated_workers=1,
+                jobs=2,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                timeout_seconds=15.0,
+                poll_interval=0.2,
+                cpu_duration_seconds=0.0,
+                keep_simulated_workers=False,
+            )
+        )
+    finally:
+        stop_managed_process(home=home, role="worker")
+        stop_managed_process(home=tmp_path / ".mesh-alpha-drill" / "worker-1", role="worker")
+        _stop_server(server, thread)
+
+    assert report["schema"] == ALPHA_DRILL_REPORT_SCHEMA
+    assert report["ok"] is True
+    assert report["smoke"]["criteria"]["live_workers"]["actual"] >= 2
+    assert report["smoke"]["criteria"]["verified_jobs"]["actual"] == 2
+    assert report["smoke"]["criteria"]["accepted_results"]["actual"] >= 4
+    assert report["smoke"]["criteria"]["disputed_jobs"]["actual"] == 0
+    assert report["simulated_workers"][0]["join"]["ok"] is True
+    assert report["cleanup"][0]["stop"]["status"] in {"stopped", "not_managed"}
+    assert report_path.exists()
+    assert (tmp_path / "alpha-drill-report-smoke.json").exists()
+    assert token not in json.dumps(report)
 
 
 def test_alpha_smoke_fails_without_live_workers_and_with_wrong_token(tmp_path):

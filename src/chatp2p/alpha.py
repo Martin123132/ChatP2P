@@ -24,6 +24,7 @@ from .operator_config import DEFAULT_ALLOWED_JOB_TYPES, OperatorConfig, write_op
 ALPHA_INVITE_SCHEMA = "chatp2p.alpha-invite.v1"
 ALPHA_PREFLIGHT_REPORT_SCHEMA = "chatp2p.alpha-preflight-report.v1"
 ALPHA_SMOKE_REPORT_SCHEMA = "chatp2p.alpha-smoke-report.v1"
+ALPHA_DRILL_REPORT_SCHEMA = "chatp2p.alpha-drill-report.v1"
 DEFAULT_ALPHA_NOTES = "ChatP2P public alpha invite. Keep this file private; it contains the admission token."
 LOCAL_INVITE_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
@@ -134,6 +135,31 @@ class AlphaSmokeConfig:
     min_verified_jobs: int = 0
     timeout_seconds: float = 90.0
     poll_interval: float = 0.5
+
+
+@dataclass(frozen=True)
+class AlphaDrillConfig:
+    home: Path
+    invite_path: Path
+    report_path: Path
+    config_path: Path | None = None
+    simulated_workers: int = 1
+    jobs: int = 4
+    worker_interval: float = 0.5
+    startup_timeout_seconds: float = 15.0
+    timeout_seconds: float = 90.0
+    poll_interval: float = 0.5
+    cpu_duration_seconds: float = 0.25
+    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
+    start_coordinator: bool = True
+    coordinator_host: str = "0.0.0.0"
+    coordinator_port: int | None = None
+    lease_timeout_seconds: float = 30.0
+    node_stale_seconds: float = 60.0
+    start_primary_worker: bool = True
+    force_workers: bool = False
+    keep_simulated_workers: bool = True
+    run_preflight: bool = True
 
 
 def generate_admission_token() -> str:
@@ -400,6 +426,181 @@ def run_alpha_smoke(config: AlphaSmokeConfig) -> dict[str, Any]:
         final_snapshot=final_snapshot,
         errors=errors,
     )
+    _write_json_report(config.report_path, report)
+    return report
+
+
+def run_alpha_drill(config: AlphaDrillConfig) -> dict[str, Any]:
+    _validate_drill_config(config)
+    started_at = time.time()
+    home = config.home.expanduser().resolve()
+    invite = load_alpha_invite(config.invite_path)
+    errors: list[str] = []
+    cleanup: list[dict[str, Any]] = []
+
+    coordinator_before = managed_process_status(home=home, role="coordinator")
+    initial_health = _coordinator_health(invite, timeout_seconds=min(config.startup_timeout_seconds, 5.0))
+    coordinator_start = None
+    final_health = initial_health
+
+    if not initial_health.get("ok") and config.start_coordinator:
+        if config.config_path is None:
+            errors.append("coordinator is unreachable and no operator config was provided to start it")
+        else:
+            coordinator_start = _start_drill_coordinator(config=config, home=home, invite=invite)
+            final_health = _wait_for_invite_health(
+                invite=invite,
+                timeout_seconds=config.startup_timeout_seconds,
+                poll_interval=0.2,
+            )
+            if not final_health.get("ok"):
+                errors.append("coordinator did not become reachable before startup timeout")
+
+    coordinator_after_start = managed_process_status(home=home, role="coordinator")
+    preflight = None
+    if config.run_preflight and config.config_path is not None and final_health.get("ok"):
+        preflight_path = _sidecar_report_path(config.report_path, "preflight")
+        preflight = run_alpha_preflight(
+            AlphaPreflightConfig(
+                config_path=config.config_path,
+                invite_path=config.invite_path,
+                home=home,
+                report_path=preflight_path,
+                timeout_seconds=min(config.startup_timeout_seconds, 5.0),
+            )
+        )
+        if not preflight["ok"]:
+            errors.append("alpha preflight did not pass")
+
+    primary_join = None
+    if config.start_primary_worker and final_health.get("ok"):
+        primary_join = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=config.invite_path,
+                home=home,
+                ollama_base_url=config.ollama_base_url,
+                worker_interval=config.worker_interval,
+                startup_timeout_seconds=config.startup_timeout_seconds,
+                cpu_duration_seconds=config.cpu_duration_seconds,
+                force=config.force_workers,
+            )
+        )
+        if not primary_join["ok"]:
+            errors.append("primary worker did not join successfully")
+
+    simulated: list[dict[str, Any]] = []
+    if final_health.get("ok"):
+        for index in range(1, config.simulated_workers + 1):
+            worker_home = _drill_simulated_worker_home(home, index)
+            join_report = run_alpha_join(
+                AlphaJoinConfig(
+                    invite_path=config.invite_path,
+                    home=worker_home,
+                    ollama_base_url=config.ollama_base_url,
+                    worker_interval=config.worker_interval,
+                    startup_timeout_seconds=config.startup_timeout_seconds,
+                    cpu_duration_seconds=config.cpu_duration_seconds,
+                    force=True,
+                )
+            )
+            simulated.append({"index": index, "home": str(worker_home), "join": join_report})
+            if not join_report["ok"]:
+                errors.append(f"simulated worker {index} did not join successfully")
+
+    smoke = None
+    if final_health.get("ok"):
+        required_workers = _drill_required_workers(config)
+        quorum_mode = required_workers >= 2
+        smoke_path = _sidecar_report_path(config.report_path, "smoke")
+        smoke = run_alpha_smoke(
+            AlphaSmokeConfig(
+                invite_path=config.invite_path,
+                report_path=smoke_path,
+                jobs=config.jobs,
+                min_live_workers=required_workers,
+                min_accepted_results=config.jobs * (2 if quorum_mode else 1),
+                min_verified_jobs=config.jobs if quorum_mode else 0,
+                timeout_seconds=config.timeout_seconds,
+                poll_interval=config.poll_interval,
+            )
+        )
+        if not smoke["ok"]:
+            errors.append("alpha smoke proof did not pass")
+
+    if not config.keep_simulated_workers:
+        for index in range(1, config.simulated_workers + 1):
+            worker_home = _drill_simulated_worker_home(home, index)
+            cleanup.append(
+                {
+                    "index": index,
+                    "home": str(worker_home),
+                    "stop": stop_managed_process(home=worker_home, role="worker"),
+                }
+            )
+
+    coordinator_after = managed_process_status(home=home, role="coordinator")
+    primary_worker_status = managed_process_status(home=home, role="worker")
+    simulated_statuses = [
+        {
+            "index": index,
+            "home": str(_drill_simulated_worker_home(home, index)),
+            "worker": managed_process_status(home=_drill_simulated_worker_home(home, index), role="worker"),
+        }
+        for index in range(1, config.simulated_workers + 1)
+    ]
+    ok = (
+        not errors
+        and final_health.get("ok", False)
+        and (smoke is not None and smoke.get("ok", False))
+        and (preflight is None or preflight.get("ok", False))
+        and (primary_join is None or primary_join.get("ok", False))
+        and all(item["join"].get("ok", False) for item in simulated)
+    )
+    report = {
+        "schema": ALPHA_DRILL_REPORT_SCHEMA,
+        "ok": ok,
+        "status": "pass" if ok else "fail",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(time.time() - started_at, 3),
+        "config": {
+            "home": str(home),
+            "invite_path": str(config.invite_path),
+            "config_path": str(config.config_path) if config.config_path else None,
+            "report_path": str(config.report_path),
+            "simulated_workers": config.simulated_workers,
+            "jobs": config.jobs,
+            "worker_interval": config.worker_interval,
+            "startup_timeout_seconds": config.startup_timeout_seconds,
+            "timeout_seconds": config.timeout_seconds,
+            "poll_interval": config.poll_interval,
+            "start_coordinator": config.start_coordinator,
+            "coordinator_host": config.coordinator_host,
+            "coordinator_port": _drill_coordinator_port(config, invite),
+            "start_primary_worker": config.start_primary_worker,
+            "force_workers": config.force_workers,
+            "keep_simulated_workers": config.keep_simulated_workers,
+            "run_preflight": config.run_preflight,
+        },
+        "invite": invite.public_summary(),
+        "coordinator": {
+            "before": coordinator_before,
+            "initial_health": initial_health,
+            "start": coordinator_start,
+            "after_start": coordinator_after_start,
+            "final_health": final_health,
+            "after": coordinator_after,
+        },
+        "preflight": preflight,
+        "primary_worker": {
+            "join": primary_join,
+            "status": primary_worker_status,
+        },
+        "simulated_workers": simulated,
+        "simulated_worker_statuses": simulated_statuses,
+        "smoke": smoke,
+        "cleanup": cleanup,
+        "errors": errors,
+    }
     _write_json_report(config.report_path, report)
     return report
 
@@ -719,6 +920,113 @@ def _wait_for_worker_live(
         "snapshot_status": last_snapshot_status,
         "worker_process": managed_process_status(home=home, role="worker"),
     }
+
+
+def _validate_drill_config(config: AlphaDrillConfig) -> None:
+    if config.simulated_workers < 0:
+        raise ValueError("--simulated-workers cannot be negative")
+    if config.jobs < 1:
+        raise ValueError("--jobs must be at least 1")
+    if config.worker_interval <= 0:
+        raise ValueError("--worker-interval must be greater than 0")
+    if config.startup_timeout_seconds <= 0:
+        raise ValueError("--startup-timeout-seconds must be greater than 0")
+    if config.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0")
+    if config.poll_interval <= 0:
+        raise ValueError("--poll-interval must be greater than 0")
+    if config.cpu_duration_seconds < 0:
+        raise ValueError("--cpu-duration-seconds cannot be negative")
+    if config.coordinator_port is not None and not 1 <= config.coordinator_port <= 65535:
+        raise ValueError("--coordinator-port must be between 1 and 65535")
+    if config.lease_timeout_seconds <= 0:
+        raise ValueError("--lease-timeout-seconds must be greater than 0")
+    if config.node_stale_seconds <= 0:
+        raise ValueError("--node-stale-seconds must be greater than 0")
+
+
+def _drill_required_workers(config: AlphaDrillConfig) -> int:
+    primary = 1 if config.start_primary_worker else 0
+    return max(1, primary + config.simulated_workers)
+
+
+def _drill_simulated_worker_home(home: Path, index: int) -> Path:
+    return home.parent / f"{home.name}-alpha-drill" / f"worker-{index}"
+
+
+def _drill_coordinator_port(config: AlphaDrillConfig, invite: AlphaInvite) -> int:
+    if config.coordinator_port is not None:
+        return config.coordinator_port
+    parsed = urlparse(invite.coordinator)
+    if parsed.port is not None:
+        return parsed.port
+    return 443 if parsed.scheme == "https" else 80
+
+
+def _drill_local_coordinator_url(host: str, port: int) -> str:
+    worker_host = "127.0.0.1" if host in {"0.0.0.0", "::", ""} else host
+    if ":" in worker_host and not worker_host.startswith("["):
+        worker_host = f"[{worker_host}]"
+    return f"http://{worker_host}:{port}"
+
+
+def _start_drill_coordinator(
+    *,
+    config: AlphaDrillConfig,
+    home: Path,
+    invite: AlphaInvite,
+) -> dict[str, Any]:
+    assert config.config_path is not None
+    port = _drill_coordinator_port(config, invite)
+    argv = [
+        sys.executable,
+        "-m",
+        "chatp2p.cli",
+        "coordinator",
+        "serve",
+        "--home",
+        str(home),
+        "--host",
+        config.coordinator_host,
+        "--port",
+        str(port),
+        "--lease-timeout-seconds",
+        str(config.lease_timeout_seconds),
+        "--node-stale-seconds",
+        str(config.node_stale_seconds),
+        "--operator-config",
+        str(config.config_path),
+    ]
+    return start_managed_process(
+        home=home,
+        role="coordinator",
+        argv=argv,
+        coordinator_url=_drill_local_coordinator_url(config.coordinator_host, port),
+        force=True,
+        extra_state={"listen": {"host": config.coordinator_host, "port": port}, "started_by": "alpha-drill"},
+    )
+
+
+def _wait_for_invite_health(
+    *,
+    invite: AlphaInvite,
+    timeout_seconds: float,
+    poll_interval: float,
+) -> dict[str, Any]:
+    deadline = time.time() + timeout_seconds
+    last_health = {"ok": False, "url": invite.coordinator, "error": "not attempted"}
+    while time.time() <= deadline:
+        last_health = _coordinator_health(invite, timeout_seconds=min(timeout_seconds, 5.0))
+        if last_health.get("ok"):
+            return last_health
+        time.sleep(poll_interval)
+    return last_health
+
+
+def _sidecar_report_path(path: Path, label: str) -> Path:
+    suffix = path.suffix or ".json"
+    stem = path.stem if path.suffix else path.name
+    return path.with_name(f"{stem}-{label}{suffix}")
 
 
 def _validate_smoke_config(config: AlphaSmokeConfig) -> None:

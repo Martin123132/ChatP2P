@@ -27,6 +27,21 @@ Pass means the config and invite load, the invite token matches the operator con
 
 Warnings are worth reading. A localhost invite URL means outside contributors cannot use the invite until the coordinator URL points at a reachable host.
 
+## Operator Drill
+
+When no outside contributor is available yet, run a local rehearsal with an isolated simulated worker:
+
+```bash
+python -m chatp2p.cli operator alpha-drill --home D:\ChatP2PData\.mesh --simulated-workers 1 --jobs 4 --report D:\ChatP2PData\alpha-drill-report.json
+```
+
+The drill checks or starts the coordinator, starts the primary worker if needed, starts simulated workers under `D:\ChatP2PData\.mesh-alpha-drill`, runs preflight, then runs a quorum smoke proof. Pass means the drill observed enough live workers, accepted results, verified jobs, and zero disputes. It writes sidecar reports next to the main report:
+
+- `D:\ChatP2PData\alpha-drill-report-preflight.json`
+- `D:\ChatP2PData\alpha-drill-report-smoke.json`
+
+Use `--cleanup-simulated-workers` when you want the simulated workers stopped after the report is written.
+
 ## Contributor Join
 
 Contributor quickstart:

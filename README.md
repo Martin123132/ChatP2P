@@ -180,6 +180,12 @@ After at least one contributor joins, prove the alpha can complete signed work:
 chatp2p operator alpha-smoke --invite D:\ChatP2PData\alpha-invite.json --jobs 4 --min-live-workers 1 --min-accepted-results 1 --report D:\ChatP2PData\alpha-smoke-report.json
 ```
 
+When you are waiting for a real contributor, rehearse the same flow with an isolated local simulated worker:
+
+```bash
+chatp2p operator alpha-drill --home D:\ChatP2PData\.mesh --simulated-workers 1 --jobs 4 --report D:\ChatP2PData\alpha-drill-report.json
+```
+
 The full alpha runbook lives in [docs/ALPHA_RUNBOOK.md](docs/ALPHA_RUNBOOK.md).
 
 Generic JSON job creation is also available:

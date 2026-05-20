@@ -10,11 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from .alpha import (
+    AlphaDrillConfig,
     AlphaJoinConfig,
     AlphaPreflightConfig,
     AlphaSmokeConfig,
     DEFAULT_ALPHA_NOTES,
     bootstrap_alpha,
+    run_alpha_drill,
     run_alpha_join,
     run_alpha_preflight,
     run_alpha_smoke,
@@ -492,6 +494,45 @@ def alpha_smoke_command(args: argparse.Namespace) -> None:
         raise SystemExit(str(exc)) from exc
     print(json.dumps(report, indent=2, sort_keys=True))
     if not report["ok"]:
+        raise SystemExit(1)
+
+
+def alpha_drill_command(args: argparse.Namespace) -> None:
+    home = Path(args.home)
+    invite = Path(args.invite) if args.invite else home.parent / "alpha-invite.json"
+    config = Path(args.config) if args.config else home.parent / "operator-config.json"
+    config_path = config if args.config or config.exists() else None
+    report = Path(args.report) if args.report else home.parent / "alpha-drill-report.json"
+    try:
+        drill_report = run_alpha_drill(
+            AlphaDrillConfig(
+                home=home,
+                invite_path=invite,
+                config_path=config_path,
+                report_path=report,
+                simulated_workers=args.simulated_workers,
+                jobs=args.jobs,
+                worker_interval=args.worker_interval,
+                startup_timeout_seconds=args.startup_timeout_seconds,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval=args.poll_interval,
+                cpu_duration_seconds=args.cpu_duration_seconds,
+                ollama_base_url=args.ollama_base_url,
+                start_coordinator=not args.no_start_coordinator,
+                coordinator_host=args.coordinator_host,
+                coordinator_port=args.coordinator_port,
+                lease_timeout_seconds=args.lease_timeout_seconds,
+                node_stale_seconds=args.node_stale_seconds,
+                start_primary_worker=not args.no_primary_worker,
+                force_workers=args.force_workers,
+                keep_simulated_workers=not args.cleanup_simulated_workers,
+                run_preflight=not args.no_preflight,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(drill_report, indent=2, sort_keys=True))
+    if not drill_report["ok"]:
         raise SystemExit(1)
 
 
@@ -1091,6 +1132,118 @@ def build_parser() -> argparse.ArgumentParser:
     )
     alpha_smoke_parser.add_argument("--report", required=True, help="Path for smoke JSON report")
     alpha_smoke_parser.set_defaults(func=alpha_smoke_command)
+
+    alpha_drill_parser = operator_subcommands.add_parser(
+        "alpha-drill",
+        help="Run an operator rehearsal with optional simulated workers and a quorum smoke proof",
+    )
+    alpha_drill_parser.add_argument("--home", required=True, help="Coordinator and primary worker home directory")
+    alpha_drill_parser.add_argument(
+        "--invite",
+        default=None,
+        help="Path to alpha invite JSON. Defaults to HOME parent/alpha-invite.json",
+    )
+    alpha_drill_parser.add_argument(
+        "--config",
+        default=None,
+        help="Path to operator config JSON. Defaults to HOME parent/operator-config.json when present",
+    )
+    alpha_drill_parser.add_argument(
+        "--report",
+        default=None,
+        help="Path for drill JSON report. Defaults to HOME parent/alpha-drill-report.json",
+    )
+    alpha_drill_parser.add_argument(
+        "--simulated-workers",
+        default=1,
+        type=int,
+        help="Extra isolated local workers to start for the drill",
+    )
+    alpha_drill_parser.add_argument("--jobs", default=4, type=int, help="Deterministic eval jobs to create")
+    alpha_drill_parser.add_argument(
+        "--worker-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between worker polling attempts",
+    )
+    alpha_drill_parser.add_argument(
+        "--startup-timeout-seconds",
+        default=15.0,
+        type=float,
+        help="Seconds to wait for coordinator and workers to become live",
+    )
+    alpha_drill_parser.add_argument(
+        "--timeout-seconds",
+        default=90.0,
+        type=float,
+        help="Maximum time to wait for smoke thresholds",
+    )
+    alpha_drill_parser.add_argument(
+        "--poll-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between coordinator snapshot polls during smoke proof",
+    )
+    alpha_drill_parser.add_argument(
+        "--cpu-duration-seconds",
+        default=0.25,
+        type=float,
+        help="Seconds to spend benchmarking workers that have no saved profile",
+    )
+    alpha_drill_parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="Local Ollama base URL for inference.ollama.v1 capability discovery",
+    )
+    alpha_drill_parser.add_argument(
+        "--no-start-coordinator",
+        action="store_true",
+        help="Only check the coordinator; do not start it when unreachable",
+    )
+    alpha_drill_parser.add_argument(
+        "--coordinator-host",
+        default="0.0.0.0",
+        help="Host to bind if the drill needs to start the coordinator",
+    )
+    alpha_drill_parser.add_argument(
+        "--coordinator-port",
+        default=None,
+        type=int,
+        help="Port to bind if the drill needs to start the coordinator. Defaults to invite URL port",
+    )
+    alpha_drill_parser.add_argument(
+        "--lease-timeout-seconds",
+        default=30.0,
+        type=float,
+        help="Coordinator lease timeout when the drill starts the coordinator",
+    )
+    alpha_drill_parser.add_argument(
+        "--node-stale-seconds",
+        default=60.0,
+        type=float,
+        help="Coordinator node stale timeout when the drill starts the coordinator",
+    )
+    alpha_drill_parser.add_argument(
+        "--no-primary-worker",
+        action="store_true",
+        help="Do not start or check a primary worker under --home",
+    )
+    alpha_drill_parser.add_argument(
+        "--force-workers",
+        action="store_true",
+        help="Replace existing managed workers used by the drill",
+    )
+    alpha_drill_parser.add_argument(
+        "--cleanup-simulated-workers",
+        action="store_true",
+        help="Stop simulated workers after writing the report",
+    )
+    alpha_drill_parser.add_argument(
+        "--no-preflight",
+        action="store_true",
+        help="Skip the config/invite/coordinator preflight sidecar report",
+    )
+    alpha_drill_parser.set_defaults(func=alpha_drill_command)
 
     coordinator_parser = subcommands.add_parser("coordinator", help="Coordinator commands")
     coordinator_subcommands = coordinator_parser.add_subparsers(dest="coordinator_command", required=True)
