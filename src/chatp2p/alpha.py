@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import secrets
 import sys
 import time
@@ -27,6 +28,7 @@ ALPHA_SMOKE_REPORT_SCHEMA = "chatp2p.alpha-smoke-report.v1"
 ALPHA_DRILL_REPORT_SCHEMA = "chatp2p.alpha-drill-report.v1"
 DEFAULT_ALPHA_NOTES = "ChatP2P public alpha invite. Keep this file private; it contains the admission token."
 LOCAL_INVITE_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
 
 
 @dataclass(frozen=True)
@@ -774,19 +776,83 @@ def _coordinator_health(invite: AlphaInvite, *, timeout_seconds: float) -> dict[
 def _invite_url_check(invite: AlphaInvite) -> dict[str, Any]:
     parsed = urlparse(invite.coordinator)
     hostname = parsed.hostname or ""
-    if hostname.lower() in LOCAL_INVITE_HOSTS:
+    reachability = _invite_hostname_reachability(hostname)
+    if reachability["status"] == "warn":
         return _alpha_check(
             "invite_url_shareable",
             "warn",
-            "Invite coordinator URL is local-only and will not work for outside contributors.",
-            details={"coordinator": invite.coordinator, "hostname": hostname},
+            reachability["message"],
+            details={
+                "coordinator": invite.coordinator,
+                "hostname": hostname,
+                "reachability": reachability["kind"],
+            },
         )
     return _alpha_check(
         "invite_url_shareable",
         "pass",
         "Invite coordinator URL looks shareable.",
-        details={"coordinator": invite.coordinator, "hostname": hostname},
+        details={
+            "coordinator": invite.coordinator,
+            "hostname": hostname,
+            "reachability": reachability["kind"],
+        },
     )
+
+
+def _invite_hostname_reachability(hostname: str) -> dict[str, str]:
+    normalized = hostname.strip().lower()
+    if normalized in LOCAL_INVITE_HOSTS:
+        return {
+            "status": "warn",
+            "kind": "local_only",
+            "message": "Invite coordinator URL is local-only and will not work for outside contributors.",
+        }
+    if normalized.endswith(".local"):
+        return {
+            "status": "warn",
+            "kind": "local_name",
+            "message": "Invite coordinator URL uses a local network name and may not resolve for outside contributors.",
+        }
+
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return {
+            "status": "pass",
+            "kind": "dns_name",
+            "message": "Invite coordinator URL uses a DNS hostname.",
+        }
+
+    if address.is_loopback or address.is_unspecified:
+        return {
+            "status": "warn",
+            "kind": "local_only",
+            "message": "Invite coordinator URL is local-only and will not work for outside contributors.",
+        }
+    if address.version == 4 and address in SHARED_ADDRESS_SPACE:
+        return {
+            "status": "warn",
+            "kind": "shared_network",
+            "message": "Invite coordinator URL uses shared address space; outside contributors need the same VPN or tailnet.",
+        }
+    if address.is_private or address.is_link_local:
+        return {
+            "status": "warn",
+            "kind": "private_network",
+            "message": "Invite coordinator URL uses a private network address; outside contributors need the same LAN, VPN, or tunnel.",
+        }
+    if address.is_reserved or address.is_multicast:
+        return {
+            "status": "warn",
+            "kind": "non_public_ip",
+            "message": "Invite coordinator URL does not use a normal public internet address.",
+        }
+    return {
+        "status": "pass",
+        "kind": "public_ip",
+        "message": "Invite coordinator URL uses a public IP address.",
+    }
 
 
 def _coordinator_health_check(health: dict[str, Any]) -> dict[str, Any]:

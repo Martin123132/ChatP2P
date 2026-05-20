@@ -25,7 +25,26 @@ python -m chatp2p.cli operator alpha-preflight --config D:\ChatP2PData\operator-
 
 Pass means the config and invite load, the invite token matches the operator config, the coordinator is reachable, public-alpha mode is active, and the health summary does not expose the raw token.
 
-Warnings are worth reading. A localhost invite URL means outside contributors cannot use the invite until the coordinator URL points at a reachable host.
+Warnings are worth reading. A localhost or private LAN invite URL, such as `127.0.0.1` or `192.168.x.x`, means outside contributors cannot use the invite until the coordinator URL points at a reachable VPN, tunnel, or public host.
+
+## Remote Partner Connectivity
+
+For a trusted partner outside your home network, the invite `coordinator` URL must be reachable from their machine. A private LAN address like `http://192.168.4.90:8765` is only useful on the same LAN, or across a VPN/tailnet that makes that address reachable.
+
+Safe first options:
+
+- Private VPN/tailnet: put both machines on the same private network, then regenerate the invite with the VPN/tailnet address.
+- HTTPS tunnel: map a public hostname to the local coordinator and regenerate the invite with that hostname.
+- Router port forward: only use this deliberately; keep public alpha token-gated and avoid exposing unauthenticated coordinators.
+
+After changing the reachable URL, regenerate the invite without changing the runtime home:
+
+```bash
+python -m chatp2p.cli operator bootstrap-alpha --config D:\ChatP2PData\operator-config.json --invite D:\ChatP2PData\alpha-invite.json --coordinator-url http://REACHABLE_HOST:8765 --force
+python -m chatp2p.cli operator alpha-preflight --config D:\ChatP2PData\operator-config.json --invite D:\ChatP2PData\alpha-invite.json --home D:\ChatP2PData\.mesh --report D:\ChatP2PData\alpha-preflight-report.json
+```
+
+The coordinator must be restarted after rotating or regenerating the operator config because it reads the admission token at startup.
 
 ## Operator Drill
 

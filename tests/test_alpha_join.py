@@ -18,6 +18,7 @@ from chatp2p.alpha import (
     run_alpha_preflight,
     run_alpha_smoke,
     write_alpha_invite,
+    _invite_url_check,
 )
 from chatp2p.benchmark import CAPABILITY_PROFILE_NAME, capabilities_from_benchmark, save_node_benchmark
 from chatp2p.client import CoordinatorClient
@@ -257,6 +258,40 @@ def test_alpha_preflight_passes_and_warns_for_local_invite_url(tmp_path):
     assert checks["invite_url_shareable"] == "warn"
     assert report_path.exists()
     assert token not in json.dumps(report)
+
+
+def test_invite_url_check_warns_for_private_network_addresses():
+    private_invite = AlphaInvite.create(
+        coordinator="http://192.168.4.90:8765",
+        admission_token="alpha-token-123",
+    )
+    local_name_invite = AlphaInvite.create(
+        coordinator="http://chatp2p.local:8765",
+        admission_token="alpha-token-123",
+    )
+    shared_network_invite = AlphaInvite.create(
+        coordinator="http://100.64.10.20:8765",
+        admission_token="alpha-token-123",
+    )
+    public_invite = AlphaInvite.create(
+        coordinator="https://chatp2p.example.com",
+        admission_token="alpha-token-123",
+    )
+
+    private_check = _invite_url_check(private_invite)
+    local_name_check = _invite_url_check(local_name_invite)
+    shared_network_check = _invite_url_check(shared_network_invite)
+    public_check = _invite_url_check(public_invite)
+
+    assert private_check["status"] == "warn"
+    assert private_check["details"]["reachability"] == "private_network"
+    assert "VPN" in private_check["message"]
+    assert local_name_check["status"] == "warn"
+    assert local_name_check["details"]["reachability"] == "local_name"
+    assert shared_network_check["status"] == "warn"
+    assert shared_network_check["details"]["reachability"] == "shared_network"
+    assert public_check["status"] == "pass"
+    assert public_check["details"]["reachability"] == "dns_name"
 
 
 def test_alpha_preflight_fails_for_bad_config_wrong_token_and_public_alpha_disabled(tmp_path):
