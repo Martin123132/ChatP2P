@@ -176,6 +176,12 @@ chatp2p operator alpha-preflight --config D:\ChatP2PData\operator-config.json --
 
 For remote contributors, the invite must use a URL they can reach. `localhost`, `127.0.0.1`, and private LAN addresses such as `192.168.x.x` are only valid on the same machine, same LAN, or an intentional VPN/tunnel.
 
+Check the current invite route before sending it:
+
+```bash
+chatp2p operator alpha-route --home D:\ChatP2PData\.mesh --report D:\ChatP2PData\alpha-route-report.json
+```
+
 After at least one contributor joins, prove the alpha can complete signed work:
 
 ```bash

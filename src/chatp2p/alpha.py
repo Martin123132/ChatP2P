@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import ipaddress
 import secrets
+import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -26,6 +28,7 @@ ALPHA_INVITE_SCHEMA = "chatp2p.alpha-invite.v1"
 ALPHA_PREFLIGHT_REPORT_SCHEMA = "chatp2p.alpha-preflight-report.v1"
 ALPHA_SMOKE_REPORT_SCHEMA = "chatp2p.alpha-smoke-report.v1"
 ALPHA_DRILL_REPORT_SCHEMA = "chatp2p.alpha-drill-report.v1"
+ALPHA_ROUTE_REPORT_SCHEMA = "chatp2p.alpha-route-report.v1"
 DEFAULT_ALPHA_NOTES = "ChatP2P public alpha invite. Keep this file private; it contains the admission token."
 LOCAL_INVITE_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
@@ -162,6 +165,16 @@ class AlphaDrillConfig:
     force_workers: bool = False
     keep_simulated_workers: bool = True
     run_preflight: bool = True
+
+
+@dataclass(frozen=True)
+class AlphaRouteConfig:
+    invite_path: Path
+    report_path: Path
+    home: Path | None = None
+    candidate_url: str | None = None
+    timeout_seconds: float = 5.0
+    detect_tools: bool = True
 
 
 def generate_admission_token() -> str:
@@ -607,6 +620,68 @@ def run_alpha_drill(config: AlphaDrillConfig) -> dict[str, Any]:
     return report
 
 
+def run_alpha_route(config: AlphaRouteConfig) -> dict[str, Any]:
+    if config.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0")
+
+    invite = load_alpha_invite(config.invite_path)
+    current_route = _route_probe(
+        invite=invite,
+        coordinator_url=invite.coordinator,
+        timeout_seconds=config.timeout_seconds,
+    )
+    candidate_route = (
+        _route_probe(
+            invite=invite,
+            coordinator_url=config.candidate_url,
+            timeout_seconds=config.timeout_seconds,
+        )
+        if config.candidate_url
+        else None
+    )
+    managed_processes = (
+        _managed_processes_for_report(config.home)
+        if config.home is not None
+        else None
+    )
+    tools = _remote_route_tooling() if config.detect_tools else None
+    recommendations = _route_recommendations(
+        current_route=current_route,
+        candidate_route=candidate_route,
+        tools=tools,
+    )
+    errors: list[str] = []
+    if not current_route["health"].get("ok"):
+        errors.append("current invite coordinator health is not reachable from this machine")
+    if candidate_route is not None and not candidate_route["health"].get("ok"):
+        errors.append("candidate coordinator health is not reachable from this machine")
+
+    status = "fail" if errors else ("warn" if recommendations else "pass")
+    report = {
+        "schema": ALPHA_ROUTE_REPORT_SCHEMA,
+        "ok": status != "fail",
+        "status": status,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "config": {
+            "invite_path": str(config.invite_path),
+            "report_path": str(config.report_path),
+            "home": str(config.home.expanduser().resolve()) if config.home else None,
+            "candidate_url": config.candidate_url,
+            "timeout_seconds": config.timeout_seconds,
+            "detect_tools": config.detect_tools,
+        },
+        "invite": invite.public_summary(),
+        "current_route": current_route,
+        "candidate_route": candidate_route,
+        "tooling": tools,
+        "managed_processes": managed_processes,
+        "recommendations": recommendations,
+        "errors": errors,
+    }
+    _write_json_report(config.report_path, report)
+    return report
+
+
 def run_alpha_join(config: AlphaJoinConfig) -> dict[str, Any]:
     if config.worker_interval <= 0:
         raise ValueError("--worker-interval must be greater than 0")
@@ -853,6 +928,115 @@ def _invite_hostname_reachability(hostname: str) -> dict[str, str]:
         "kind": "public_ip",
         "message": "Invite coordinator URL uses a public IP address.",
     }
+
+
+def _route_probe(
+    *,
+    invite: AlphaInvite,
+    coordinator_url: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    parsed = urlparse(coordinator_url)
+    hostname = parsed.hostname or ""
+    reachability = _invite_hostname_reachability(hostname)
+    probe_invite = AlphaInvite(
+        coordinator=coordinator_url.strip(),
+        admission_token=invite.admission_token,
+        created_at=invite.created_at,
+        allowed_job_types=invite.allowed_job_types,
+        notes=invite.notes,
+    ).validated()
+    health = _coordinator_health(probe_invite, timeout_seconds=timeout_seconds)
+    return {
+        "coordinator": probe_invite.coordinator,
+        "hostname": hostname,
+        "scheme": parsed.scheme,
+        "port": parsed.port,
+        "reachability": reachability,
+        "outside_ready": reachability["status"] == "pass",
+        "health": health,
+    }
+
+
+def _remote_route_tooling() -> dict[str, Any]:
+    tailscale = _tool_status("tailscale")
+    if tailscale["installed"]:
+        tailscale["ip4"] = _command_stdout(["tailscale", "ip", "-4"], timeout_seconds=3.0)
+    cloudflared = _tool_status("cloudflared")
+    return {
+        "tailscale": tailscale,
+        "cloudflared": cloudflared,
+    }
+
+
+def _tool_status(command: str) -> dict[str, Any]:
+    path = shutil.which(command)
+    return {
+        "installed": path is not None,
+        "path": path,
+    }
+
+
+def _command_stdout(argv: list[str], *, timeout_seconds: float) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "stdout": None}
+    return {
+        "ok": completed.returncode == 0,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout.strip() or None,
+        "stderr": completed.stderr.strip() or None,
+    }
+
+
+def _route_recommendations(
+    *,
+    current_route: dict[str, Any],
+    candidate_route: dict[str, Any] | None,
+    tools: dict[str, Any] | None,
+) -> list[str]:
+    recommendations: list[str] = []
+    current_reachability = current_route["reachability"]
+    route_needs_help = current_reachability["status"] == "warn"
+    if current_reachability["status"] == "warn":
+        recommendations.append(current_reachability["message"])
+        recommendations.append(
+            "Choose a reachable route before sending the invite: private VPN/tailnet, HTTPS tunnel, or deliberate public hosting."
+        )
+        recommendations.append(
+            "After choosing a route, regenerate the invite with that reachable URL, restart the coordinator, rerun alpha-preflight, then ask the partner to run node join."
+        )
+
+    if candidate_route is not None:
+        candidate_reachability = candidate_route["reachability"]
+        route_needs_help = route_needs_help or candidate_reachability["status"] == "warn"
+        if candidate_reachability["status"] == "warn":
+            recommendations.append(f"Candidate URL warning: {candidate_reachability['message']}")
+        if not candidate_route["health"].get("ok"):
+            route_needs_help = True
+            recommendations.append("Candidate URL is not reachable from this machine yet.")
+
+    if tools is not None and route_needs_help:
+        if not tools["tailscale"]["installed"] and not tools["cloudflared"]["installed"]:
+            recommendations.append(
+                "No supported local route tooling was detected on PATH; install/configure a VPN/tailnet or tunnel manually before regenerating the invite."
+            )
+        elif tools["tailscale"]["installed"] and current_reachability["kind"] in {"local_only", "private_network"}:
+            recommendations.append(
+                "Tailscale is installed; a private tailnet route is likely the safest first remote test if your partner joins the same tailnet."
+            )
+        elif tools["cloudflared"]["installed"] and current_reachability["kind"] in {"local_only", "private_network"}:
+            recommendations.append(
+                "cloudflared is installed; an HTTPS tunnel can provide a public hostname without opening router ports."
+            )
+    return recommendations
 
 
 def _coordinator_health_check(health: dict[str, Any]) -> dict[str, Any]:

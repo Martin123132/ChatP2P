@@ -31,6 +31,14 @@ Warnings are worth reading. A localhost or private LAN invite URL, such as `127.
 
 For a trusted partner outside your home network, the invite `coordinator` URL must be reachable from their machine. A private LAN address like `http://192.168.4.90:8765` is only useful on the same LAN, or across a VPN/tailnet that makes that address reachable.
 
+Run a route report before sending the invite:
+
+```bash
+python -m chatp2p.cli operator alpha-route --home D:\ChatP2PData\.mesh --report D:\ChatP2PData\alpha-route-report.json
+```
+
+The route report classifies the current invite URL, checks coordinator health, inspects managed process state, and detects local route tools such as Tailscale or cloudflared when they are on `PATH`. It does not open firewall ports, configure routers, log in to VPNs, or create tunnels.
+
 Safe first options:
 
 - Private VPN/tailnet: put both machines on the same private network, then regenerate the invite with the VPN/tailnet address.
@@ -42,6 +50,12 @@ After changing the reachable URL, regenerate the invite without changing the run
 ```bash
 python -m chatp2p.cli operator bootstrap-alpha --config D:\ChatP2PData\operator-config.json --invite D:\ChatP2PData\alpha-invite.json --coordinator-url http://REACHABLE_HOST:8765 --force
 python -m chatp2p.cli operator alpha-preflight --config D:\ChatP2PData\operator-config.json --invite D:\ChatP2PData\alpha-invite.json --home D:\ChatP2PData\.mesh --report D:\ChatP2PData\alpha-preflight-report.json
+```
+
+To test a possible URL before rewriting the invite, pass it as a candidate:
+
+```bash
+python -m chatp2p.cli operator alpha-route --home D:\ChatP2PData\.mesh --candidate-url http://REACHABLE_HOST:8765 --report D:\ChatP2PData\alpha-route-report.json
 ```
 
 The coordinator must be restarted after rotating or regenerating the operator config because it reads the admission token at startup.

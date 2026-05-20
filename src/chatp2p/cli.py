@@ -13,12 +13,14 @@ from .alpha import (
     AlphaDrillConfig,
     AlphaJoinConfig,
     AlphaPreflightConfig,
+    AlphaRouteConfig,
     AlphaSmokeConfig,
     DEFAULT_ALPHA_NOTES,
     bootstrap_alpha,
     run_alpha_drill,
     run_alpha_join,
     run_alpha_preflight,
+    run_alpha_route,
     run_alpha_smoke,
 )
 from .benchmark import CAPABILITY_PROFILE_NAME, load_node_capabilities, run_node_benchmark, save_node_benchmark
@@ -533,6 +535,30 @@ def alpha_drill_command(args: argparse.Namespace) -> None:
         raise SystemExit(str(exc)) from exc
     print(json.dumps(drill_report, indent=2, sort_keys=True))
     if not drill_report["ok"]:
+        raise SystemExit(1)
+
+
+def alpha_route_command(args: argparse.Namespace) -> None:
+    home = Path(args.home) if args.home else None
+    invite = Path(args.invite) if args.invite else (home.parent / "alpha-invite.json" if home else Path("alpha-invite.json"))
+    report = Path(args.report) if args.report else (
+        home.parent / "alpha-route-report.json" if home else Path("alpha-route-report.json")
+    )
+    try:
+        route_report = run_alpha_route(
+            AlphaRouteConfig(
+                invite_path=invite,
+                report_path=report,
+                home=home,
+                candidate_url=args.candidate_url,
+                timeout_seconds=args.timeout_seconds,
+                detect_tools=not args.no_tool_detection,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(route_report, indent=2, sort_keys=True))
+    if route_report["status"] == "fail":
         raise SystemExit(1)
 
 
@@ -1093,6 +1119,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Timeout for coordinator health checks",
     )
     alpha_preflight_parser.set_defaults(func=alpha_preflight_command)
+
+    alpha_route_parser = operator_subcommands.add_parser(
+        "alpha-route",
+        help="Report whether an alpha invite URL is ready for remote contributors",
+    )
+    alpha_route_parser.add_argument(
+        "--invite",
+        default=None,
+        help="Path to alpha invite JSON. Defaults to HOME parent/alpha-invite.json or ./alpha-invite.json",
+    )
+    alpha_route_parser.add_argument(
+        "--home",
+        default=None,
+        help="Optional coordinator home directory for managed process status",
+    )
+    alpha_route_parser.add_argument(
+        "--candidate-url",
+        default=None,
+        help="Optional future coordinator URL to classify and health-check without rewriting the invite",
+    )
+    alpha_route_parser.add_argument(
+        "--report",
+        default=None,
+        help="Path for route JSON report. Defaults to HOME parent/alpha-route-report.json or ./alpha-route-report.json",
+    )
+    alpha_route_parser.add_argument(
+        "--timeout-seconds",
+        default=5.0,
+        type=float,
+        help="Timeout for coordinator health checks",
+    )
+    alpha_route_parser.add_argument(
+        "--no-tool-detection",
+        action="store_true",
+        help="Skip non-mutating local checks for route tools such as tailscale or cloudflared",
+    )
+    alpha_route_parser.set_defaults(func=alpha_route_command)
 
     alpha_smoke_parser = operator_subcommands.add_parser(
         "alpha-smoke",

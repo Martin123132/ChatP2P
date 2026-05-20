@@ -5,17 +5,20 @@ from chatp2p.alpha import (
     ALPHA_DRILL_REPORT_SCHEMA,
     ALPHA_INVITE_SCHEMA,
     ALPHA_PREFLIGHT_REPORT_SCHEMA,
+    ALPHA_ROUTE_REPORT_SCHEMA,
     ALPHA_SMOKE_REPORT_SCHEMA,
     AlphaDrillConfig,
     AlphaInvite,
     AlphaJoinConfig,
     AlphaPreflightConfig,
+    AlphaRouteConfig,
     AlphaSmokeConfig,
     bootstrap_alpha,
     load_alpha_invite,
     run_alpha_drill,
     run_alpha_join,
     run_alpha_preflight,
+    run_alpha_route,
     run_alpha_smoke,
     write_alpha_invite,
     _invite_url_check,
@@ -292,6 +295,59 @@ def test_invite_url_check_warns_for_private_network_addresses():
     assert shared_network_check["details"]["reachability"] == "shared_network"
     assert public_check["status"] == "pass"
     assert public_check["details"]["reachability"] == "dns_name"
+
+
+def test_alpha_route_reports_remote_readiness_without_exposing_token(tmp_path):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    invite_path = tmp_path / "alpha-invite.json"
+    report_path = tmp_path / "alpha-route-report.json"
+    write_alpha_invite(invite_path, AlphaInvite.create(coordinator=coordinator_url, admission_token=token))
+
+    try:
+        report = run_alpha_route(
+            AlphaRouteConfig(
+                invite_path=invite_path,
+                report_path=report_path,
+                home=tmp_path / ".mesh",
+                detect_tools=False,
+            )
+        )
+    finally:
+        _stop_server(server, thread)
+
+    assert report["schema"] == ALPHA_ROUTE_REPORT_SCHEMA
+    assert report["status"] == "warn"
+    assert report["ok"] is True
+    assert report["current_route"]["health"]["ok"] is True
+    assert report["current_route"]["outside_ready"] is False
+    assert report["current_route"]["reachability"]["kind"] == "local_only"
+    assert report["tooling"] is None
+    assert report_path.exists()
+    assert token not in json.dumps(report)
+
+
+def test_alpha_route_fails_when_invite_coordinator_is_unreachable(tmp_path):
+    token = "alpha-token-123"
+    invite_path = tmp_path / "alpha-invite.json"
+    write_alpha_invite(
+        invite_path,
+        AlphaInvite.create(coordinator="http://127.0.0.1:1", admission_token=token),
+    )
+
+    report = run_alpha_route(
+        AlphaRouteConfig(
+            invite_path=invite_path,
+            report_path=tmp_path / "alpha-route-report.json",
+            timeout_seconds=0.2,
+            detect_tools=False,
+        )
+    )
+
+    assert report["status"] == "fail"
+    assert report["ok"] is False
+    assert report["errors"] == ["current invite coordinator health is not reachable from this machine"]
+    assert token not in json.dumps(report)
 
 
 def test_alpha_preflight_fails_for_bad_config_wrong_token_and_public_alpha_disabled(tmp_path):
