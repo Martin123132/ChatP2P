@@ -108,6 +108,25 @@ python -m chatp2p.cli operator alpha-smoke --invite D:\ChatP2PData\alpha-invite.
 
 Pass means at least one live worker was observed, at least one smoke-created deterministic job got an accepted signed result, and none of the smoke-created jobs became disputed. `min-verified-jobs` defaults to `0` because a one-worker alpha can produce accepted results while duplicate verification remains pending.
 
+## Remote Partner Proof
+
+When a real partner has joined, copy the `worker_node_id` from their `node join` output or from your coordinator dashboard, then run:
+
+```bash
+python -m chatp2p.cli operator alpha-remote-proof --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_87b5cefe53e67c6c --jobs 4 --timeout-seconds 180 --report D:\ChatP2PData\alpha-remote-proof-report.json
+```
+
+Pass means:
+
+- at least two workers were live
+- the expected partner worker was live
+- the expected partner worker returned at least one accepted result
+- every job created by this proof reached a terminal state
+- every job created by this proof verified
+- no proof-created job disputed or expired
+
+The report schema is `chatp2p.alpha-remote-proof-report.v1`. It includes pre-existing coordinator counts separately from the proof-created jobs, so old dashboard history does not hide whether this run passed.
+
 ## Rollback
 
 Stop the local operator node:

@@ -190,6 +190,14 @@ After at least one contributor joins, prove the alpha can complete signed work:
 chatp2p operator alpha-smoke --invite D:\ChatP2PData\alpha-invite.json --jobs 4 --min-live-workers 1 --min-accepted-results 1 --report D:\ChatP2PData\alpha-smoke-report.json
 ```
 
+For a two-machine partner proof, use the worker ID printed by `node join` and require every proof-created job to verify:
+
+```bash
+chatp2p operator alpha-remote-proof --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_... --jobs 4 --report D:\ChatP2PData\alpha-remote-proof-report.json
+```
+
+Pass means the expected worker was live, it returned at least one accepted result, every job created by the proof reached a terminal state, all proof-created jobs verified, and no proof-created jobs disputed or expired.
+
 When you are waiting for a real contributor, rehearse the same flow with an isolated local simulated worker:
 
 ```bash

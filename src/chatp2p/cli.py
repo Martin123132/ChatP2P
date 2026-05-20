@@ -14,6 +14,7 @@ from .alpha import (
     AlphaDrillConfig,
     AlphaJoinConfig,
     AlphaPreflightConfig,
+    AlphaRemoteProofConfig,
     AlphaRouteConfig,
     AlphaSmokeConfig,
     DEFAULT_ALPHA_NOTES,
@@ -21,6 +22,7 @@ from .alpha import (
     run_alpha_drill,
     run_alpha_join,
     run_alpha_preflight,
+    run_alpha_remote_proof,
     run_alpha_route,
     run_alpha_smoke,
 )
@@ -496,6 +498,28 @@ def alpha_smoke_command(args: argparse.Namespace) -> None:
                 invite_path=Path(args.invite),
                 report_path=Path(args.report),
                 jobs=args.jobs,
+                min_live_workers=args.min_live_workers,
+                min_accepted_results=args.min_accepted_results,
+                min_verified_jobs=args.min_verified_jobs,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval=args.poll_interval,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def alpha_remote_proof_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_alpha_remote_proof(
+            AlphaRemoteProofConfig(
+                invite_path=Path(args.invite),
+                report_path=Path(args.report),
+                jobs=args.jobs,
+                expected_worker_id=args.expected_worker_id,
                 min_live_workers=args.min_live_workers,
                 min_accepted_results=args.min_accepted_results,
                 min_verified_jobs=args.min_verified_jobs,
@@ -1206,6 +1230,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     alpha_smoke_parser.add_argument("--report", required=True, help="Path for smoke JSON report")
     alpha_smoke_parser.set_defaults(func=alpha_smoke_command)
+
+    alpha_remote_proof_parser = operator_subcommands.add_parser(
+        "alpha-remote-proof",
+        help="Prove a named external worker can complete verified signed work",
+    )
+    alpha_remote_proof_parser.add_argument("--invite", required=True, help="Path to alpha invite JSON")
+    alpha_remote_proof_parser.add_argument("--jobs", default=4, type=int, help="Deterministic eval jobs to create")
+    alpha_remote_proof_parser.add_argument(
+        "--expected-worker-id",
+        default=None,
+        help="Worker node ID that must be live and must return at least one accepted result",
+    )
+    alpha_remote_proof_parser.add_argument(
+        "--min-live-workers",
+        default=2,
+        type=int,
+        help="Minimum live workers required for pass",
+    )
+    alpha_remote_proof_parser.add_argument(
+        "--min-accepted-results",
+        default=None,
+        type=int,
+        help="Minimum accepted results on proof-created jobs. Defaults to jobs * 2",
+    )
+    alpha_remote_proof_parser.add_argument(
+        "--min-verified-jobs",
+        default=None,
+        type=int,
+        help="Minimum verified proof-created jobs. Defaults to jobs",
+    )
+    alpha_remote_proof_parser.add_argument(
+        "--timeout-seconds",
+        default=180.0,
+        type=float,
+        help="Maximum time to wait for all proof-created jobs to finish",
+    )
+    alpha_remote_proof_parser.add_argument(
+        "--poll-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between coordinator snapshot polls",
+    )
+    alpha_remote_proof_parser.add_argument("--report", required=True, help="Path for remote proof JSON report")
+    alpha_remote_proof_parser.set_defaults(func=alpha_remote_proof_command)
 
     alpha_drill_parser = operator_subcommands.add_parser(
         "alpha-drill",

@@ -6,12 +6,14 @@ from chatp2p.alpha import (
     ALPHA_DRILL_REPORT_SCHEMA,
     ALPHA_INVITE_SCHEMA,
     ALPHA_PREFLIGHT_REPORT_SCHEMA,
+    ALPHA_REMOTE_PROOF_REPORT_SCHEMA,
     ALPHA_ROUTE_REPORT_SCHEMA,
     ALPHA_SMOKE_REPORT_SCHEMA,
     AlphaDrillConfig,
     AlphaInvite,
     AlphaJoinConfig,
     AlphaPreflightConfig,
+    AlphaRemoteProofConfig,
     AlphaRouteConfig,
     AlphaSmokeConfig,
     bootstrap_alpha,
@@ -19,6 +21,7 @@ from chatp2p.alpha import (
     run_alpha_drill,
     run_alpha_join,
     run_alpha_preflight,
+    run_alpha_remote_proof,
     run_alpha_route,
     run_alpha_smoke,
     write_alpha_invite,
@@ -509,6 +512,68 @@ def test_alpha_smoke_creates_jobs_and_observes_accepted_results(tmp_path):
     assert smoke_report["criteria"]["disputed_jobs"]["actual"] == 0
     assert report_path.exists()
     assert token not in json.dumps(smoke_report)
+
+
+def test_alpha_remote_proof_waits_for_verified_jobs_and_expected_worker(tmp_path):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    operator_home = tmp_path / ".mesh-operator"
+    partner_home = tmp_path / ".mesh-partner"
+    invite_path = tmp_path / "alpha-invite.json"
+    report_path = tmp_path / "alpha-remote-proof-report.json"
+    write_alpha_invite(invite_path, AlphaInvite.create(coordinator=coordinator_url, admission_token=token))
+    _save_benchmark(operator_home)
+    _save_benchmark(partner_home)
+
+    try:
+        operator_join = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=invite_path,
+                home=operator_home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        partner_join = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=invite_path,
+                home=partner_home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        proof_report = run_alpha_remote_proof(
+            AlphaRemoteProofConfig(
+                invite_path=invite_path,
+                jobs=2,
+                expected_worker_id=partner_join["worker_node_id"],
+                min_live_workers=2,
+                timeout_seconds=15.0,
+                poll_interval=0.2,
+                report_path=report_path,
+            )
+        )
+    finally:
+        stop_managed_process(home=operator_home, role="worker")
+        stop_managed_process(home=partner_home, role="worker")
+        _stop_server(server, thread)
+
+    assert operator_join["ok"] is True
+    assert partner_join["ok"] is True
+    assert proof_report["schema"] == ALPHA_REMOTE_PROOF_REPORT_SCHEMA
+    assert proof_report["ok"] is True
+    assert proof_report["criteria"]["live_workers"]["actual"] >= 2
+    assert proof_report["criteria"]["verified_jobs"]["actual"] == 2
+    assert proof_report["criteria"]["all_created_jobs_terminal"]["passed"] is True
+    assert proof_report["criteria"]["expected_worker_results"]["actual"] >= 1
+    assert proof_report["criteria"]["disputed_jobs"]["actual"] == 0
+    assert proof_report["criteria"]["expired_jobs"]["actual"] == 0
+    assert proof_report["expected_worker"]["node_id"] == partner_join["worker_node_id"]
+    assert proof_report["baseline"]["job_count"] == 0
+    assert report_path.exists()
+    assert token not in json.dumps(proof_report)
 
 
 def test_alpha_drill_starts_simulated_worker_and_verifies_jobs(tmp_path):

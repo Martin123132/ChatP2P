@@ -29,9 +29,11 @@ ALPHA_PREFLIGHT_REPORT_SCHEMA = "chatp2p.alpha-preflight-report.v1"
 ALPHA_SMOKE_REPORT_SCHEMA = "chatp2p.alpha-smoke-report.v1"
 ALPHA_DRILL_REPORT_SCHEMA = "chatp2p.alpha-drill-report.v1"
 ALPHA_ROUTE_REPORT_SCHEMA = "chatp2p.alpha-route-report.v1"
+ALPHA_REMOTE_PROOF_REPORT_SCHEMA = "chatp2p.alpha-remote-proof-report.v1"
 DEFAULT_ALPHA_NOTES = "ChatP2P public alpha invite. Keep this file private; it contains the admission token."
 LOCAL_INVITE_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
+TERMINAL_JOB_STATUSES = {"verified", "disputed", "expired"}
 KNOWN_WINDOWS_TOOL_PATHS = {
     "tailscale": (
         Path("C:/Program Files/Tailscale/tailscale.exe"),
@@ -145,6 +147,19 @@ class AlphaSmokeConfig:
     min_accepted_results: int = 1
     min_verified_jobs: int = 0
     timeout_seconds: float = 90.0
+    poll_interval: float = 0.5
+
+
+@dataclass(frozen=True)
+class AlphaRemoteProofConfig:
+    invite_path: Path
+    report_path: Path
+    jobs: int = 4
+    expected_worker_id: str | None = None
+    min_live_workers: int = 2
+    min_accepted_results: int | None = None
+    min_verified_jobs: int | None = None
+    timeout_seconds: float = 180.0
     poll_interval: float = 0.5
 
 
@@ -446,6 +461,107 @@ def run_alpha_smoke(config: AlphaSmokeConfig) -> dict[str, Any]:
         criteria=criteria,
         final_snapshot=final_snapshot,
         errors=errors,
+    )
+    _write_json_report(config.report_path, report)
+    return report
+
+
+def run_alpha_remote_proof(config: AlphaRemoteProofConfig) -> dict[str, Any]:
+    _validate_remote_proof_config(config)
+    invite = load_alpha_invite(config.invite_path)
+    started_at = time.time()
+    client = CoordinatorClient(invite.coordinator, admission_token=invite.admission_token)
+    errors: list[str] = []
+    created_jobs: list[dict[str, Any]] = []
+    initial_snapshot: dict[str, Any] | None = None
+    final_snapshot: dict[str, Any] | None = None
+    criteria: dict[str, Any] | None = None
+    initial_result_ids: set[tuple[str, str, str]] = set()
+
+    try:
+        initial_snapshot = client.snapshot()
+        initial_result_ids = _result_ids(initial_snapshot)
+    except Exception as exc:
+        criteria = _remote_proof_empty_criteria(config)
+        report = _remote_proof_report(
+            config=config,
+            invite=invite,
+            duration_seconds=time.time() - started_at,
+            initial_snapshot=None,
+            final_snapshot=None,
+            created_jobs=[],
+            criteria=criteria,
+            errors=[f"{type(exc).__name__}: {exc}"],
+            initial_result_ids=initial_result_ids,
+        )
+        _write_json_report(config.report_path, report)
+        return report
+
+    try:
+        for index in range(config.jobs):
+            job = client.create_job(
+                job_type="eval.deterministic.v1",
+                payload=_smoke_payload(index),
+                ttl_seconds=300,
+            )
+            created_jobs.append(
+                {
+                    "job_id": job.job_id,
+                    "job_type": job.job_type,
+                    "verification_strategy": job.verification_strategy,
+                }
+            )
+    except Exception as exc:
+        errors.append(f"{type(exc).__name__}: {exc}")
+
+    created_job_ids = {job["job_id"] for job in created_jobs}
+    deadline = started_at + config.timeout_seconds
+    while time.time() <= deadline and created_jobs and not errors:
+        try:
+            final_snapshot = client.snapshot()
+            criteria = _remote_proof_criteria(final_snapshot, created_job_ids, initial_result_ids, config)
+            if all(item["passed"] for item in criteria.values()):
+                break
+            if (
+                criteria["all_created_jobs_terminal"]["passed"]
+                and (
+                    not criteria["verified_jobs"]["passed"]
+                    or not criteria["disputed_jobs"]["passed"]
+                    or not criteria["expired_jobs"]["passed"]
+                )
+            ):
+                break
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+            break
+        time.sleep(config.poll_interval)
+
+    if final_snapshot is None and not errors:
+        try:
+            final_snapshot = client.snapshot()
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    if final_snapshot is not None:
+        criteria = _remote_proof_criteria(final_snapshot, created_job_ids, initial_result_ids, config)
+    elif criteria is None:
+        criteria = _remote_proof_empty_criteria(config)
+
+    if created_jobs and not errors and not all(item["passed"] for item in criteria.values()):
+        errors.append("remote proof criteria were not met before timeout")
+    if len(created_jobs) != config.jobs and not errors:
+        errors.append(f"created {len(created_jobs)} of {config.jobs} requested jobs")
+
+    report = _remote_proof_report(
+        config=config,
+        invite=invite,
+        duration_seconds=time.time() - started_at,
+        initial_snapshot=initial_snapshot,
+        final_snapshot=final_snapshot,
+        created_jobs=created_jobs,
+        criteria=criteria,
+        errors=errors,
+        initial_result_ids=initial_result_ids,
     )
     _write_json_report(config.report_path, report)
     return report
@@ -1451,6 +1567,275 @@ def _smoke_report(
         "criteria": criteria,
         "errors": errors,
         "final_snapshot": final_snapshot,
+    }
+
+
+def _validate_remote_proof_config(config: AlphaRemoteProofConfig) -> None:
+    if config.jobs < 1:
+        raise ValueError("--jobs must be at least 1")
+    if config.min_live_workers < 0:
+        raise ValueError("--min-live-workers cannot be negative")
+    if config.min_accepted_results is not None and config.min_accepted_results < 0:
+        raise ValueError("--min-accepted-results cannot be negative")
+    if config.min_verified_jobs is not None and config.min_verified_jobs < 0:
+        raise ValueError("--min-verified-jobs cannot be negative")
+    if config.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0")
+    if config.poll_interval <= 0:
+        raise ValueError("--poll-interval must be greater than 0")
+    if config.expected_worker_id is not None and not config.expected_worker_id.strip():
+        raise ValueError("--expected-worker-id cannot be blank")
+
+
+def _remote_proof_required_accepted_results(config: AlphaRemoteProofConfig) -> int:
+    if config.min_accepted_results is not None:
+        return config.min_accepted_results
+    return config.jobs * 2
+
+
+def _remote_proof_required_verified_jobs(config: AlphaRemoteProofConfig) -> int:
+    if config.min_verified_jobs is not None:
+        return config.min_verified_jobs
+    return config.jobs
+
+
+def _remote_proof_empty_criteria(config: AlphaRemoteProofConfig) -> dict[str, Any]:
+    expected_worker_required = 1 if config.expected_worker_id else 0
+    return {
+        "created_jobs": {"actual": 0, "required": config.jobs, "passed": False},
+        "live_workers": {"actual": 0, "required": config.min_live_workers, "passed": False},
+        "accepted_results": {
+            "actual": 0,
+            "required": _remote_proof_required_accepted_results(config),
+            "passed": False,
+        },
+        "verified_jobs": {
+            "actual": 0,
+            "required": _remote_proof_required_verified_jobs(config),
+            "passed": False,
+        },
+        "all_created_jobs_terminal": {"actual": 0, "required": config.jobs, "passed": False},
+        "disputed_jobs": {"actual": 0, "required": 0, "passed": True},
+        "expired_jobs": {"actual": 0, "required": 0, "passed": True},
+        "incomplete_jobs": {"actual": config.jobs, "required": 0, "passed": False},
+        "expected_worker_live": {
+            "actual": 0,
+            "required": expected_worker_required,
+            "passed": expected_worker_required == 0,
+        },
+        "expected_worker_results": {
+            "actual": 0,
+            "required": expected_worker_required,
+            "passed": expected_worker_required == 0,
+        },
+    }
+
+
+def _remote_proof_criteria(
+    snapshot: dict[str, Any],
+    created_job_ids: set[str],
+    initial_result_ids: set[tuple[str, str, str]],
+    config: AlphaRemoteProofConfig,
+) -> dict[str, Any]:
+    status = snapshot.get("status", {})
+    created_jobs = _snapshot_jobs_for_ids(snapshot, created_job_ids)
+    created_results = _snapshot_results_for_ids(snapshot, created_job_ids, initial_result_ids)
+    status_counts = _job_status_counts(created_jobs)
+    live_workers = int(status.get("live_nodes") or 0)
+    accepted_results = len(created_results)
+    verified_jobs = status_counts["verified"]
+    disputed_jobs = status_counts["disputed"]
+    expired_jobs = status_counts["expired"]
+    terminal_jobs = sum(1 for job in created_jobs if job.get("status") in TERMINAL_JOB_STATUSES)
+    incomplete_jobs = sum(1 for job in created_jobs if job.get("status") not in TERMINAL_JOB_STATUSES)
+    expected_worker_required = 1 if config.expected_worker_id else 0
+    expected_worker = _snapshot_node(snapshot, config.expected_worker_id) if config.expected_worker_id else None
+    expected_worker_live = int(
+        bool(expected_worker is not None and expected_worker.get("liveness_status") == "live")
+    )
+    expected_worker_results = (
+        sum(1 for result in created_results if result.get("node_id") == config.expected_worker_id)
+        if config.expected_worker_id
+        else 0
+    )
+    required_verified_jobs = _remote_proof_required_verified_jobs(config)
+    required_accepted_results = _remote_proof_required_accepted_results(config)
+
+    return {
+        "created_jobs": {
+            "actual": len(created_job_ids),
+            "required": config.jobs,
+            "passed": len(created_job_ids) == config.jobs,
+        },
+        "live_workers": {
+            "actual": live_workers,
+            "required": config.min_live_workers,
+            "passed": live_workers >= config.min_live_workers,
+        },
+        "accepted_results": {
+            "actual": accepted_results,
+            "required": required_accepted_results,
+            "passed": accepted_results >= required_accepted_results,
+        },
+        "verified_jobs": {
+            "actual": verified_jobs,
+            "required": required_verified_jobs,
+            "passed": verified_jobs >= required_verified_jobs,
+        },
+        "all_created_jobs_terminal": {
+            "actual": terminal_jobs,
+            "required": len(created_job_ids),
+            "passed": bool(created_job_ids) and terminal_jobs == len(created_job_ids),
+        },
+        "disputed_jobs": {
+            "actual": disputed_jobs,
+            "required": 0,
+            "passed": disputed_jobs == 0,
+        },
+        "expired_jobs": {
+            "actual": expired_jobs,
+            "required": 0,
+            "passed": expired_jobs == 0,
+        },
+        "incomplete_jobs": {
+            "actual": incomplete_jobs,
+            "required": 0,
+            "passed": incomplete_jobs == 0,
+        },
+        "expected_worker_live": {
+            "actual": expected_worker_live,
+            "required": expected_worker_required,
+            "passed": expected_worker_required == 0 or expected_worker_live >= expected_worker_required,
+        },
+        "expected_worker_results": {
+            "actual": expected_worker_results,
+            "required": expected_worker_required,
+            "passed": expected_worker_required == 0 or expected_worker_results >= expected_worker_required,
+        },
+    }
+
+
+def _remote_proof_report(
+    *,
+    config: AlphaRemoteProofConfig,
+    invite: AlphaInvite,
+    duration_seconds: float,
+    initial_snapshot: dict[str, Any] | None,
+    final_snapshot: dict[str, Any] | None,
+    created_jobs: list[dict[str, Any]],
+    criteria: dict[str, Any],
+    errors: list[str],
+    initial_result_ids: set[tuple[str, str, str]],
+) -> dict[str, Any]:
+    ok = not errors and all(item["passed"] for item in criteria.values())
+    created_job_ids = {job["job_id"] for job in created_jobs}
+    created_job_statuses = (
+        _snapshot_jobs_for_ids(final_snapshot, created_job_ids) if final_snapshot is not None else []
+    )
+    created_results = (
+        _snapshot_results_for_ids(final_snapshot, created_job_ids, initial_result_ids)
+        if final_snapshot is not None
+        else []
+    )
+    expected_worker = (
+        _remote_proof_expected_worker_summary(final_snapshot, config.expected_worker_id, created_results)
+        if config.expected_worker_id
+        else None
+    )
+    return {
+        "schema": ALPHA_REMOTE_PROOF_REPORT_SCHEMA,
+        "ok": ok,
+        "status": "pass" if ok else "fail",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(duration_seconds, 3),
+        "invite": invite.public_summary(),
+        "parameters": {
+            "jobs": config.jobs,
+            "expected_worker_id": config.expected_worker_id,
+            "min_live_workers": config.min_live_workers,
+            "min_accepted_results": _remote_proof_required_accepted_results(config),
+            "min_verified_jobs": _remote_proof_required_verified_jobs(config),
+            "timeout_seconds": config.timeout_seconds,
+            "poll_interval": config.poll_interval,
+        },
+        "baseline": _snapshot_baseline(initial_snapshot),
+        "final_summary": _snapshot_baseline(final_snapshot),
+        "created_jobs": created_jobs,
+        "created_job_status_counts": _job_status_counts(created_job_statuses),
+        "created_job_statuses": created_job_statuses,
+        "created_results": created_results,
+        "expected_worker": expected_worker,
+        "criteria": criteria,
+        "errors": errors,
+    }
+
+
+def _snapshot_baseline(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    if snapshot is None:
+        return None
+    status = snapshot.get("status", {})
+    return {
+        "status": status,
+        "job_count": len(snapshot.get("jobs", [])),
+        "result_count": len(snapshot.get("results", [])),
+        "node_count": len(snapshot.get("nodes", [])),
+    }
+
+
+def _snapshot_jobs_for_ids(snapshot: dict[str, Any], job_ids: set[str]) -> list[dict[str, Any]]:
+    return [job for job in snapshot.get("jobs", []) if job.get("job_id") in job_ids]
+
+
+def _snapshot_results_for_ids(
+    snapshot: dict[str, Any],
+    job_ids: set[str],
+    initial_result_ids: set[tuple[str, str, str]],
+) -> list[dict[str, Any]]:
+    return [
+        result for result in snapshot.get("results", [])
+        if result.get("job_id") in job_ids
+        and (
+            str(result.get("job_id")),
+            str(result.get("node_id")),
+            str(result.get("output_hash")),
+        )
+        not in initial_result_ids
+    ]
+
+
+def _snapshot_node(snapshot: dict[str, Any], node_id: str | None) -> dict[str, Any] | None:
+    if node_id is None:
+        return None
+    for node in snapshot.get("nodes", []):
+        if node.get("node_id") == node_id:
+            return node
+    return None
+
+
+def _job_status_counts(jobs: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"queued": 0, "leased": 0, "pending": 0, "verified": 0, "disputed": 0, "expired": 0}
+    for job in jobs:
+        status = str(job.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _remote_proof_expected_worker_summary(
+    snapshot: dict[str, Any] | None,
+    expected_worker_id: str | None,
+    created_results: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if expected_worker_id is None:
+        return None
+    node = _snapshot_node(snapshot or {}, expected_worker_id)
+    result_count = sum(1 for result in created_results if result.get("node_id") == expected_worker_id)
+    return {
+        "node_id": expected_worker_id,
+        "present": node is not None,
+        "live": bool(node is not None and node.get("liveness_status") == "live"),
+        "liveness_status": node.get("liveness_status") if node else None,
+        "credits": node.get("credits") if node else None,
+        "result_count": result_count,
     }
 
 
