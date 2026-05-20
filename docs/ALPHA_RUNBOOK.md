@@ -37,13 +37,25 @@ Run a route report before sending the invite:
 python -m chatp2p.cli operator alpha-route --home D:\ChatP2PData\.mesh --report D:\ChatP2PData\alpha-route-report.json
 ```
 
-The route report classifies the current invite URL, checks coordinator health, inspects managed process state, and detects local route tools such as Tailscale or cloudflared when they are on `PATH`. It does not open firewall ports, configure routers, log in to VPNs, or create tunnels.
+The route report classifies the current invite URL, checks coordinator health, inspects managed process state, and detects local route tools such as Tailscale or cloudflared. On Windows it also checks the standard Tailscale install path, because a fresh install may not appear on `PATH` until a new terminal is opened. It does not open firewall ports, configure routers, log in to VPNs, or create tunnels.
 
 Safe first options:
 
 - Private VPN/tailnet: put both machines on the same private network, then regenerate the invite with the VPN/tailnet address.
 - HTTPS tunnel: map a public hostname to the local coordinator and regenerate the invite with that hostname.
 - Router port forward: only use this deliberately; keep public alpha token-gated and avoid exposing unauthenticated coordinators.
+
+Tailscale first-test flow:
+
+```bash
+tailscale ip -4
+python -m chatp2p.cli operator alpha-route --home D:\ChatP2PData\.mesh --candidate-url http://TAILSCALE_IP:8765 --report D:\ChatP2PData\alpha-route-report.json
+python -m chatp2p.cli operator bootstrap-alpha --config D:\ChatP2PData\operator-config.json --invite D:\ChatP2PData\alpha-invite.json --coordinator-url http://TAILSCALE_IP:8765 --force
+python -m chatp2p.cli node up --home D:\ChatP2PData\.mesh --role both --host 0.0.0.0 --port 8765 --coordinator http://TAILSCALE_IP:8765 --operator-config D:\ChatP2PData\operator-config.json --worker-interval 0.5 --force
+python -m chatp2p.cli operator alpha-route --home D:\ChatP2PData\.mesh --report D:\ChatP2PData\alpha-route-report.json
+```
+
+`alpha-route` should report `current_route.reachability.kind == "tailnet_self"` and `status == "pass"` once the invite points at this machine's Tailscale IP and the coordinator is healthy. `alpha-preflight` may still warn that `100.64.0.0/10` is shared address space; that warning is expected for generic invite validation and means the partner must be on the same tailnet.
 
 After changing the reachable URL, regenerate the invite without changing the runtime home:
 

@@ -182,6 +182,8 @@ Check the current invite route before sending it:
 chatp2p operator alpha-route --home D:\ChatP2PData\.mesh --report D:\ChatP2PData\alpha-route-report.json
 ```
 
+For the first remote partner test, put both machines on the same Tailscale tailnet, regenerate the invite with this machine's Tailscale IP, restart the managed node, then rerun `alpha-route`. A ready tailnet invite reports `current_route.reachability.kind == "tailnet_self"` and `status == "pass"`.
+
 After at least one contributor joins, prove the alpha can complete signed work:
 
 ```bash

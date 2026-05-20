@@ -1,6 +1,7 @@
 import json
 import threading
 
+import chatp2p.alpha as alpha_module
 from chatp2p.alpha import (
     ALPHA_DRILL_REPORT_SCHEMA,
     ALPHA_INVITE_SCHEMA,
@@ -347,6 +348,47 @@ def test_alpha_route_fails_when_invite_coordinator_is_unreachable(tmp_path):
     assert report["status"] == "fail"
     assert report["ok"] is False
     assert report["errors"] == ["current invite coordinator health is not reachable from this machine"]
+    assert token not in json.dumps(report)
+
+
+def test_alpha_route_marks_this_machine_tailscale_ip_as_ready(tmp_path, monkeypatch):
+    token = "alpha-token-123"
+    invite_path = tmp_path / "alpha-invite.json"
+    write_alpha_invite(
+        invite_path,
+        AlphaInvite.create(coordinator="http://100.64.10.20:8765", admission_token=token),
+    )
+
+    monkeypatch.setattr(
+        alpha_module,
+        "_remote_route_tooling",
+        lambda: {
+            "tailscale": {
+                "installed": True,
+                "path": "tailscale",
+                "source": "path",
+                "ip4": {"ok": True, "stdout": "100.64.10.20"},
+            },
+            "cloudflared": {"installed": False, "path": None, "source": None},
+        },
+    )
+    monkeypatch.setattr(
+        alpha_module,
+        "_coordinator_health",
+        lambda invite, *, timeout_seconds: {"ok": True, "url": invite.coordinator, "payload": {}},
+    )
+
+    report = run_alpha_route(
+        AlphaRouteConfig(
+            invite_path=invite_path,
+            report_path=tmp_path / "alpha-route-report.json",
+        )
+    )
+
+    assert report["status"] == "pass"
+    assert report["ok"] is True
+    assert report["current_route"]["outside_ready"] is True
+    assert report["current_route"]["reachability"]["kind"] == "tailnet_self"
     assert token not in json.dumps(report)
 
 

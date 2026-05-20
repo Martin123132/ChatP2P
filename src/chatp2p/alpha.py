@@ -32,6 +32,12 @@ ALPHA_ROUTE_REPORT_SCHEMA = "chatp2p.alpha-route-report.v1"
 DEFAULT_ALPHA_NOTES = "ChatP2P public alpha invite. Keep this file private; it contains the admission token."
 LOCAL_INVITE_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
+KNOWN_WINDOWS_TOOL_PATHS = {
+    "tailscale": (
+        Path("C:/Program Files/Tailscale/tailscale.exe"),
+        Path("C:/Program Files (x86)/Tailscale/tailscale.exe"),
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -625,16 +631,19 @@ def run_alpha_route(config: AlphaRouteConfig) -> dict[str, Any]:
         raise ValueError("--timeout-seconds must be greater than 0")
 
     invite = load_alpha_invite(config.invite_path)
+    tools = _remote_route_tooling() if config.detect_tools else None
     current_route = _route_probe(
         invite=invite,
         coordinator_url=invite.coordinator,
         timeout_seconds=config.timeout_seconds,
+        tools=tools,
     )
     candidate_route = (
         _route_probe(
             invite=invite,
             coordinator_url=config.candidate_url,
             timeout_seconds=config.timeout_seconds,
+            tools=tools,
         )
         if config.candidate_url
         else None
@@ -644,7 +653,6 @@ def run_alpha_route(config: AlphaRouteConfig) -> dict[str, Any]:
         if config.home is not None
         else None
     )
-    tools = _remote_route_tooling() if config.detect_tools else None
     recommendations = _route_recommendations(
         current_route=current_route,
         candidate_route=candidate_route,
@@ -935,10 +943,15 @@ def _route_probe(
     invite: AlphaInvite,
     coordinator_url: str,
     timeout_seconds: float,
+    tools: dict[str, Any] | None,
 ) -> dict[str, Any]:
     parsed = urlparse(coordinator_url)
     hostname = parsed.hostname or ""
-    reachability = _invite_hostname_reachability(hostname)
+    reachability = _tailnet_route_reachability(
+        hostname,
+        _invite_hostname_reachability(hostname),
+        tools,
+    )
     probe_invite = AlphaInvite(
         coordinator=coordinator_url.strip(),
         admission_token=invite.admission_token,
@@ -961,7 +974,7 @@ def _route_probe(
 def _remote_route_tooling() -> dict[str, Any]:
     tailscale = _tool_status("tailscale")
     if tailscale["installed"]:
-        tailscale["ip4"] = _command_stdout(["tailscale", "ip", "-4"], timeout_seconds=3.0)
+        tailscale["ip4"] = _command_stdout([tailscale["path"], "ip", "-4"], timeout_seconds=3.0)
     cloudflared = _tool_status("cloudflared")
     return {
         "tailscale": tailscale,
@@ -971,10 +984,43 @@ def _remote_route_tooling() -> dict[str, Any]:
 
 def _tool_status(command: str) -> dict[str, Any]:
     path = shutil.which(command)
+    source = "path" if path else None
+    if path is None:
+        for candidate in KNOWN_WINDOWS_TOOL_PATHS.get(command, ()):
+            if candidate.exists():
+                path = str(candidate)
+                source = "known_windows_path"
+                break
     return {
         "installed": path is not None,
         "path": path,
+        "source": source,
     }
+
+
+def _tailnet_route_reachability(
+    hostname: str,
+    reachability: dict[str, str],
+    tools: dict[str, Any] | None,
+) -> dict[str, str]:
+    if reachability["kind"] != "shared_network":
+        return reachability
+    if hostname not in _tailscale_ipv4_addresses(tools):
+        return reachability
+    return {
+        "status": "pass",
+        "kind": "tailnet_self",
+        "message": "Invite coordinator URL uses this machine's Tailscale IP; contributors in the same tailnet should be able to reach it.",
+    }
+
+
+def _tailscale_ipv4_addresses(tools: dict[str, Any] | None) -> set[str]:
+    tailscale = tools.get("tailscale", {}) if tools else {}
+    ip4 = tailscale.get("ip4", {}) if isinstance(tailscale, dict) else {}
+    stdout = ip4.get("stdout") if isinstance(ip4, dict) and ip4.get("ok") else None
+    if not isinstance(stdout, str):
+        return set()
+    return {line.strip() for line in stdout.splitlines() if line.strip()}
 
 
 def _command_stdout(argv: list[str], *, timeout_seconds: float) -> dict[str, Any]:
