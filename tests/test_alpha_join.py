@@ -9,6 +9,7 @@ from chatp2p.alpha import (
     ALPHA_REMOTE_PROOF_REPORT_SCHEMA,
     ALPHA_ROUTE_REPORT_SCHEMA,
     ALPHA_SMOKE_REPORT_SCHEMA,
+    ALPHA_STATUS_REPORT_SCHEMA,
     AlphaDrillConfig,
     AlphaInvite,
     AlphaJoinConfig,
@@ -16,6 +17,9 @@ from chatp2p.alpha import (
     AlphaRemoteProofConfig,
     AlphaRouteConfig,
     AlphaSmokeConfig,
+    AlphaStatusConfig,
+    NODE_WATCHDOG_REPORT_SCHEMA,
+    NodeWatchdogConfig,
     bootstrap_alpha,
     load_alpha_invite,
     run_alpha_drill,
@@ -24,6 +28,8 @@ from chatp2p.alpha import (
     run_alpha_remote_proof,
     run_alpha_route,
     run_alpha_smoke,
+    run_alpha_status,
+    run_node_watchdog,
     write_alpha_invite,
     _invite_url_check,
 )
@@ -574,6 +580,87 @@ def test_alpha_remote_proof_waits_for_verified_jobs_and_expected_worker(tmp_path
     assert proof_report["baseline"]["job_count"] == 0
     assert report_path.exists()
     assert token not in json.dumps(proof_report)
+
+
+def test_alpha_status_reports_expected_worker_without_exposing_token(tmp_path):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    home = tmp_path / ".mesh"
+    invite_path = tmp_path / "alpha-invite.json"
+    report_path = tmp_path / "alpha-status-report.json"
+    write_alpha_invite(invite_path, AlphaInvite.create(coordinator=coordinator_url, admission_token=token))
+    _save_benchmark(home)
+
+    try:
+        join_report = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=invite_path,
+                home=home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        status_report = run_alpha_status(
+            AlphaStatusConfig(
+                home=home,
+                invite_path=invite_path,
+                expected_worker_id=join_report["worker_node_id"],
+                min_live_workers=1,
+                timeout_seconds=5.0,
+                report_path=report_path,
+            )
+        )
+    finally:
+        stop_managed_process(home=home, role="worker")
+        _stop_server(server, thread)
+
+    assert join_report["ok"] is True
+    assert status_report["schema"] == ALPHA_STATUS_REPORT_SCHEMA
+    assert status_report["ok"] is True
+    checks = {check["id"]: check["status"] for check in status_report["checks"]}
+    assert checks["coordinator_health"] == "pass"
+    assert checks["expected_worker_live"] == "pass"
+    assert status_report["expected_worker"]["node_id"] == join_report["worker_node_id"]
+    assert report_path.exists()
+    assert token not in json.dumps(status_report)
+
+
+def test_node_watchdog_starts_missing_worker_from_invite(tmp_path):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    home = tmp_path / ".mesh"
+    invite_path = tmp_path / "alpha-invite.json"
+    report_path = tmp_path / "node-watchdog-report.json"
+    write_alpha_invite(invite_path, AlphaInvite.create(coordinator=coordinator_url, admission_token=token))
+    _save_benchmark(home)
+
+    try:
+        report = run_node_watchdog(
+            NodeWatchdogConfig(
+                home=home,
+                invite_path=invite_path,
+                report_path=report_path,
+                role="worker",
+                checks=1,
+                interval_seconds=0.2,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                cpu_duration_seconds=0.0,
+            )
+        )
+        worker_status = managed_process_status(home=home, role="worker")
+    finally:
+        stop_managed_process(home=home, role="worker")
+        _stop_server(server, thread)
+
+    assert report["schema"] == NODE_WATCHDOG_REPORT_SCHEMA
+    assert report["ok"] is True
+    assert report["iterations"][0]["actions"][0]["role"] == "worker"
+    assert report["iterations"][0]["actions"][0]["join"]["ok"] is True
+    assert worker_status["alive"] is True
+    assert report_path.exists()
+    assert token not in json.dumps(report)
 
 
 def test_alpha_drill_starts_simulated_worker_and_verifies_jobs(tmp_path):

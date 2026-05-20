@@ -78,8 +78,17 @@ def test_node_managed_commands_parse(tmp_path):
         ]
     )
     status_args = parser.parse_args(["node", "status", "--home", str(tmp_path / ".mesh")])
+    watchdog_args = parser.parse_args(["node", "watchdog", "--home", str(tmp_path / ".mesh")])
     down_args = parser.parse_args(["node", "down", "--home", str(tmp_path / ".mesh")])
 
     assert up_args.func.__name__ == "run_node_up_command"
     assert status_args.func.__name__ == "run_node_status_command"
+    assert watchdog_args.func.__name__ == "run_node_watchdog_command"
     assert down_args.func.__name__ == "run_node_down_command"
+
+
+def test_operator_alpha_status_command_parses(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(["operator", "alpha-status", "--home", str(tmp_path / ".mesh")])
+
+    assert args.func.__name__ == "alpha_status_command"

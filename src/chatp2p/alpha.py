@@ -30,6 +30,8 @@ ALPHA_SMOKE_REPORT_SCHEMA = "chatp2p.alpha-smoke-report.v1"
 ALPHA_DRILL_REPORT_SCHEMA = "chatp2p.alpha-drill-report.v1"
 ALPHA_ROUTE_REPORT_SCHEMA = "chatp2p.alpha-route-report.v1"
 ALPHA_REMOTE_PROOF_REPORT_SCHEMA = "chatp2p.alpha-remote-proof-report.v1"
+ALPHA_STATUS_REPORT_SCHEMA = "chatp2p.alpha-status-report.v1"
+NODE_WATCHDOG_REPORT_SCHEMA = "chatp2p.node-watchdog-report.v1"
 DEFAULT_ALPHA_NOTES = "ChatP2P public alpha invite. Keep this file private; it contains the admission token."
 LOCAL_INVITE_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
@@ -161,6 +163,36 @@ class AlphaRemoteProofConfig:
     min_verified_jobs: int | None = None
     timeout_seconds: float = 180.0
     poll_interval: float = 0.5
+
+
+@dataclass(frozen=True)
+class AlphaStatusConfig:
+    home: Path
+    invite_path: Path
+    report_path: Path | None = None
+    expected_worker_id: str | None = None
+    min_live_workers: int = 1
+    timeout_seconds: float = 5.0
+
+
+@dataclass(frozen=True)
+class NodeWatchdogConfig:
+    home: Path
+    invite_path: Path
+    report_path: Path | None = None
+    role: str = "worker"
+    restart: bool = True
+    checks: int = 1
+    interval_seconds: float = 30.0
+    operator_config_path: Path | None = None
+    coordinator_host: str = "0.0.0.0"
+    coordinator_port: int | None = None
+    lease_timeout_seconds: float = 30.0
+    node_stale_seconds: float = 60.0
+    worker_interval: float = 0.5
+    startup_timeout_seconds: float = 15.0
+    cpu_duration_seconds: float = 0.25
+    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
 
 
 @dataclass(frozen=True)
@@ -806,6 +838,82 @@ def run_alpha_route(config: AlphaRouteConfig) -> dict[str, Any]:
     return report
 
 
+def run_alpha_status(config: AlphaStatusConfig) -> dict[str, Any]:
+    _validate_alpha_status_config(config)
+    invite = load_alpha_invite(config.invite_path)
+    health = _coordinator_health(invite, timeout_seconds=config.timeout_seconds)
+    snapshot = _snapshot_for_status(invite, timeout_seconds=config.timeout_seconds) if health.get("ok") else None
+    processes = _managed_processes_for_report(config.home)
+    checks = _alpha_status_checks(
+        health=health,
+        snapshot=snapshot,
+        processes=processes,
+        config=config,
+    )
+    report = _alpha_report(
+        schema=ALPHA_STATUS_REPORT_SCHEMA,
+        config={
+            "home": str(config.home.expanduser().resolve()),
+            "invite_path": str(config.invite_path),
+            "report_path": str(config.report_path) if config.report_path else None,
+            "expected_worker_id": config.expected_worker_id,
+            "min_live_workers": config.min_live_workers,
+            "timeout_seconds": config.timeout_seconds,
+        },
+        checks=checks,
+        details={
+            "invite": invite.public_summary(),
+            "coordinator_health": health,
+            "managed_processes": processes,
+            "snapshot_summary": _snapshot_baseline(snapshot),
+            "expected_worker": _status_expected_worker_summary(snapshot, config.expected_worker_id),
+        },
+    )
+    if config.report_path is not None:
+        _write_json_report(config.report_path, report)
+    return report
+
+
+def run_node_watchdog(config: NodeWatchdogConfig) -> dict[str, Any]:
+    _validate_node_watchdog_config(config)
+    invite = load_alpha_invite(config.invite_path)
+    home = config.home.expanduser().resolve()
+    iterations: list[dict[str, Any]] = []
+    errors: list[str] = []
+    index = 0
+
+    while config.checks == 0 or index < config.checks:
+        iteration = _run_watchdog_iteration(
+            config=config,
+            invite=invite,
+            home=home,
+            index=index + 1,
+        )
+        iterations.append(iteration)
+        errors.extend(iteration.get("errors", []))
+        index += 1
+        report = _node_watchdog_report(
+            config=config,
+            invite=invite,
+            home=home,
+            iterations=iterations,
+            errors=errors,
+        )
+        if config.report_path is not None:
+            _write_json_report(config.report_path, report)
+        if config.checks != 0 and index >= config.checks:
+            return report
+        time.sleep(config.interval_seconds)
+
+    return _node_watchdog_report(
+        config=config,
+        invite=invite,
+        home=home,
+        iterations=iterations,
+        errors=errors,
+    )
+
+
 def run_alpha_join(config: AlphaJoinConfig) -> dict[str, Any]:
     if config.worker_interval <= 0:
         raise ValueError("--worker-interval must be greater than 0")
@@ -1289,6 +1397,347 @@ def _managed_coordinator_check(managed_processes: list[dict[str, Any]]) -> dict[
         "fail",
         "Managed coordinator state exists but the process is not alive.",
         details={"coordinator": coordinator_status},
+    )
+
+
+def _validate_alpha_status_config(config: AlphaStatusConfig) -> None:
+    if config.min_live_workers < 0:
+        raise ValueError("--min-live-workers cannot be negative")
+    if config.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0")
+    if config.expected_worker_id is not None and not config.expected_worker_id.strip():
+        raise ValueError("--expected-worker-id cannot be blank")
+
+
+def _snapshot_for_status(invite: AlphaInvite, *, timeout_seconds: float) -> dict[str, Any] | None:
+    request = Request(
+        f"{invite.coordinator.rstrip('/')}/api/snapshot",
+        method="GET",
+        headers={"X-ChatP2P-Admission-Token": invite.admission_token},
+    )
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read()
+        return json.loads(raw.decode("utf-8")) if raw else {}
+    except Exception:
+        return None
+
+
+def _alpha_status_checks(
+    *,
+    health: dict[str, Any],
+    snapshot: dict[str, Any] | None,
+    processes: list[dict[str, Any]],
+    config: AlphaStatusConfig,
+) -> list[dict[str, Any]]:
+    checks = [_coordinator_health_check(health), _managed_coordinator_check(processes)]
+    checks.append(_managed_worker_check(processes))
+
+    status = snapshot.get("status", {}) if snapshot else {}
+    live_workers = int(status.get("live_nodes") or 0)
+    disputed_jobs = int(status.get("disputed_jobs") or 0)
+    queued_jobs = int(status.get("queued_jobs") or 0)
+    pending_jobs = int(status.get("pending_jobs") or 0)
+    leased_jobs = int(status.get("leased_jobs") or 0)
+    backlog = queued_jobs + pending_jobs + leased_jobs
+    checks.append(
+        _alpha_check(
+            "live_workers",
+            "pass" if live_workers >= config.min_live_workers else "fail",
+            f"Coordinator sees {live_workers} live worker(s).",
+            details={"actual": live_workers, "required": config.min_live_workers},
+        )
+    )
+    checks.append(
+        _alpha_check(
+            "disputed_jobs",
+            "pass" if disputed_jobs == 0 else "fail",
+            "No disputed jobs are present." if disputed_jobs == 0 else f"{disputed_jobs} disputed job(s) present.",
+            details={"disputed_jobs": disputed_jobs},
+        )
+    )
+    checks.append(
+        _alpha_check(
+            "work_backlog",
+            "pass" if backlog == 0 else "warn",
+            "No queued, pending, or leased jobs remain."
+            if backlog == 0
+            else "Some jobs are still queued, pending verification, or leased.",
+            details={"queued_jobs": queued_jobs, "pending_jobs": pending_jobs, "leased_jobs": leased_jobs},
+        )
+    )
+    if config.expected_worker_id:
+        node = _snapshot_node(snapshot or {}, config.expected_worker_id)
+        live = bool(node is not None and node.get("liveness_status") == "live")
+        checks.append(
+            _alpha_check(
+                "expected_worker_live",
+                "pass" if live else "fail",
+                "Expected worker is live." if live else "Expected worker is not live.",
+                details=_status_expected_worker_summary(snapshot, config.expected_worker_id),
+            )
+        )
+    return checks
+
+
+def _managed_worker_check(managed_processes: list[dict[str, Any]]) -> dict[str, Any]:
+    worker_status = next(
+        (process for process in managed_processes if process.get("role") == "worker"),
+        None,
+    )
+    if not worker_status or not worker_status.get("managed"):
+        return _alpha_check(
+            "managed_worker",
+            "warn",
+            "Worker is not managed by chatp2p node up or node join for this home.",
+            details={"worker": worker_status},
+        )
+    if worker_status.get("alive"):
+        return _alpha_check(
+            "managed_worker",
+            "pass",
+            "Managed worker process is alive.",
+            details={"worker": worker_status},
+        )
+    return _alpha_check(
+        "managed_worker",
+        "fail",
+        "Managed worker state exists but the process is not alive.",
+        details={"worker": worker_status},
+    )
+
+
+def _status_expected_worker_summary(
+    snapshot: dict[str, Any] | None,
+    expected_worker_id: str | None,
+) -> dict[str, Any] | None:
+    if expected_worker_id is None:
+        return None
+    node = _snapshot_node(snapshot or {}, expected_worker_id)
+    return {
+        "node_id": expected_worker_id,
+        "present": node is not None,
+        "live": bool(node is not None and node.get("liveness_status") == "live"),
+        "liveness_status": node.get("liveness_status") if node else None,
+        "credits": node.get("credits") if node else None,
+        "last_seen_seconds_ago": node.get("last_seen_seconds_ago") if node else None,
+    }
+
+
+def _validate_node_watchdog_config(config: NodeWatchdogConfig) -> None:
+    if config.role not in {"both", "coordinator", "worker"}:
+        raise ValueError("--role must be both, coordinator, or worker")
+    if config.checks < 0:
+        raise ValueError("--checks cannot be negative")
+    if config.interval_seconds <= 0:
+        raise ValueError("--interval-seconds must be greater than 0")
+    if config.coordinator_port is not None and not 1 <= config.coordinator_port <= 65535:
+        raise ValueError("--coordinator-port must be between 1 and 65535")
+    if config.lease_timeout_seconds <= 0:
+        raise ValueError("--lease-timeout-seconds must be greater than 0")
+    if config.node_stale_seconds <= 0:
+        raise ValueError("--node-stale-seconds must be greater than 0")
+    if config.worker_interval <= 0:
+        raise ValueError("--worker-interval must be greater than 0")
+    if config.startup_timeout_seconds <= 0:
+        raise ValueError("--startup-timeout-seconds must be greater than 0")
+    if config.cpu_duration_seconds < 0:
+        raise ValueError("--cpu-duration-seconds cannot be negative")
+
+
+def _run_watchdog_iteration(
+    *,
+    config: NodeWatchdogConfig,
+    invite: AlphaInvite,
+    home: Path,
+    index: int,
+) -> dict[str, Any]:
+    started_at = time.time()
+    roles = _watchdog_roles(config.role)
+    before_processes = _managed_processes_for_report(home)
+    before_health = _coordinator_health(invite, timeout_seconds=min(config.startup_timeout_seconds, 5.0))
+    before_snapshot = _snapshot_for_status(invite, timeout_seconds=5.0) if before_health.get("ok") else None
+    actions: list[dict[str, Any]] = []
+    errors: list[str] = []
+    health = before_health
+
+    if "coordinator" in roles and _watchdog_coordinator_needs_restart(before_processes, before_health):
+        if not config.restart:
+            actions.append({"role": "coordinator", "action": "restart_skipped", "reason": "restart disabled"})
+        elif config.operator_config_path is None:
+            errors.append("coordinator needs restart but --operator-config was not provided")
+            actions.append(
+                {"role": "coordinator", "action": "restart_skipped", "reason": "missing operator config"}
+            )
+        else:
+            start = _start_watchdog_coordinator(config=config, home=home, invite=invite)
+            health = _wait_for_invite_health(
+                invite=invite,
+                timeout_seconds=config.startup_timeout_seconds,
+                poll_interval=0.2,
+            )
+            actions.append({"role": "coordinator", "action": "restart", "start": start, "health": health})
+            if not health.get("ok"):
+                errors.append("coordinator restart did not become healthy before timeout")
+
+    if "worker" in roles:
+        if not health.get("ok"):
+            actions.append({"role": "worker", "action": "restart_skipped", "reason": "coordinator unhealthy"})
+        elif _watchdog_worker_needs_restart(home=home, processes=before_processes, snapshot=before_snapshot):
+            if not config.restart:
+                actions.append({"role": "worker", "action": "restart_skipped", "reason": "restart disabled"})
+            else:
+                join = run_alpha_join(
+                    AlphaJoinConfig(
+                        invite_path=config.invite_path,
+                        home=home,
+                        ollama_base_url=config.ollama_base_url,
+                        worker_interval=config.worker_interval,
+                        startup_timeout_seconds=config.startup_timeout_seconds,
+                        cpu_duration_seconds=config.cpu_duration_seconds,
+                        force=True,
+                    )
+                )
+                actions.append({"role": "worker", "action": "restart", "join": join})
+                if not join.get("ok"):
+                    errors.append("worker restart did not register live before timeout")
+
+    after_processes = _managed_processes_for_report(home)
+    after_health = _coordinator_health(invite, timeout_seconds=min(config.startup_timeout_seconds, 5.0))
+    after_snapshot = _snapshot_for_status(invite, timeout_seconds=5.0) if after_health.get("ok") else None
+    return {
+        "index": index,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(time.time() - started_at, 3),
+        "ok": not errors,
+        "before": {
+            "health": before_health,
+            "processes": before_processes,
+            "snapshot_summary": _snapshot_baseline(before_snapshot),
+        },
+        "actions": actions,
+        "after": {
+            "health": after_health,
+            "processes": after_processes,
+            "snapshot_summary": _snapshot_baseline(after_snapshot),
+        },
+        "errors": errors,
+    }
+
+
+def _node_watchdog_report(
+    *,
+    config: NodeWatchdogConfig,
+    invite: AlphaInvite,
+    home: Path,
+    iterations: list[dict[str, Any]],
+    errors: list[str],
+) -> dict[str, Any]:
+    ok = not errors and all(iteration.get("ok", False) for iteration in iterations)
+    return {
+        "schema": NODE_WATCHDOG_REPORT_SCHEMA,
+        "ok": ok,
+        "status": "pass" if ok else "fail",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "config": {
+            "home": str(home),
+            "invite_path": str(config.invite_path),
+            "report_path": str(config.report_path) if config.report_path else None,
+            "role": config.role,
+            "restart": config.restart,
+            "checks": config.checks,
+            "interval_seconds": config.interval_seconds,
+            "operator_config_path": str(config.operator_config_path) if config.operator_config_path else None,
+            "coordinator_host": config.coordinator_host,
+            "coordinator_port": _watchdog_coordinator_port(config, invite),
+            "worker_interval": config.worker_interval,
+            "startup_timeout_seconds": config.startup_timeout_seconds,
+        },
+        "invite": invite.public_summary(),
+        "iterations": iterations,
+        "errors": errors,
+    }
+
+
+def _watchdog_roles(role: str) -> tuple[str, ...]:
+    return ("coordinator", "worker") if role == "both" else (role,)
+
+
+def _watchdog_coordinator_needs_restart(
+    processes: list[dict[str, Any]],
+    health: dict[str, Any],
+) -> bool:
+    coordinator = next((process for process in processes if process.get("role") == "coordinator"), {})
+    return not coordinator.get("alive") or not health.get("ok")
+
+
+def _watchdog_worker_needs_restart(
+    *,
+    home: Path,
+    processes: list[dict[str, Any]],
+    snapshot: dict[str, Any] | None,
+) -> bool:
+    worker = next((process for process in processes if process.get("role") == "worker"), {})
+    if not worker.get("alive"):
+        return True
+    identity_path = home / "worker.identity.json"
+    if not identity_path.exists() or snapshot is None:
+        return False
+    try:
+        identity = NodeIdentity.load(identity_path)
+    except Exception:
+        return True
+    node = _snapshot_node(snapshot, identity.node_id)
+    return node is None or node.get("liveness_status") != "live"
+
+
+def _watchdog_coordinator_port(config: NodeWatchdogConfig, invite: AlphaInvite) -> int:
+    if config.coordinator_port is not None:
+        return config.coordinator_port
+    parsed = urlparse(invite.coordinator)
+    if parsed.port is not None:
+        return parsed.port
+    return 443 if parsed.scheme == "https" else 80
+
+
+def _start_watchdog_coordinator(
+    *,
+    config: NodeWatchdogConfig,
+    home: Path,
+    invite: AlphaInvite,
+) -> dict[str, Any]:
+    assert config.operator_config_path is not None
+    port = _watchdog_coordinator_port(config, invite)
+    argv = [
+        sys.executable,
+        "-m",
+        "chatp2p.cli",
+        "coordinator",
+        "serve",
+        "--home",
+        str(home),
+        "--host",
+        config.coordinator_host,
+        "--port",
+        str(port),
+        "--lease-timeout-seconds",
+        str(config.lease_timeout_seconds),
+        "--node-stale-seconds",
+        str(config.node_stale_seconds),
+        "--operator-config",
+        str(config.operator_config_path),
+    ]
+    return start_managed_process(
+        home=home,
+        role="coordinator",
+        argv=argv,
+        coordinator_url=invite.coordinator,
+        force=True,
+        extra_state={
+            "listen": {"host": config.coordinator_host, "port": port},
+            "operator_config": str(config.operator_config_path),
+            "started_by": "node-watchdog",
+        },
     )
 
 

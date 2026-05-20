@@ -198,6 +198,20 @@ chatp2p operator alpha-remote-proof --invite D:\ChatP2PData\alpha-invite.json --
 
 Pass means the expected worker was live, it returned at least one accepted result, every job created by the proof reached a terminal state, all proof-created jobs verified, and no proof-created jobs disputed or expired.
 
+For a quick health check, use:
+
+```bash
+chatp2p operator alpha-status --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_... --min-live-workers 2 --report D:\ChatP2PData\alpha-status-report.json
+```
+
+To let the node check and restart managed processes from the invite, run a one-shot watchdog check:
+
+```bash
+chatp2p node watchdog --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --operator-config D:\ChatP2PData\operator-config.json --role both --report D:\ChatP2PData\node-watchdog-report.json
+```
+
+Use `--checks 0` to keep the watchdog running until interrupted. Reports redact the invite token and managed process command secrets.
+
 When you are waiting for a real contributor, rehearse the same flow with an isolated local simulated worker:
 
 ```bash

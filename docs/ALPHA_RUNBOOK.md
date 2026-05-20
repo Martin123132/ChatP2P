@@ -127,6 +127,32 @@ Pass means:
 
 The report schema is `chatp2p.alpha-remote-proof-report.v1`. It includes pre-existing coordinator counts separately from the proof-created jobs, so old dashboard history does not hide whether this run passed.
 
+## Alpha Status
+
+Use this when you want a single redacted health report without creating new jobs:
+
+```bash
+python -m chatp2p.cli operator alpha-status --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_87b5cefe53e67c6c --min-live-workers 2 --report D:\ChatP2PData\alpha-status-report.json
+```
+
+Pass means the coordinator health endpoint is reachable, the local managed processes are healthy enough for the configured home, the minimum live worker count is present, the expected worker is live when provided, and there are no disputed jobs. A backlog of queued, pending, or leased jobs is reported as a warning rather than a failure.
+
+## Node Watchdog
+
+Run a one-shot check and restart unhealthy managed roles:
+
+```bash
+python -m chatp2p.cli node watchdog --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --operator-config D:\ChatP2PData\operator-config.json --role both --report D:\ChatP2PData\node-watchdog-report.json
+```
+
+The watchdog uses the invite file to restart workers, so it does not need to recover the admission token from redacted process state. The operator config is only required when the watchdog may restart the coordinator. Use `--role worker` on a contributor machine, and omit `--operator-config` there:
+
+```bash
+python -m chatp2p.cli node watchdog --home E:\ChatP2P-private-version--main\.runtime\.mesh --invite E:\ChatP2P-private-version--main\alpha-invite.json --role worker --report E:\ChatP2P-private-version--main\.runtime\node-watchdog-report.json
+```
+
+Use `--checks 0` to keep the watchdog running until interrupted, or leave the default `--checks 1` for a safe one-shot health repair.
+
 ## Rollback
 
 Stop the local operator node:

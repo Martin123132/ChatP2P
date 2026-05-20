@@ -17,7 +17,9 @@ from .alpha import (
     AlphaRemoteProofConfig,
     AlphaRouteConfig,
     AlphaSmokeConfig,
+    AlphaStatusConfig,
     DEFAULT_ALPHA_NOTES,
+    NodeWatchdogConfig,
     bootstrap_alpha,
     run_alpha_drill,
     run_alpha_join,
@@ -25,6 +27,8 @@ from .alpha import (
     run_alpha_remote_proof,
     run_alpha_route,
     run_alpha_smoke,
+    run_alpha_status,
+    run_node_watchdog,
 )
 from .benchmark import CAPABILITY_PROFILE_NAME, load_node_capabilities, run_node_benchmark, save_node_benchmark
 from .client import CoordinatorClient
@@ -534,6 +538,28 @@ def alpha_remote_proof_command(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def alpha_status_command(args: argparse.Namespace) -> None:
+    home = Path(args.home)
+    invite = Path(args.invite) if args.invite else home.parent / "alpha-invite.json"
+    report_path = Path(args.report) if args.report else None
+    try:
+        report = run_alpha_status(
+            AlphaStatusConfig(
+                home=home,
+                invite_path=invite,
+                report_path=report_path,
+                expected_worker_id=args.expected_worker_id,
+                min_live_workers=args.min_live_workers,
+                timeout_seconds=args.timeout_seconds,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
 def alpha_drill_command(args: argparse.Namespace) -> None:
     home = Path(args.home)
     invite = Path(args.invite) if args.invite else home.parent / "alpha-invite.json"
@@ -798,6 +824,39 @@ def run_node_status_command(args: argparse.Namespace) -> None:
     )
 
 
+def run_node_watchdog_command(args: argparse.Namespace) -> None:
+    home = Path(args.home)
+    invite = Path(args.invite) if args.invite else home.parent / "alpha-invite.json"
+    report_path = Path(args.report) if args.report else None
+    operator_config_path = Path(args.operator_config) if args.operator_config else None
+    try:
+        report = run_node_watchdog(
+            NodeWatchdogConfig(
+                home=home,
+                invite_path=invite,
+                report_path=report_path,
+                role=args.role,
+                restart=not args.no_restart,
+                checks=args.checks,
+                interval_seconds=args.interval_seconds,
+                operator_config_path=operator_config_path,
+                coordinator_host=args.coordinator_host,
+                coordinator_port=args.coordinator_port,
+                lease_timeout_seconds=args.lease_timeout_seconds,
+                node_stale_seconds=args.node_stale_seconds,
+                worker_interval=args.worker_interval,
+                startup_timeout_seconds=args.startup_timeout_seconds,
+                cpu_duration_seconds=args.cpu_duration_seconds,
+                ollama_base_url=args.ollama_base_url,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
 def _build_managed_coordinator_argv(args: argparse.Namespace) -> list[str]:
     argv = [
         sys.executable,
@@ -1016,6 +1075,97 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--skip-health", action="store_true", help="Skip coordinator health check")
     status_parser.set_defaults(func=run_node_status_command)
 
+    watchdog_parser = node_subcommands.add_parser(
+        "watchdog",
+        help="Check managed node processes and optionally restart unhealthy alpha roles",
+    )
+    watchdog_parser.add_argument("--home", default=".mesh", help="Directory for node run state")
+    watchdog_parser.add_argument(
+        "--invite",
+        default=None,
+        help="Path to alpha invite JSON. Defaults to HOME parent/alpha-invite.json",
+    )
+    watchdog_parser.add_argument(
+        "--report",
+        default=None,
+        help="Optional path for watchdog JSON report",
+    )
+    watchdog_parser.add_argument(
+        "--role",
+        default="worker",
+        choices=["both", "coordinator", "worker"],
+        help="Managed role to check",
+    )
+    watchdog_parser.add_argument(
+        "--no-restart",
+        action="store_true",
+        help="Only report unhealthy processes; do not restart them",
+    )
+    watchdog_parser.add_argument(
+        "--checks",
+        default=1,
+        type=int,
+        help="Number of checks to run. Use 0 to run until interrupted",
+    )
+    watchdog_parser.add_argument(
+        "--interval-seconds",
+        default=30.0,
+        type=float,
+        help="Seconds between checks when --checks is greater than 1 or 0",
+    )
+    watchdog_parser.add_argument(
+        "--operator-config",
+        default=None,
+        help="Operator config JSON path required when restarting the coordinator",
+    )
+    watchdog_parser.add_argument(
+        "--coordinator-host",
+        default="0.0.0.0",
+        help="Host to bind if the watchdog restarts the coordinator",
+    )
+    watchdog_parser.add_argument(
+        "--coordinator-port",
+        default=None,
+        type=int,
+        help="Port to bind if the watchdog restarts the coordinator. Defaults to invite URL port",
+    )
+    watchdog_parser.add_argument(
+        "--lease-timeout-seconds",
+        default=30.0,
+        type=float,
+        help="Coordinator lease timeout when the watchdog restarts the coordinator",
+    )
+    watchdog_parser.add_argument(
+        "--node-stale-seconds",
+        default=60.0,
+        type=float,
+        help="Coordinator node stale timeout when the watchdog restarts the coordinator",
+    )
+    watchdog_parser.add_argument(
+        "--worker-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between worker polling attempts after a watchdog restart",
+    )
+    watchdog_parser.add_argument(
+        "--startup-timeout-seconds",
+        default=15.0,
+        type=float,
+        help="Seconds to wait for restarted roles to become healthy",
+    )
+    watchdog_parser.add_argument(
+        "--cpu-duration-seconds",
+        default=0.25,
+        type=float,
+        help="Seconds to spend benchmarking a worker that has no saved profile",
+    )
+    watchdog_parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="Local Ollama base URL for inference.ollama.v1 capability discovery",
+    )
+    watchdog_parser.set_defaults(func=run_node_watchdog_command)
+
     benchmark_parser = node_subcommands.add_parser(
         "benchmark",
         help="Benchmark this machine and save worker capabilities",
@@ -1154,6 +1304,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="Timeout for coordinator health checks",
     )
     alpha_preflight_parser.set_defaults(func=alpha_preflight_command)
+
+    alpha_status_parser = operator_subcommands.add_parser(
+        "alpha-status",
+        help="Show a redacted operator status report for a running alpha",
+    )
+    alpha_status_parser.add_argument("--home", required=True, help="Coordinator and primary worker home directory")
+    alpha_status_parser.add_argument(
+        "--invite",
+        default=None,
+        help="Path to alpha invite JSON. Defaults to HOME parent/alpha-invite.json",
+    )
+    alpha_status_parser.add_argument(
+        "--report",
+        default=None,
+        help="Optional path for status JSON report",
+    )
+    alpha_status_parser.add_argument(
+        "--expected-worker-id",
+        default=None,
+        help="Worker node ID that should be present and live",
+    )
+    alpha_status_parser.add_argument(
+        "--min-live-workers",
+        default=1,
+        type=int,
+        help="Minimum live workers required for pass",
+    )
+    alpha_status_parser.add_argument(
+        "--timeout-seconds",
+        default=5.0,
+        type=float,
+        help="Timeout for coordinator health and snapshot checks",
+    )
+    alpha_status_parser.set_defaults(func=alpha_status_command)
 
     alpha_route_parser = operator_subcommands.add_parser(
         "alpha-route",
