@@ -153,6 +153,31 @@ python -m chatp2p.cli node watchdog --home E:\ChatP2P-private-version--main\.run
 
 Use `--checks 0` to keep the watchdog running until interrupted, or leave the default `--checks 1` for a safe one-shot health repair.
 
+## Windows Scheduled Task
+
+Install the operator watchdog so Windows starts it again after login:
+
+```bash
+python -m chatp2p.cli node install-task --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --operator-config D:\ChatP2PData\operator-config.json --role both --task-name "ChatP2P Operator Watchdog" --report D:\ChatP2PData\node-watchdog-report.json
+```
+
+The installer writes a generated `.cmd` launcher under `D:\ChatP2PData\.mesh\run` and creates a Windows Scheduled Task that runs the watchdog with `--checks 0`. The task command references the invite path, not the raw admission token.
+
+If Windows returns `Access is denied` while creating the Scheduled Task, rerun the command from an elevated terminal. A no-admin Startup folder fallback is available with `--allow-startup-folder-fallback`, but it writes a small `.vbs` launcher under `%APPDATA%`; avoid that fallback when you want every ChatP2P file kept on the runtime drive.
+
+On a contributor machine, install only the worker watchdog:
+
+```bash
+python -m chatp2p.cli node install-task --home E:\ChatP2P-private-version--main\.runtime\.mesh --invite E:\ChatP2P-private-version--main\alpha-invite.json --role worker --task-name "ChatP2P Worker Watchdog" --report E:\ChatP2P-private-version--main\.runtime\node-watchdog-report.json
+```
+
+Use `--dry-run` first if you want to inspect the exact task plan without creating it. Remove tasks with:
+
+```bash
+python -m chatp2p.cli node uninstall-task --task-name "ChatP2P Operator Watchdog" --home D:\ChatP2PData\.mesh
+python -m chatp2p.cli node uninstall-task --task-name "ChatP2P Worker Watchdog" --home E:\ChatP2P-private-version--main\.runtime\.mesh
+```
+
 ## Rollback
 
 Stop the local operator node:

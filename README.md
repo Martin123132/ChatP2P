@@ -212,6 +212,22 @@ chatp2p node watchdog --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-
 
 Use `--checks 0` to keep the watchdog running until interrupted. Reports redact the invite token and managed process command secrets.
 
+On Windows, install that watchdog as a Scheduled Task:
+
+```bash
+chatp2p node install-task --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --operator-config D:\ChatP2PData\operator-config.json --role both --task-name "ChatP2P Operator Watchdog" --report D:\ChatP2PData\node-watchdog-report.json
+```
+
+Contributor machines can install a worker-only task without the operator config:
+
+```bash
+chatp2p node install-task --home E:\ChatP2P-private-version--main\.runtime\.mesh --invite E:\ChatP2P-private-version--main\alpha-invite.json --role worker --task-name "ChatP2P Worker Watchdog" --report E:\ChatP2P-private-version--main\.runtime\node-watchdog-report.json
+```
+
+Remove a task with `chatp2p node uninstall-task --task-name "ChatP2P Worker Watchdog" --home E:\ChatP2P-private-version--main\.runtime\.mesh`.
+
+If Windows denies Scheduled Task creation from a non-elevated terminal, rerun from an elevated terminal. A per-user Startup folder fallback is available with `--allow-startup-folder-fallback`, but that writes a small launcher under `%APPDATA%`, so avoid it when you want every ChatP2P file kept on the runtime drive.
+
 When you are waiting for a real contributor, rehearse the same flow with an isolated local simulated worker:
 
 ```bash

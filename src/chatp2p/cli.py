@@ -49,6 +49,12 @@ from .packets import NodeRegistration
 from .proof import OllamaProofConfig, SwarmProofConfig, proof_summary, run_ollama_proof, run_swarm_proof
 from .storage import SQLiteCoordinatorStore
 from .worker import WorkerNode
+from .windows_task import (
+    DEFAULT_TASK_NAME,
+    WatchdogTaskConfig,
+    install_watchdog_task,
+    uninstall_watchdog_task,
+)
 
 
 def _identity_path(home: Path, name: str) -> Path:
@@ -857,6 +863,62 @@ def run_node_watchdog_command(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def run_node_install_task_command(args: argparse.Namespace) -> None:
+    home = Path(args.home)
+    invite = Path(args.invite) if args.invite else home.parent / "alpha-invite.json"
+    report_path = Path(args.report) if args.report else None
+    operator_config_path = Path(args.operator_config) if args.operator_config else None
+    try:
+        report = install_watchdog_task(
+            WatchdogTaskConfig(
+                home=home,
+                invite_path=invite,
+                task_name=args.task_name,
+                report_path=report_path,
+                role=args.role,
+                operator_config_path=operator_config_path,
+                schedule=args.schedule,
+                force=not args.no_force,
+                startup_fallback=args.allow_startup_folder_fallback,
+                restart=not args.no_restart,
+                checks=args.checks,
+                interval_seconds=args.interval_seconds,
+                coordinator_host=args.coordinator_host,
+                coordinator_port=args.coordinator_port,
+                lease_timeout_seconds=args.lease_timeout_seconds,
+                node_stale_seconds=args.node_stale_seconds,
+                worker_interval=args.worker_interval,
+                startup_timeout_seconds=args.startup_timeout_seconds,
+                cpu_duration_seconds=args.cpu_duration_seconds,
+                ollama_base_url=args.ollama_base_url,
+                work_dir=Path(args.work_dir) if args.work_dir else None,
+                launcher_path=Path(args.launcher) if args.launcher else None,
+            ),
+            dry_run=args.dry_run,
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def run_node_uninstall_task_command(args: argparse.Namespace) -> None:
+    try:
+        report = uninstall_watchdog_task(
+            task_name=args.task_name,
+            home=Path(args.home) if args.home else None,
+            launcher_path=Path(args.launcher) if args.launcher else None,
+            delete_launcher=not args.keep_launcher,
+            dry_run=args.dry_run,
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
 def _build_managed_coordinator_argv(args: argparse.Namespace) -> list[str]:
     argv = [
         sys.executable,
@@ -1165,6 +1227,164 @@ def build_parser() -> argparse.ArgumentParser:
         help="Local Ollama base URL for inference.ollama.v1 capability discovery",
     )
     watchdog_parser.set_defaults(func=run_node_watchdog_command)
+
+    install_task_parser = node_subcommands.add_parser(
+        "install-task",
+        help="Install a Windows Scheduled Task that runs the ChatP2P watchdog",
+    )
+    install_task_parser.add_argument("--home", default=".mesh", help="Directory for node run state")
+    install_task_parser.add_argument(
+        "--invite",
+        default=None,
+        help="Path to alpha invite JSON. Defaults to HOME parent/alpha-invite.json",
+    )
+    install_task_parser.add_argument(
+        "--task-name",
+        default=DEFAULT_TASK_NAME,
+        help="Windows Scheduled Task name",
+    )
+    install_task_parser.add_argument(
+        "--report",
+        default=None,
+        help="Watchdog report path written by the scheduled task. Defaults to HOME/run/watchdog-task-report.json",
+    )
+    install_task_parser.add_argument(
+        "--role",
+        default="worker",
+        choices=["both", "coordinator", "worker"],
+        help="Managed role the watchdog task should check",
+    )
+    install_task_parser.add_argument(
+        "--operator-config",
+        default=None,
+        help="Operator config JSON path required when the task may restart the coordinator",
+    )
+    install_task_parser.add_argument(
+        "--schedule",
+        default="onlogon",
+        choices=["onlogon", "onstart"],
+        help="Windows task trigger",
+    )
+    install_task_parser.add_argument(
+        "--checks",
+        default=0,
+        type=int,
+        help="Watchdog checks per task run. Use 0 to keep it running until stopped",
+    )
+    install_task_parser.add_argument(
+        "--interval-seconds",
+        default=30.0,
+        type=float,
+        help="Seconds between watchdog checks",
+    )
+    install_task_parser.add_argument(
+        "--coordinator-host",
+        default="0.0.0.0",
+        help="Host to bind if the task restarts the coordinator",
+    )
+    install_task_parser.add_argument(
+        "--coordinator-port",
+        default=None,
+        type=int,
+        help="Port to bind if the task restarts the coordinator. Defaults to invite URL port",
+    )
+    install_task_parser.add_argument(
+        "--lease-timeout-seconds",
+        default=30.0,
+        type=float,
+        help="Coordinator lease timeout when the task restarts the coordinator",
+    )
+    install_task_parser.add_argument(
+        "--node-stale-seconds",
+        default=60.0,
+        type=float,
+        help="Coordinator node stale timeout when the task restarts the coordinator",
+    )
+    install_task_parser.add_argument(
+        "--worker-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between worker polling attempts after a watchdog restart",
+    )
+    install_task_parser.add_argument(
+        "--startup-timeout-seconds",
+        default=15.0,
+        type=float,
+        help="Seconds to wait for restarted roles to become healthy",
+    )
+    install_task_parser.add_argument(
+        "--cpu-duration-seconds",
+        default=0.25,
+        type=float,
+        help="Seconds to spend benchmarking a worker that has no saved profile",
+    )
+    install_task_parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="Local Ollama base URL for inference.ollama.v1 capability discovery",
+    )
+    install_task_parser.add_argument(
+        "--work-dir",
+        default=None,
+        help="Working directory for the generated launcher. Defaults to the ChatP2P source root parent",
+    )
+    install_task_parser.add_argument(
+        "--launcher",
+        default=None,
+        help="Path for generated .cmd launcher. Defaults to HOME/run/<task-name>.cmd",
+    )
+    install_task_parser.add_argument(
+        "--no-restart",
+        action="store_true",
+        help="Install a reporting-only watchdog task that does not restart unhealthy roles",
+    )
+    install_task_parser.add_argument(
+        "--no-force",
+        action="store_true",
+        help="Do not replace an existing Scheduled Task of the same name",
+    )
+    install_task_parser.add_argument(
+        "--allow-startup-folder-fallback",
+        action="store_true",
+        help="If Scheduled Task creation is denied, install a per-user Startup folder launcher under APPDATA",
+    )
+    install_task_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the task plan without writing the launcher or creating a Scheduled Task",
+    )
+    install_task_parser.set_defaults(func=run_node_install_task_command)
+
+    uninstall_task_parser = node_subcommands.add_parser(
+        "uninstall-task",
+        help="Remove a ChatP2P Windows Scheduled Task",
+    )
+    uninstall_task_parser.add_argument(
+        "--task-name",
+        default=DEFAULT_TASK_NAME,
+        help="Windows Scheduled Task name",
+    )
+    uninstall_task_parser.add_argument(
+        "--home",
+        default=None,
+        help="Optional home directory used to locate the generated launcher for deletion",
+    )
+    uninstall_task_parser.add_argument(
+        "--launcher",
+        default=None,
+        help="Optional generated launcher path to delete",
+    )
+    uninstall_task_parser.add_argument(
+        "--keep-launcher",
+        action="store_true",
+        help="Leave the generated launcher file in place",
+    )
+    uninstall_task_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the uninstall plan without deleting the task or launcher",
+    )
+    uninstall_task_parser.set_defaults(func=run_node_uninstall_task_command)
 
     benchmark_parser = node_subcommands.add_parser(
         "benchmark",

@@ -79,11 +79,15 @@ def test_node_managed_commands_parse(tmp_path):
     )
     status_args = parser.parse_args(["node", "status", "--home", str(tmp_path / ".mesh")])
     watchdog_args = parser.parse_args(["node", "watchdog", "--home", str(tmp_path / ".mesh")])
+    install_task_args = parser.parse_args(["node", "install-task", "--home", str(tmp_path / ".mesh")])
+    uninstall_task_args = parser.parse_args(["node", "uninstall-task"])
     down_args = parser.parse_args(["node", "down", "--home", str(tmp_path / ".mesh")])
 
     assert up_args.func.__name__ == "run_node_up_command"
     assert status_args.func.__name__ == "run_node_status_command"
     assert watchdog_args.func.__name__ == "run_node_watchdog_command"
+    assert install_task_args.func.__name__ == "run_node_install_task_command"
+    assert uninstall_task_args.func.__name__ == "run_node_uninstall_task_command"
     assert down_args.func.__name__ == "run_node_down_command"
 
 
