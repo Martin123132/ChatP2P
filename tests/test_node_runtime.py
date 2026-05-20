@@ -96,3 +96,21 @@ def test_operator_alpha_status_command_parses(tmp_path):
     args = parser.parse_args(["operator", "alpha-status", "--home", str(tmp_path / ".mesh")])
 
     assert args.func.__name__ == "alpha_status_command"
+
+
+def test_operator_alpha_evidence_command_parses(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "alpha-evidence",
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--expected-worker-id",
+            "worker_test",
+            "--jobs",
+            "1",
+        ]
+    )
+
+    assert args.func.__name__ == "alpha_evidence_command"

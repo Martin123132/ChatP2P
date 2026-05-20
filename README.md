@@ -204,6 +204,14 @@ For a quick health check, use:
 chatp2p operator alpha-status --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_... --min-live-workers 2 --report D:\ChatP2PData\alpha-status-report.json
 ```
 
+To collect a shareable redacted evidence folder after a partner joins, run:
+
+```bash
+chatp2p operator alpha-evidence --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_... --jobs 25 --out D:\ChatP2PData\alpha-evidence
+```
+
+The evidence pack writes `alpha-status.json`, `alpha-remote-proof.json`, a copied watchdog report, a Windows task query report, and `alpha-evidence-summary.md`. The raw admission token is redacted before files are written.
+
 To let the node check and restart managed processes from the invite, run a one-shot watchdog check:
 
 ```bash

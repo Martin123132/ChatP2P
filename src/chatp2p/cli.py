@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 
 from .alpha import (
     AlphaDrillConfig,
+    AlphaEvidenceConfig,
     AlphaJoinConfig,
     AlphaPreflightConfig,
     AlphaRemoteProofConfig,
@@ -19,9 +20,11 @@ from .alpha import (
     AlphaSmokeConfig,
     AlphaStatusConfig,
     DEFAULT_ALPHA_NOTES,
+    DEFAULT_OPERATOR_TASK_NAME,
     NodeWatchdogConfig,
     bootstrap_alpha,
     run_alpha_drill,
+    run_alpha_evidence,
     run_alpha_join,
     run_alpha_preflight,
     run_alpha_remote_proof,
@@ -557,6 +560,35 @@ def alpha_status_command(args: argparse.Namespace) -> None:
                 expected_worker_id=args.expected_worker_id,
                 min_live_workers=args.min_live_workers,
                 timeout_seconds=args.timeout_seconds,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def alpha_evidence_command(args: argparse.Namespace) -> None:
+    home = Path(args.home)
+    invite = Path(args.invite) if args.invite else home.parent / "alpha-invite.json"
+    out_dir = Path(args.out) if args.out else home.parent / "alpha-evidence"
+    watchdog_report = Path(args.watchdog_report) if args.watchdog_report else None
+    try:
+        report = run_alpha_evidence(
+            AlphaEvidenceConfig(
+                home=home,
+                invite_path=invite,
+                out_dir=out_dir,
+                expected_worker_id=args.expected_worker_id,
+                jobs=args.jobs,
+                min_live_workers=args.min_live_workers,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval=args.poll_interval,
+                status_timeout_seconds=args.status_timeout_seconds,
+                watchdog_report_path=watchdog_report,
+                operator_task_name=args.operator_task_name,
+                query_operator_task=not args.no_task_query,
             )
         )
     except (OSError, ValueError) as exc:
@@ -1558,6 +1590,73 @@ def build_parser() -> argparse.ArgumentParser:
         help="Timeout for coordinator health and snapshot checks",
     )
     alpha_status_parser.set_defaults(func=alpha_status_command)
+
+    alpha_evidence_parser = operator_subcommands.add_parser(
+        "alpha-evidence",
+        help="Build a redacted evidence pack with status, remote proof, watchdog, and task reports",
+    )
+    alpha_evidence_parser.add_argument("--home", required=True, help="Coordinator and primary worker home directory")
+    alpha_evidence_parser.add_argument(
+        "--invite",
+        default=None,
+        help="Path to alpha invite JSON. Defaults to HOME parent/alpha-invite.json",
+    )
+    alpha_evidence_parser.add_argument(
+        "--out",
+        default=None,
+        help="Evidence pack directory. Defaults to HOME parent/alpha-evidence",
+    )
+    alpha_evidence_parser.add_argument(
+        "--expected-worker-id",
+        default=None,
+        help="Worker node ID that should be live and return proof results",
+    )
+    alpha_evidence_parser.add_argument(
+        "--jobs",
+        default=25,
+        type=int,
+        help="Deterministic eval jobs to create for the remote proof",
+    )
+    alpha_evidence_parser.add_argument(
+        "--min-live-workers",
+        default=2,
+        type=int,
+        help="Minimum live workers required for status and remote proof pass",
+    )
+    alpha_evidence_parser.add_argument(
+        "--timeout-seconds",
+        default=300.0,
+        type=float,
+        help="Maximum time to wait for the remote proof",
+    )
+    alpha_evidence_parser.add_argument(
+        "--poll-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between coordinator snapshot polls during remote proof",
+    )
+    alpha_evidence_parser.add_argument(
+        "--status-timeout-seconds",
+        default=5.0,
+        type=float,
+        help="Timeout for the status health and snapshot checks",
+    )
+    alpha_evidence_parser.add_argument(
+        "--watchdog-report",
+        default=None,
+        help="Existing watchdog report to copy. Defaults to HOME parent/node-watchdog-report.json",
+    )
+    alpha_evidence_parser.add_argument(
+        "--operator-task-name",
+        default=DEFAULT_OPERATOR_TASK_NAME,
+        help="Windows Scheduled Task name to query for operator watchdog evidence",
+    )
+    alpha_evidence_parser.add_argument(
+        "--no-task-query",
+        action="store_true",
+        help="Skip Windows Scheduled Task query",
+    )
+    alpha_evidence_parser.set_defaults(func=alpha_evidence_command)
 
     alpha_route_parser = operator_subcommands.add_parser(
         "alpha-route",

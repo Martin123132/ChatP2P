@@ -4,6 +4,7 @@ import threading
 import chatp2p.alpha as alpha_module
 from chatp2p.alpha import (
     ALPHA_DRILL_REPORT_SCHEMA,
+    ALPHA_EVIDENCE_PACK_SCHEMA,
     ALPHA_INVITE_SCHEMA,
     ALPHA_PREFLIGHT_REPORT_SCHEMA,
     ALPHA_REMOTE_PROOF_REPORT_SCHEMA,
@@ -11,6 +12,7 @@ from chatp2p.alpha import (
     ALPHA_SMOKE_REPORT_SCHEMA,
     ALPHA_STATUS_REPORT_SCHEMA,
     AlphaDrillConfig,
+    AlphaEvidenceConfig,
     AlphaInvite,
     AlphaJoinConfig,
     AlphaPreflightConfig,
@@ -23,6 +25,7 @@ from chatp2p.alpha import (
     bootstrap_alpha,
     load_alpha_invite,
     run_alpha_drill,
+    run_alpha_evidence,
     run_alpha_join,
     run_alpha_preflight,
     run_alpha_remote_proof,
@@ -624,6 +627,76 @@ def test_alpha_status_reports_expected_worker_without_exposing_token(tmp_path):
     assert status_report["expected_worker"]["node_id"] == join_report["worker_node_id"]
     assert report_path.exists()
     assert token not in json.dumps(status_report)
+
+
+def test_alpha_evidence_pack_runs_remote_proof_and_redacts_artifacts(tmp_path):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    operator_home = tmp_path / ".mesh-operator"
+    partner_home = tmp_path / ".mesh-partner"
+    invite_path = tmp_path / "alpha-invite.json"
+    out_dir = tmp_path / "evidence"
+    watchdog_report = tmp_path / "node-watchdog-report.json"
+    write_alpha_invite(invite_path, AlphaInvite.create(coordinator=coordinator_url, admission_token=token))
+    _save_benchmark(operator_home)
+    _save_benchmark(partner_home)
+    watchdog_report.write_text(
+        json.dumps({"schema": NODE_WATCHDOG_REPORT_SCHEMA, "admission_token": token}),
+        encoding="utf-8",
+    )
+
+    try:
+        operator_join = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=invite_path,
+                home=operator_home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        partner_join = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=invite_path,
+                home=partner_home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        report = run_alpha_evidence(
+            AlphaEvidenceConfig(
+                home=operator_home,
+                invite_path=invite_path,
+                out_dir=out_dir,
+                expected_worker_id=partner_join["worker_node_id"],
+                jobs=1,
+                min_live_workers=2,
+                timeout_seconds=15.0,
+                poll_interval=0.2,
+                status_timeout_seconds=5.0,
+                watchdog_report_path=watchdog_report,
+                query_operator_task=False,
+            )
+        )
+    finally:
+        stop_managed_process(home=operator_home, role="worker")
+        stop_managed_process(home=partner_home, role="worker")
+        _stop_server(server, thread)
+
+    assert operator_join["ok"] is True
+    assert partner_join["ok"] is True
+    assert report["schema"] == ALPHA_EVIDENCE_PACK_SCHEMA
+    assert report["ok"] is True
+    assert report["remote_proof"]["criteria"]["verified_jobs"]["actual"] == 1
+    assert report["alpha_status"]["expected_worker"]["node_id"] == partner_join["worker_node_id"]
+    assert (out_dir / "alpha-status.json").exists()
+    assert (out_dir / "alpha-remote-proof.json").exists()
+    assert (out_dir / "node-watchdog-report.json").exists()
+    assert (out_dir / "operator-watchdog-task.json").exists()
+    assert (out_dir / "alpha-evidence-summary.md").exists()
+    assert token not in json.dumps(report)
+    assert token not in (out_dir / "node-watchdog-report.json").read_text(encoding="utf-8")
 
 
 def test_node_watchdog_starts_missing_worker_from_invite(tmp_path):

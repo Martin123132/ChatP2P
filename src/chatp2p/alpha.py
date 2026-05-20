@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import ipaddress
+import os
 import secrets
 import shutil
 import subprocess
@@ -31,8 +32,10 @@ ALPHA_DRILL_REPORT_SCHEMA = "chatp2p.alpha-drill-report.v1"
 ALPHA_ROUTE_REPORT_SCHEMA = "chatp2p.alpha-route-report.v1"
 ALPHA_REMOTE_PROOF_REPORT_SCHEMA = "chatp2p.alpha-remote-proof-report.v1"
 ALPHA_STATUS_REPORT_SCHEMA = "chatp2p.alpha-status-report.v1"
+ALPHA_EVIDENCE_PACK_SCHEMA = "chatp2p.alpha-evidence-pack.v1"
 NODE_WATCHDOG_REPORT_SCHEMA = "chatp2p.node-watchdog-report.v1"
 DEFAULT_ALPHA_NOTES = "ChatP2P public alpha invite. Keep this file private; it contains the admission token."
+DEFAULT_OPERATOR_TASK_NAME = "ChatP2P Operator Watchdog"
 LOCAL_INVITE_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")
 TERMINAL_JOB_STATUSES = {"verified", "disputed", "expired"}
@@ -173,6 +176,22 @@ class AlphaStatusConfig:
     expected_worker_id: str | None = None
     min_live_workers: int = 1
     timeout_seconds: float = 5.0
+
+
+@dataclass(frozen=True)
+class AlphaEvidenceConfig:
+    home: Path
+    invite_path: Path
+    out_dir: Path
+    expected_worker_id: str | None = None
+    jobs: int = 25
+    min_live_workers: int = 2
+    timeout_seconds: float = 300.0
+    poll_interval: float = 0.5
+    status_timeout_seconds: float = 5.0
+    watchdog_report_path: Path | None = None
+    operator_task_name: str | None = DEFAULT_OPERATOR_TASK_NAME
+    query_operator_task: bool = True
 
 
 @dataclass(frozen=True)
@@ -874,6 +893,175 @@ def run_alpha_status(config: AlphaStatusConfig) -> dict[str, Any]:
     return report
 
 
+def run_alpha_evidence(config: AlphaEvidenceConfig) -> dict[str, Any]:
+    _validate_alpha_evidence_config(config)
+    started_at = time.time()
+    home = config.home.expanduser().resolve()
+    out_dir = config.out_dir.expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    invite = load_alpha_invite(config.invite_path)
+    secrets_to_redact = tuple(value for value in (invite.admission_token,) if value)
+    status_path = out_dir / "alpha-status.json"
+    remote_proof_path = out_dir / "alpha-remote-proof.json"
+    task_status_path = out_dir / "operator-watchdog-task.json"
+    summary_path = out_dir / "alpha-evidence-summary.json"
+    markdown_path = out_dir / "alpha-evidence-summary.md"
+    watchdog_source = (
+        config.watchdog_report_path.expanduser().resolve()
+        if config.watchdog_report_path is not None
+        else home.parent / "node-watchdog-report.json"
+    )
+    watchdog_copy_path = out_dir / watchdog_source.name
+
+    checks: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    try:
+        status_report = run_alpha_status(
+            AlphaStatusConfig(
+                home=home,
+                invite_path=config.invite_path,
+                report_path=status_path,
+                expected_worker_id=config.expected_worker_id,
+                min_live_workers=config.min_live_workers,
+                timeout_seconds=config.status_timeout_seconds,
+            )
+        )
+        _redact_artifact_file(status_path, secrets_to_redact)
+        checks.append(
+            _alpha_check(
+                "alpha_status",
+                "pass" if status_report.get("ok") else "fail",
+                "Alpha status passed." if status_report.get("ok") else "Alpha status failed.",
+                details=_evidence_status_summary(status_report),
+            )
+        )
+    except Exception as exc:
+        status_report = None
+        message = f"{type(exc).__name__}: {exc}"
+        errors.append(message)
+        checks.append(_alpha_check("alpha_status", "fail", "Alpha status could not be collected.", details={"error": message}))
+
+    try:
+        remote_proof_report = run_alpha_remote_proof(
+            AlphaRemoteProofConfig(
+                invite_path=config.invite_path,
+                report_path=remote_proof_path,
+                jobs=config.jobs,
+                expected_worker_id=config.expected_worker_id,
+                min_live_workers=config.min_live_workers,
+                timeout_seconds=config.timeout_seconds,
+                poll_interval=config.poll_interval,
+            )
+        )
+        _redact_artifact_file(remote_proof_path, secrets_to_redact)
+        checks.append(
+            _alpha_check(
+                "remote_proof",
+                "pass" if remote_proof_report.get("ok") else "fail",
+                "Remote proof passed." if remote_proof_report.get("ok") else "Remote proof failed.",
+                details=_evidence_remote_proof_summary(remote_proof_report),
+            )
+        )
+    except Exception as exc:
+        remote_proof_report = None
+        message = f"{type(exc).__name__}: {exc}"
+        errors.append(message)
+        checks.append(_alpha_check("remote_proof", "fail", "Remote proof could not be collected.", details={"error": message}))
+
+    watchdog_artifact = _copy_redacted_artifact(
+        source=watchdog_source,
+        destination=watchdog_copy_path,
+        secrets_to_redact=secrets_to_redact,
+    )
+    checks.append(
+        _alpha_check(
+            "watchdog_report",
+            "pass" if watchdog_artifact.get("ok") else "warn",
+            "Watchdog report was copied into the evidence pack."
+            if watchdog_artifact.get("ok")
+            else "Watchdog report was not available for the evidence pack.",
+            details=watchdog_artifact,
+        )
+    )
+
+    task_query = _query_windows_task_for_evidence(config.operator_task_name, enabled=config.query_operator_task)
+    _write_json_report(task_status_path, _redact_evidence_value(task_query, secrets_to_redact))
+    task_check_status = "pass" if task_query.get("ok") else "warn"
+    checks.append(
+        _alpha_check(
+            "operator_watchdog_task",
+            task_check_status,
+            "Operator watchdog Scheduled Task was found."
+            if task_query.get("ok")
+            else "Operator watchdog Scheduled Task could not be confirmed.",
+            details=task_query,
+        )
+    )
+
+    artifacts = {
+        "directory": str(out_dir),
+        "summary_json": str(summary_path),
+        "summary_markdown": str(markdown_path),
+        "alpha_status": str(status_path),
+        "alpha_remote_proof": str(remote_proof_path),
+        "watchdog_report": watchdog_artifact,
+        "operator_watchdog_task": str(task_status_path),
+    }
+    secret_scan = _scan_artifacts_for_secrets(
+        [status_path, remote_proof_path, task_status_path, watchdog_copy_path],
+        secrets_to_redact,
+    )
+    checks.append(
+        _alpha_check(
+            "token_redaction",
+            "pass" if not secret_scan["leaks"] else "fail",
+            "No raw admission token was found in evidence artifacts."
+            if not secret_scan["leaks"]
+            else "A raw admission token was found in evidence artifacts.",
+            details=secret_scan,
+        )
+    )
+
+    counts = _check_counts(checks)
+    ok = counts["fail"] == 0
+    status = "fail" if counts["fail"] else ("warn" if counts["warn"] else "pass")
+    report = {
+        "schema": ALPHA_EVIDENCE_PACK_SCHEMA,
+        "ok": ok,
+        "status": status,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(time.time() - started_at, 3),
+        "counts": counts,
+        "config": {
+            "home": str(home),
+            "invite_path": str(config.invite_path),
+            "out_dir": str(out_dir),
+            "expected_worker_id": config.expected_worker_id,
+            "jobs": config.jobs,
+            "min_live_workers": config.min_live_workers,
+            "timeout_seconds": config.timeout_seconds,
+            "poll_interval": config.poll_interval,
+            "status_timeout_seconds": config.status_timeout_seconds,
+            "watchdog_report_path": str(watchdog_source),
+            "operator_task_name": config.operator_task_name,
+            "query_operator_task": config.query_operator_task,
+        },
+        "invite": invite.public_summary(),
+        "checks": checks,
+        "artifacts": artifacts,
+        "alpha_status": _evidence_status_summary(status_report),
+        "remote_proof": _evidence_remote_proof_summary(remote_proof_report),
+        "operator_watchdog_task": task_query,
+        "errors": errors,
+    }
+    report = _redact_evidence_value(report, secrets_to_redact)
+    _write_json_report(summary_path, report)
+    _write_text_report(markdown_path, _alpha_evidence_markdown(report))
+    return report
+
+
 def run_node_watchdog(config: NodeWatchdogConfig) -> dict[str, Any]:
     _validate_node_watchdog_config(config)
     invite = load_alpha_invite(config.invite_path)
@@ -1407,6 +1595,23 @@ def _validate_alpha_status_config(config: AlphaStatusConfig) -> None:
         raise ValueError("--timeout-seconds must be greater than 0")
     if config.expected_worker_id is not None and not config.expected_worker_id.strip():
         raise ValueError("--expected-worker-id cannot be blank")
+
+
+def _validate_alpha_evidence_config(config: AlphaEvidenceConfig) -> None:
+    if config.jobs < 1:
+        raise ValueError("--jobs must be at least 1")
+    if config.min_live_workers < 0:
+        raise ValueError("--min-live-workers cannot be negative")
+    if config.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0")
+    if config.poll_interval <= 0:
+        raise ValueError("--poll-interval must be greater than 0")
+    if config.status_timeout_seconds <= 0:
+        raise ValueError("--status-timeout-seconds must be greater than 0")
+    if config.expected_worker_id is not None and not config.expected_worker_id.strip():
+        raise ValueError("--expected-worker-id cannot be blank")
+    if config.operator_task_name is not None and not config.operator_task_name.strip():
+        raise ValueError("--operator-task-name cannot be blank")
 
 
 def _snapshot_for_status(invite: AlphaInvite, *, timeout_seconds: float) -> dict[str, Any] | None:
@@ -2288,6 +2493,269 @@ def _remote_proof_expected_worker_summary(
     }
 
 
+def _evidence_status_summary(report: dict[str, Any] | None) -> dict[str, Any] | None:
+    if report is None:
+        return None
+    snapshot_status = (report.get("snapshot_summary") or {}).get("status") or {}
+    checks = {check.get("id"): check for check in report.get("checks", [])}
+    return {
+        "ok": report.get("ok"),
+        "status": report.get("status"),
+        "counts": report.get("counts"),
+        "live_workers": snapshot_status.get("live_nodes"),
+        "verified_jobs": snapshot_status.get("verified_jobs"),
+        "disputed_jobs": snapshot_status.get("disputed_jobs"),
+        "queued_jobs": snapshot_status.get("queued_jobs"),
+        "pending_jobs": snapshot_status.get("pending_jobs"),
+        "leased_jobs": snapshot_status.get("leased_jobs"),
+        "expected_worker": report.get("expected_worker"),
+        "managed_processes": [
+            {
+                "role": process.get("role"),
+                "managed": process.get("managed"),
+                "alive": process.get("alive"),
+                "pid": process.get("pid"),
+                "started_at": process.get("started_at"),
+            }
+            for process in report.get("managed_processes", [])
+        ],
+        "check_statuses": {
+            check_id: {
+                "status": check.get("status"),
+                "message": check.get("message"),
+                "details": check.get("details"),
+            }
+            for check_id, check in checks.items()
+        },
+    }
+
+
+def _evidence_remote_proof_summary(report: dict[str, Any] | None) -> dict[str, Any] | None:
+    if report is None:
+        return None
+    final_status = ((report.get("final_summary") or {}).get("status")) or {}
+    return {
+        "ok": report.get("ok"),
+        "status": report.get("status"),
+        "duration_seconds": report.get("duration_seconds"),
+        "parameters": report.get("parameters"),
+        "created_jobs": len(report.get("created_jobs", [])),
+        "created_job_status_counts": report.get("created_job_status_counts"),
+        "criteria": report.get("criteria"),
+        "expected_worker": report.get("expected_worker"),
+        "final_status": {
+            "live_nodes": final_status.get("live_nodes"),
+            "verified_jobs": final_status.get("verified_jobs"),
+            "disputed_jobs": final_status.get("disputed_jobs"),
+            "queued_jobs": final_status.get("queued_jobs"),
+            "pending_jobs": final_status.get("pending_jobs"),
+            "leased_jobs": final_status.get("leased_jobs"),
+            "credits": final_status.get("credits"),
+        },
+        "errors": report.get("errors", []),
+    }
+
+
+def _copy_redacted_artifact(
+    *,
+    source: Path,
+    destination: Path,
+    secrets_to_redact: tuple[str, ...],
+) -> dict[str, Any]:
+    if not source.exists():
+        return {
+            "ok": False,
+            "status": "missing",
+            "source": str(source),
+            "path": str(destination),
+        }
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        raw = source.read_text(encoding="utf-8")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            destination.write_text(_redact_string(raw, secrets_to_redact), encoding="utf-8")
+            artifact_format = "text"
+        else:
+            _write_json_report(destination, _redact_evidence_value(data, secrets_to_redact))
+            artifact_format = "json"
+    except OSError as exc:
+        return {
+            "ok": False,
+            "status": "error",
+            "source": str(source),
+            "path": str(destination),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "ok": True,
+        "status": "copied",
+        "source": str(source),
+        "path": str(destination),
+        "format": artifact_format,
+        "bytes": destination.stat().st_size,
+    }
+
+
+def _query_windows_task_for_evidence(task_name: str | None, *, enabled: bool) -> dict[str, Any]:
+    if not enabled:
+        return {"ok": False, "status": "skipped", "task_name": task_name, "reason": "task query disabled"}
+    if task_name is None:
+        return {"ok": False, "status": "skipped", "task_name": None, "reason": "no task name configured"}
+    command = ["schtasks.exe", "/Query", "/TN", task_name, "/FO", "LIST"]
+    if os.name != "nt":
+        return {
+            "ok": False,
+            "status": "skipped",
+            "task_name": task_name,
+            "command": command,
+            "reason": "Windows Scheduled Tasks are only available on Windows",
+        }
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "ok": False,
+            "status": "error",
+            "task_name": task_name,
+            "command": command,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    parsed = _parse_schtasks_list_output(completed.stdout)
+    return {
+        "ok": completed.returncode == 0,
+        "status": "found" if completed.returncode == 0 else "not_found",
+        "task_name": task_name,
+        "command": command,
+        "returncode": completed.returncode,
+        "stdout": completed.stdout.strip() or None,
+        "stderr": completed.stderr.strip() or None,
+        "parsed": parsed,
+    }
+
+
+def _parse_schtasks_list_output(stdout: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for line in stdout.splitlines():
+        if ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        normalized = key.strip().lower().replace(" ", "_")
+        if normalized:
+            parsed[normalized] = value.strip()
+    return parsed
+
+
+def _redact_artifact_file(path: Path, secrets_to_redact: tuple[str, ...]) -> None:
+    if not path.exists() or not secrets_to_redact:
+        return
+    raw = path.read_text(encoding="utf-8")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        path.write_text(_redact_string(raw, secrets_to_redact), encoding="utf-8")
+        return
+    _write_json_report(path, _redact_evidence_value(data, secrets_to_redact))
+
+
+def _redact_evidence_value(value: Any, secrets_to_redact: tuple[str, ...]) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            if str(key).lower() in {"admission_token", "x-chatp2p-admission-token"}:
+                redacted[key] = "<redacted>"
+            else:
+                redacted[key] = _redact_evidence_value(item, secrets_to_redact)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_evidence_value(item, secrets_to_redact) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_evidence_value(item, secrets_to_redact) for item in value)
+    if isinstance(value, str):
+        return _redact_string(value, secrets_to_redact)
+    return value
+
+
+def _redact_string(value: str, secrets_to_redact: tuple[str, ...]) -> str:
+    redacted = value
+    for secret_value in secrets_to_redact:
+        if secret_value:
+            redacted = redacted.replace(secret_value, "<redacted>")
+    return redacted
+
+
+def _scan_artifacts_for_secrets(paths: list[Path], secrets_to_redact: tuple[str, ...]) -> dict[str, Any]:
+    checked: list[str] = []
+    leaks: list[str] = []
+    if not secrets_to_redact:
+        return {"checked": checked, "leaks": leaks}
+    for path in paths:
+        if not path.exists():
+            continue
+        checked.append(str(path))
+        try:
+            contents = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if any(secret_value and secret_value in contents for secret_value in secrets_to_redact):
+            leaks.append(str(path))
+    return {"checked": checked, "leaks": leaks}
+
+
+def _alpha_evidence_markdown(report: dict[str, Any]) -> str:
+    status_summary = report.get("alpha_status") or {}
+    proof_summary = report.get("remote_proof") or {}
+    expected_worker = status_summary.get("expected_worker") or proof_summary.get("expected_worker") or {}
+    task_parsed = (report.get("operator_watchdog_task") or {}).get("parsed") or {}
+    lines = [
+        "# ChatP2P Alpha Evidence Pack",
+        "",
+        f"Generated: {report.get('generated_at')}",
+        f"Status: {str(report.get('status')).upper()}",
+        f"Checks: {report.get('counts')}",
+        "",
+        "## Current Network",
+        "",
+        f"- Live workers: {status_summary.get('live_workers')}",
+        f"- Verified jobs: {status_summary.get('verified_jobs')}",
+        f"- Disputed jobs: {status_summary.get('disputed_jobs')}",
+        f"- Queued/pending/leased: {status_summary.get('queued_jobs')}/"
+        f"{status_summary.get('pending_jobs')}/{status_summary.get('leased_jobs')}",
+        f"- Expected worker: {expected_worker.get('node_id')}",
+        f"- Expected worker live: {expected_worker.get('live')}",
+        "",
+        "## Remote Proof",
+        "",
+        f"- Proof status: {proof_summary.get('status')}",
+        f"- Jobs created: {proof_summary.get('created_jobs')}",
+        f"- Job status counts: {proof_summary.get('created_job_status_counts')}",
+        f"- Duration seconds: {proof_summary.get('duration_seconds')}",
+        "",
+        "## Watchdog",
+        "",
+        f"- Operator task status: {task_parsed.get('status')}",
+        f"- Operator task logon mode: {task_parsed.get('logon_mode')}",
+        f"- Watchdog report copied: {(report.get('artifacts') or {}).get('watchdog_report', {}).get('ok')}",
+        "",
+        "## Artifacts",
+        "",
+    ]
+    artifacts = report.get("artifacts") or {}
+    for key in ("alpha_status", "alpha_remote_proof", "operator_watchdog_task", "summary_json"):
+        lines.append(f"- {key}: {artifacts.get(key)}")
+    watchdog = artifacts.get("watchdog_report") or {}
+    lines.append(f"- watchdog_report: {watchdog.get('path')}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _alpha_report(
     *,
     schema: str,
@@ -2334,6 +2802,11 @@ def _check_counts(checks: list[dict[str, Any]]) -> dict[str, int]:
 def _write_json_report(path: Path, report: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _write_text_report(path: Path, contents: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(contents, encoding="utf-8")
 
 
 def _worker_loop_argv(config: AlphaJoinConfig, invite: AlphaInvite) -> list[str]:
