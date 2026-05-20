@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 
 from .alpha import (
     AlphaDrillConfig,
@@ -329,8 +330,18 @@ def run_worker_loop(args: argparse.Namespace) -> None:
 
     completed = 0
     while True:
-        result = _run_one_remote_job(client, worker)
         timestamp = time.strftime("%H:%M:%S")
+        try:
+            result = _run_one_remote_job(client, worker)
+        except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            print(
+                f"[{timestamp}] {identity.node_id} transient-error "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(args.interval)
+            continue
         if result["status"] == "idle":
             print(f"[{timestamp}] {identity.node_id} idle")
             if args.stop_when_idle:
