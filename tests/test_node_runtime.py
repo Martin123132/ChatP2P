@@ -1,6 +1,7 @@
 import sys
 
-from chatp2p.cli import build_parser
+from chatp2p.alpha import AlphaInvite, write_alpha_invite
+from chatp2p.cli import _node_status_connection_from_args, build_parser
 from chatp2p.node_runtime import (
     default_coordinator_url,
     managed_process_status,
@@ -89,6 +90,65 @@ def test_node_managed_commands_parse(tmp_path):
     assert install_task_args.func.__name__ == "run_node_install_task_command"
     assert uninstall_task_args.func.__name__ == "run_node_uninstall_task_command"
     assert down_args.func.__name__ == "run_node_down_command"
+
+
+def test_node_status_can_derive_coordinator_from_invite(tmp_path):
+    parser = build_parser()
+    invite_path = tmp_path / "alpha-invite.json"
+    invite = AlphaInvite.create(
+        coordinator="http://100.64.10.20:8765",
+        admission_token="alpha-token-123",
+    )
+    write_alpha_invite(invite_path, invite)
+
+    args = parser.parse_args(
+        [
+            "node",
+            "status",
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--invite",
+            str(invite_path),
+        ]
+    )
+
+    coordinator, admission_token, invite_summary = _node_status_connection_from_args(args)
+
+    assert coordinator == "http://100.64.10.20:8765"
+    assert admission_token == "alpha-token-123"
+    assert invite_summary["coordinator"] == "http://100.64.10.20:8765"
+    assert "admission_token" not in invite_summary
+
+
+def test_node_status_explicit_coordinator_overrides_invite_url_but_reuses_token(tmp_path):
+    parser = build_parser()
+    invite_path = tmp_path / "alpha-invite.json"
+    write_alpha_invite(
+        invite_path,
+        AlphaInvite.create(
+            coordinator="http://100.64.10.20:8765",
+            admission_token="alpha-token-123",
+        ),
+    )
+
+    args = parser.parse_args(
+        [
+            "node",
+            "status",
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--invite",
+            str(invite_path),
+            "--coordinator",
+            "http://127.0.0.1:9999",
+        ]
+    )
+
+    coordinator, admission_token, invite_summary = _node_status_connection_from_args(args)
+
+    assert coordinator == "http://127.0.0.1:9999"
+    assert admission_token == "alpha-token-123"
+    assert invite_summary["coordinator"] == "http://100.64.10.20:8765"
 
 
 def test_operator_alpha_status_command_parses(tmp_path):

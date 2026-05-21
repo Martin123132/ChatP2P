@@ -94,9 +94,11 @@ Contributor quickstart:
 ```bash
 python -m pip install -e ".[dev]"
 chatp2p node join --invite alpha-invite.json --home .mesh
+chatp2p node status --home .mesh --invite alpha-invite.json
 ```
 
 The join command creates or reuses a worker identity, benchmarks the machine if needed, starts a managed worker, and waits until the coordinator sees it as live.
+The invite-backed status command reads the coordinator URL and admission token from the private invite, redacts the token in output, and avoids the misleading worker-machine default of checking `http://127.0.0.1:8765`.
 
 ## Smoke Proof
 
@@ -252,6 +254,12 @@ On a contributor machine, install only the worker watchdog:
 
 ```bash
 python -m chatp2p.cli node install-task --home E:\ChatP2P-private-version--main\.runtime\.mesh --invite E:\ChatP2P-private-version--main\alpha-invite.json --role worker --task-name "ChatP2P Worker Watchdog" --report E:\ChatP2P-private-version--main\.runtime\node-watchdog-report.json
+```
+
+After starting or repairing a contributor worker, verify it against the operator coordinator:
+
+```bash
+python -m chatp2p.cli node status --home E:\ChatP2P-private-version--main\.runtime\.mesh --invite E:\ChatP2P-private-version--main\alpha-invite.json
 ```
 
 Use `--dry-run` first if you want to inspect the exact task plan without creating it. Remove tasks with:

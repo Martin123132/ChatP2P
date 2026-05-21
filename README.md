@@ -58,6 +58,11 @@ chatp2p node down --home D:\ChatP2PData\.mesh
 ```
 
 Managed node state is written under `HOME\run`, and stdout/stderr logs are written under `HOME\logs`. Use `--force` on `node up` to replace an already-managed background process.
+When a worker joined from an alpha invite, pass that invite to `node status` so the health check uses the real coordinator URL and redacted admission token instead of the local default:
+
+```bash
+chatp2p node status --home E:\ChatP2P-private-version--main\.runtime\.mesh --invite E:\ChatP2P-private-version--main\alpha-invite.json
+```
 
 The coordinator stores state in `.mesh/coordinator.sqlite3` by default, so registered nodes, jobs, leases, results, and credits survive restarts.
 Leases expire after 30 seconds by default and can be tuned with `--lease-timeout-seconds`.
@@ -261,6 +266,12 @@ Contributor machines can install a worker-only task without the operator config:
 
 ```bash
 chatp2p node install-task --home E:\ChatP2P-private-version--main\.runtime\.mesh --invite E:\ChatP2P-private-version--main\alpha-invite.json --role worker --task-name "ChatP2P Worker Watchdog" --report E:\ChatP2P-private-version--main\.runtime\node-watchdog-report.json
+```
+
+After a worker-only node is running, check it with the invite-backed status command:
+
+```bash
+chatp2p node status --home E:\ChatP2P-private-version--main\.runtime\.mesh --invite E:\ChatP2P-private-version--main\alpha-invite.json
 ```
 
 Remove a task with `chatp2p node uninstall-task --task-name "ChatP2P Worker Watchdog" --home E:\ChatP2P-private-version--main\.runtime\.mesh`.

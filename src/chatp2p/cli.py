@@ -40,6 +40,7 @@ from .alpha import (
     run_alpha_smoke,
     run_alpha_soak,
     run_alpha_status,
+    load_alpha_invite,
     refresh_node_capabilities,
     run_node_watchdog,
 )
@@ -135,6 +136,16 @@ def _admission_token_for_worker(args: argparse.Namespace) -> str | None:
 
 def _coordinator_url_from_node_args(args: argparse.Namespace) -> str:
     return args.coordinator or default_coordinator_url(args.host, args.port)
+
+
+def _node_status_connection_from_args(
+    args: argparse.Namespace,
+) -> tuple[str, str | None, dict[str, Any] | None]:
+    invite = load_alpha_invite(Path(args.invite)) if getattr(args, "invite", None) else None
+    coordinator_url = args.coordinator or (invite.coordinator if invite else default_coordinator_url(args.host, args.port))
+    admission_token = args.admission_token or (invite.admission_token if invite else None)
+    invite_summary = invite.public_summary() if invite else None
+    return coordinator_url, admission_token, invite_summary
 
 
 def _operator_config_from_args(args: argparse.Namespace) -> OperatorConfig:
@@ -1053,10 +1064,13 @@ def run_node_down_command(args: argparse.Namespace) -> None:
 
 def run_node_status_command(args: argparse.Namespace) -> None:
     home = Path(args.home)
-    coordinator_url = _coordinator_url_from_node_args(args)
+    try:
+        coordinator_url, admission_token, invite_summary = _node_status_connection_from_args(args)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
     health = None
     if not args.skip_health:
-        health = _coordinator_health(coordinator_url=coordinator_url, admission_token=args.admission_token)
+        health = _coordinator_health(coordinator_url=coordinator_url, admission_token=admission_token)
     processes = managed_processes_status(home=home)
     print(
         json.dumps(
@@ -1064,6 +1078,7 @@ def run_node_status_command(args: argparse.Namespace) -> None:
                 "ok": all(process["alive"] for process in processes if process["managed"]),
                 "home": str(home.expanduser().resolve()),
                 "coordinator": coordinator_url,
+                "invite": invite_summary,
                 "processes": processes,
                 "coordinator_health": health,
             },
@@ -1389,6 +1404,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--coordinator",
         default=None,
         help="Coordinator base URL to check. Defaults to the local host/port",
+    )
+    status_parser.add_argument(
+        "--invite",
+        default=None,
+        help="Alpha invite JSON to derive the coordinator URL and admission token",
     )
     status_parser.add_argument("--admission-token", default=None, help="Admission token for public alpha coordinators")
     status_parser.add_argument("--skip-health", action="store_true", help="Skip coordinator health check")
