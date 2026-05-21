@@ -20,7 +20,7 @@ def generate_ollama(
     prompt: str,
     temperature: float | None = None,
     base_url: str = DEFAULT_OLLAMA_BASE_URL,
-    timeout_seconds: float = 120.0,
+    timeout_seconds: float = 300.0,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model,

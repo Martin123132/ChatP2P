@@ -23,6 +23,7 @@ class WorkerNode:
     identity: NodeIdentity
     capability_profile: dict[str, Any] | None = None
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
+    ollama_timeout_seconds: float = 300.0
 
     def capabilities(self) -> dict[str, Any]:
         if self.capability_profile is not None:
@@ -74,6 +75,7 @@ class WorkerNode:
                 prompt=job.payload["prompt"],
                 temperature=job.payload.get("temperature"),
                 base_url=self.ollama_base_url,
+                timeout_seconds=self.ollama_timeout_seconds,
             )
         raise ValueError(f"Unsupported job type: {job.job_type}")
 

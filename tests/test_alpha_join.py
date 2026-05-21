@@ -647,9 +647,98 @@ def test_alpha_inference_proof_runs_echo_jobs_and_tracks_expected_worker(tmp_pat
     assert proof_report["criteria"]["verified_jobs"]["actual"] == 2
     assert proof_report["criteria"]["expected_worker_results"]["actual"] == 2
     assert proof_report["result_node_counts"] == {join_report["worker_node_id"]: 2}
+    assert proof_report["routing_summary"]["policy"] == "generic_inference"
+    assert proof_report["routing_summary"]["capable_live_nodes"] == [
+            {
+                "node_id": join_report["worker_node_id"],
+                "capability_tier": "standard",
+                "supported_job_types": [
+                    "eval.math.v1",
+                    "eval.deterministic.v1",
+                "inference.echo.v1",
+            ],
+        }
+    ]
+    assert {
+        route["route"] for route in proof_report["routing_summary"]["result_routes"]
+    } == {"capable_worker"}
     assert proof_report["created_results"][0]["answer_preview"].startswith("alpha echo proof")
     assert report_path.exists()
     assert token not in json.dumps(proof_report)
+
+
+def test_alpha_inference_ollama_routing_summary_requires_model_capable_result_nodes():
+    snapshot = {
+        "status": {"live_nodes": 2},
+        "nodes": [
+            {
+                "node_id": "worker_wrong",
+                "liveness_status": "live",
+                "supported_job_types": ["eval.math.v1", "inference.echo.v1"],
+                "ollama_models": [],
+            },
+            {
+                "node_id": "worker_ollama",
+                "liveness_status": "live",
+                "supported_job_types": ["eval.math.v1", "inference.echo.v1", "inference.ollama.v1"],
+                "ollama_models": ["llama3.2:3b"],
+                "capability_tier": "gaming_laptop",
+            },
+        ],
+        "jobs": [
+            {
+                "job_id": "job_1",
+                "job_type": "inference.ollama.v1",
+                "status": "verified",
+            }
+        ],
+        "results": [
+            {
+                "job_id": "job_1",
+                "job_type": "inference.ollama.v1",
+                "node_id": "worker_ollama",
+                "output_hash": "hash_1",
+                "runtime_seconds": 0.1,
+                "output": {"answer": "ok", "model": "llama3.2:3b", "confidence": 1.0},
+            }
+        ],
+    }
+    config = AlphaInferenceProofConfig(
+        invite_path=Path("alpha-invite.json"),
+        report_path=Path("alpha-inference.json"),
+        jobs=1,
+        mode="ollama",
+        model="llama3.2:3b",
+        min_live_workers=2,
+    )
+
+    criteria = alpha_module._inference_proof_criteria(snapshot, {"job_1"}, set(), config)
+    routing = alpha_module._inference_routing_summary(
+        selected_job_type="inference.ollama.v1",
+        model="llama3.2:3b",
+        snapshot=snapshot,
+        created_job_ids={"job_1"},
+        initial_result_ids=set(),
+    )
+
+    assert criteria["ollama_results_from_capable_nodes"]["passed"] is True
+    assert criteria["ollama_result_models"]["passed"] is True
+    assert routing["policy"] == "ollama_model_match"
+    assert routing["capable_live_nodes"] == [
+        {
+            "node_id": "worker_ollama",
+            "capability_tier": "gaming_laptop",
+            "models": ["llama3.2:3b"],
+        }
+    ]
+    assert routing["result_routes"][0]["route"] == "ollama_model_worker"
+
+    snapshot["results"][0]["node_id"] = "worker_wrong"
+    snapshot["results"][0]["output"]["model"] = "wrong-model"
+    failed = alpha_module._inference_proof_criteria(snapshot, {"job_1"}, set(), config)
+
+    assert failed["ollama_results_from_capable_nodes"]["passed"] is False
+    assert failed["ollama_result_models"]["passed"] is False
 
 
 def test_alpha_soak_runs_repeated_echo_rounds_and_redacts_reports(tmp_path):

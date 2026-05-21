@@ -145,6 +145,7 @@ python -m chatp2p.cli operator alpha-inference-proof --invite D:\ChatP2PData\alp
 
 Use `--mode auto --model MODEL` when you want the command to use Ollama if a live capable node advertises the model, and otherwise fall back to echo.
 Workers renew active leases while blocked inside local model inference, so an Ollama proof can run past the default 30-second lease timeout without losing the job.
+In Ollama mode the report includes `routing_summary`, which records capable live nodes, result node counts, per-result route labels, advertised models, and whether every result came from a node that advertised the requested model.
 
 If a node installs Ollama or pulls a new model after it already joined, refresh its capability profile and restart the managed worker:
 

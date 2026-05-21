@@ -85,12 +85,17 @@ def _load_or_create_identity(home: Path, name: str) -> NodeIdentity:
     return identity
 
 
-def _load_worker(home: Path, ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL) -> WorkerNode:
+def _load_worker(
+    home: Path,
+    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL,
+    ollama_timeout_seconds: float = 300.0,
+) -> WorkerNode:
     identity = _load_or_create_identity(home, "worker")
     return WorkerNode(
         identity=identity,
         capability_profile=load_node_capabilities(home),
         ollama_base_url=ollama_base_url,
+        ollama_timeout_seconds=ollama_timeout_seconds,
     )
 
 
@@ -312,7 +317,11 @@ def serve_coordinator(args: argparse.Namespace) -> None:
 
 
 def run_worker_once(args: argparse.Namespace) -> None:
-    worker = _load_worker(Path(args.home), ollama_base_url=args.ollama_base_url)
+    worker = _load_worker(
+        Path(args.home),
+        ollama_base_url=args.ollama_base_url,
+        ollama_timeout_seconds=getattr(args, "ollama_timeout_seconds", 300.0),
+    )
     client = _coordinator_client(args)
 
     _register_worker(client, worker)
@@ -410,7 +419,11 @@ def _lease_renewal_wait_seconds(lease: dict[str, Any]) -> float:
 
 
 def run_worker_loop(args: argparse.Namespace) -> None:
-    worker = _load_worker(Path(args.home), ollama_base_url=args.ollama_base_url)
+    worker = _load_worker(
+        Path(args.home),
+        ollama_base_url=args.ollama_base_url,
+        ollama_timeout_seconds=getattr(args, "ollama_timeout_seconds", 300.0),
+    )
     identity = worker.identity
     client = _coordinator_client(args)
     _register_worker(client, worker)
@@ -637,6 +650,7 @@ def alpha_inference_proof_command(args: argparse.Namespace) -> None:
                 min_verified_jobs=args.min_verified_jobs,
                 min_expected_worker_results=args.min_expected_worker_results,
                 timeout_seconds=args.timeout_seconds,
+                request_timeout_seconds=args.request_timeout_seconds,
                 poll_interval=args.poll_interval,
             )
         )
@@ -668,6 +682,7 @@ def alpha_soak_command(args: argparse.Namespace) -> None:
                 min_verified_jobs_per_round=args.min_verified_jobs_per_round,
                 min_expected_worker_results_per_round=args.min_expected_worker_results_per_round,
                 min_expected_worker_results_total=args.min_expected_worker_results_total,
+                request_timeout_seconds=args.request_timeout_seconds,
                 poll_interval=args.poll_interval,
                 stop_on_failure=args.stop_on_failure,
             )
@@ -900,6 +915,7 @@ def run_node_join_command(args: argparse.Namespace) -> None:
                 invite_path=Path(args.invite),
                 home=Path(args.home),
                 ollama_base_url=args.ollama_base_url,
+                ollama_timeout_seconds=args.ollama_timeout_seconds,
                 worker_interval=args.worker_interval,
                 startup_timeout_seconds=args.startup_timeout_seconds,
                 cpu_duration_seconds=args.cpu_duration_seconds,
@@ -1153,6 +1169,8 @@ def _build_managed_worker_argv(args: argparse.Namespace, coordinator_url: str) -
         coordinator_url,
         "--ollama-base-url",
         args.ollama_base_url,
+        "--ollama-timeout-seconds",
+        str(args.ollama_timeout_seconds),
         "--interval",
         str(args.worker_interval),
     ]
@@ -1212,6 +1230,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--ollama-base-url",
         default=DEFAULT_OLLAMA_BASE_URL,
         help="Local Ollama base URL for inference.ollama.v1 jobs",
+    )
+    join_parser.add_argument(
+        "--ollama-timeout-seconds",
+        default=300.0,
+        type=float,
+        help="Seconds to wait for one local Ollama inference request",
     )
     join_parser.add_argument("--worker-interval", default=5.0, type=float, help="Seconds between worker polling attempts")
     join_parser.add_argument(
@@ -1291,6 +1315,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--ollama-base-url",
         default=DEFAULT_OLLAMA_BASE_URL,
         help="Local Ollama base URL for inference.ollama.v1 jobs",
+    )
+    up_parser.add_argument(
+        "--ollama-timeout-seconds",
+        default=300.0,
+        type=float,
+        help="Seconds to wait for one local Ollama inference request",
     )
     up_parser.add_argument("--worker-interval", default=5.0, type=float, help="Seconds between worker polling attempts")
     up_parser.add_argument(
@@ -2071,6 +2101,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum time to wait for inference proof thresholds",
     )
     alpha_inference_proof_parser.add_argument(
+        "--request-timeout-seconds",
+        default=30.0,
+        type=float,
+        help="Seconds to wait for each coordinator HTTP request",
+    )
+    alpha_inference_proof_parser.add_argument(
         "--poll-interval",
         default=0.5,
         type=float,
@@ -2179,6 +2215,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.5,
         type=float,
         help="Seconds between coordinator snapshot polls inside each round",
+    )
+    alpha_soak_parser.add_argument(
+        "--request-timeout-seconds",
+        default=30.0,
+        type=float,
+        help="Seconds to wait for each coordinator HTTP request inside soak rounds",
     )
     alpha_soak_parser.add_argument(
         "--stop-on-failure",
@@ -2359,6 +2401,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_OLLAMA_BASE_URL,
         help="Local Ollama base URL for inference.ollama.v1 jobs",
     )
+    once_parser.add_argument(
+        "--ollama-timeout-seconds",
+        default=300.0,
+        type=float,
+        help="Seconds to wait for one local Ollama inference request",
+    )
     once_parser.set_defaults(func=run_worker_once)
 
     loop_parser = worker_subcommands.add_parser("loop", help="Continuously poll for jobs")
@@ -2369,6 +2417,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--ollama-base-url",
         default=DEFAULT_OLLAMA_BASE_URL,
         help="Local Ollama base URL for inference.ollama.v1 jobs",
+    )
+    loop_parser.add_argument(
+        "--ollama-timeout-seconds",
+        default=300.0,
+        type=float,
+        help="Seconds to wait for one local Ollama inference request",
     )
     loop_parser.add_argument("--interval", default=5.0, type=float, help="Seconds between polling attempts")
     loop_parser.add_argument("--max-jobs", default=None, type=int, help="Stop after completing this many jobs")

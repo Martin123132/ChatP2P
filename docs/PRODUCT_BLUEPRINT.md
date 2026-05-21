@@ -50,6 +50,12 @@ MVP scope:
 
 Do not begin with full decentralized pretraining. Begin with useful work the network can verify.
 
+## Future Lane: ISP Edge / Broadband Bundle
+
+Keep a second product architecture lane for an ISP-edge simulation, but do not let it interrupt the current alpha path. The idea is not "AI inside fibre"; it is a broadband-provider-style deployment model where a provider runs a coordinator, subscribers run light gateway/device nodes, regional edge workers provide stronger capacity, and policy routes work through local, provider-edge, trusted-peer, then placeholder fallback paths.
+
+The measurable future proof should cover provider config, subscriber creation, provider edge workers, route counts, credit movement, signed results, verification, and a JSON evidence report. No real billing, crypto, or ISP deployment claims belong in that milestone.
+
 ## Job Packet Format
 
 Every unit of work should be a signed job packet.

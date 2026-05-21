@@ -717,6 +717,8 @@ class Coordinator:
                     "winning_output_hash": verification["winning_output_hash"],
                     "output_hash_counts": verification["output_hash_counts"],
                     "verification_strategy": job.verification_strategy,
+                    "resource_requirements": job.resource_requirements,
+                    "routing": self._routing_summary_for_job(job),
                     "payload": job.payload,
                 }
             )
@@ -798,6 +800,36 @@ class Coordinator:
             "watch_order": ["queued", "tie_breaker", "pending_verification"],
             "flagged_order": ["tie_breaker"],
             "flagged_rule": "Flagged workers receive only conflicting pending jobs that need a tie-breaker.",
+        }
+
+    def _routing_summary_for_job(self, job: JobPacket) -> dict[str, Any]:
+        required_ollama_model = None
+        if job.job_type == "inference.ollama.v1":
+            required_ollama_model = job.resource_requirements.get("ollama_model") or job.payload.get("model")
+
+        eligible_nodes: list[dict[str, Any]] = []
+        now = time.time()
+        for node_id in sorted(self.known_nodes):
+            if not self._node_supports_job(node_id, job):
+                continue
+            capabilities = self.node_capabilities.get(node_id, {})
+            liveness_status = self._node_liveness_status(node_id, now=now)
+            eligible_nodes.append(
+                {
+                    "node_id": node_id,
+                    "liveness_status": liveness_status,
+                    "capability_tier": capabilities.get("capability_tier", "light"),
+                    "supported_job_types": capabilities.get("supported_job_types", []),
+                    "ollama_models": capabilities.get("ollama_models", []),
+                }
+            )
+
+        return {
+            "policy": "ollama_model_match" if required_ollama_model else "job_type_and_capability",
+            "required_ollama_model": required_ollama_model,
+            "eligible_node_count": len(eligible_nodes),
+            "live_eligible_node_count": sum(1 for node in eligible_nodes if node["liveness_status"] == "live"),
+            "eligible_nodes": eligible_nodes,
         }
 
     def _node_supports_job(self, node_id: str, job: JobPacket) -> bool:

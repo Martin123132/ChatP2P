@@ -167,6 +167,32 @@ def test_ollama_job_requires_requested_local_model():
     assert leased.payload["model"] == "tiny-test-model"
 
 
+def test_ollama_job_snapshot_exposes_model_routing_eligibility():
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    wrong_model_identity = NodeIdentity.generate(prefix="worker")
+    right_model_identity = NodeIdentity.generate(prefix="worker")
+    coordinator.register_node(
+        wrong_model_identity.public(),
+        capabilities=_ollama_capabilities(models=["mistral:7b"]),
+    )
+    coordinator.register_node(
+        right_model_identity.public(),
+        capabilities=_ollama_capabilities(models=["tiny-test-model"]),
+    )
+    job = coordinator.create_ollama_inference_job(model="tiny-test-model", prompt="hello")
+
+    job_summary = next(item for item in coordinator.snapshot()["jobs"] if item["job_id"] == job.job_id)
+
+    assert job_summary["resource_requirements"]["ollama_model"] == "tiny-test-model"
+    assert job_summary["routing"]["policy"] == "ollama_model_match"
+    assert job_summary["routing"]["required_ollama_model"] == "tiny-test-model"
+    assert job_summary["routing"]["eligible_node_count"] == 1
+    assert job_summary["routing"]["live_eligible_node_count"] == 1
+    assert [node["node_id"] for node in job_summary["routing"]["eligible_nodes"]] == [
+        right_model_identity.node_id
+    ]
+
+
 def test_ollama_payload_validation():
     coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
 

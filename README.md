@@ -93,6 +93,7 @@ chatp2p job create-ollama --model llama3.2:3b --prompt "Explain peer-to-peer AI 
 ```
 
 `inference.ollama.v1` jobs are leased only to workers that advertised Ollama support and the requested local model from `chatp2p node benchmark`.
+Coordinator snapshots include each job's `resource_requirements` and routing summary, including the required Ollama model and the currently eligible live nodes.
 After installing Ollama or pulling a new model, refresh the profile and restart the managed worker so the coordinator sees the new capability:
 
 ```bash
@@ -132,6 +133,7 @@ chatp2p proof ollama --model llama3.2:3b --workers 4 --jobs 8 --report .mesh/pro
 ```
 
 The Ollama proof preflights `/api/tags`, starts a local coordinator, registers separate worker identities that advertise the requested model, creates signed `inference.ollama.v1` jobs, and records result previews in the JSON report. Add `--mismatched-workers 1` to prove workers without the requested model register successfully but do not receive those jobs.
+Alpha inference reports also include a routing summary for Ollama mode and fail if a result comes from a node that did not advertise the requested model or if the returned model name does not match.
 
 ## Public Alpha Seed Mode
 

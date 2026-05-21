@@ -132,6 +132,7 @@ class AlphaJoinConfig:
     invite_path: Path
     home: Path = Path(".mesh")
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
+    ollama_timeout_seconds: float = 300.0
     worker_interval: float = 5.0
     startup_timeout_seconds: float = 15.0
     cpu_duration_seconds: float = 0.25
@@ -187,6 +188,7 @@ class AlphaInferenceProofConfig:
     min_verified_jobs: int | None = None
     min_expected_worker_results: int | None = None
     timeout_seconds: float = 120.0
+    request_timeout_seconds: float = 30.0
     poll_interval: float = 0.5
 
 
@@ -209,6 +211,7 @@ class AlphaSoakConfig:
     min_verified_jobs_per_round: int | None = None
     min_expected_worker_results_per_round: int | None = None
     min_expected_worker_results_total: int | None = None
+    request_timeout_seconds: float = 30.0
     poll_interval: float = 0.5
     stop_on_failure: bool = False
 
@@ -683,7 +686,11 @@ def run_alpha_inference_proof(config: AlphaInferenceProofConfig) -> dict[str, An
     _validate_inference_proof_config(config)
     invite = load_alpha_invite(config.invite_path)
     started_at = time.time()
-    client = CoordinatorClient(invite.coordinator, admission_token=invite.admission_token)
+    client = CoordinatorClient(
+        invite.coordinator,
+        admission_token=invite.admission_token,
+        timeout_seconds=config.request_timeout_seconds,
+    )
     errors: list[str] = []
     created_jobs: list[dict[str, Any]] = []
     initial_snapshot: dict[str, Any] | None = None
@@ -692,6 +699,7 @@ def run_alpha_inference_proof(config: AlphaInferenceProofConfig) -> dict[str, An
     initial_result_ids: set[tuple[str, str, str]] = set()
     selected_job_type = "inference.echo.v1"
     mode_decision: dict[str, Any] = {}
+    warnings: list[str] = []
 
     try:
         initial_snapshot = client.snapshot()
@@ -710,6 +718,7 @@ def run_alpha_inference_proof(config: AlphaInferenceProofConfig) -> dict[str, An
             created_jobs=[],
             criteria=_inference_proof_empty_criteria(config),
             errors=[f"{type(exc).__name__}: {exc}"],
+            warnings=warnings,
             initial_result_ids=initial_result_ids,
         )
         _write_json_report(config.report_path, report)
@@ -723,7 +732,7 @@ def run_alpha_inference_proof(config: AlphaInferenceProofConfig) -> dict[str, An
             job = client.create_job(
                 job_type=selected_job_type,
                 payload=_inference_proof_payload(config, selected_job_type, index),
-                ttl_seconds=300,
+                ttl_seconds=max(300, int(config.timeout_seconds + 60)),
             )
             created_jobs.append(
                 {
@@ -759,8 +768,7 @@ def run_alpha_inference_proof(config: AlphaInferenceProofConfig) -> dict[str, An
             ):
                 break
         except Exception as exc:
-            errors.append(f"{type(exc).__name__}: {exc}")
-            break
+            warnings.append(f"snapshot poll transient error: {type(exc).__name__}: {exc}")
         time.sleep(config.poll_interval)
 
     if final_snapshot is None:
@@ -795,6 +803,7 @@ def run_alpha_inference_proof(config: AlphaInferenceProofConfig) -> dict[str, An
         created_jobs=created_jobs,
         criteria=criteria,
         errors=errors,
+        warnings=warnings,
         initial_result_ids=initial_result_ids,
     )
     _write_json_report(config.report_path, report)
@@ -806,7 +815,11 @@ def run_alpha_soak(config: AlphaSoakConfig) -> dict[str, Any]:
     invite = load_alpha_invite(config.invite_path)
     started_at = time.time()
     deadline = started_at + config.duration_seconds if config.duration_seconds is not None else None
-    client = CoordinatorClient(invite.coordinator, admission_token=invite.admission_token)
+    client = CoordinatorClient(
+        invite.coordinator,
+        admission_token=invite.admission_token,
+        timeout_seconds=config.request_timeout_seconds,
+    )
     initial_snapshot: dict[str, Any] | None = None
     final_snapshot: dict[str, Any] | None = None
     errors: list[str] = []
@@ -864,6 +877,7 @@ def run_alpha_soak(config: AlphaSoakConfig) -> dict[str, Any]:
                 min_verified_jobs=config.min_verified_jobs_per_round,
                 min_expected_worker_results=_alpha_soak_required_expected_worker_results_per_round(config),
                 timeout_seconds=timeout_seconds,
+                request_timeout_seconds=config.request_timeout_seconds,
                 poll_interval=config.poll_interval,
             )
         )
@@ -1546,6 +1560,8 @@ def run_alpha_join(config: AlphaJoinConfig) -> dict[str, Any]:
         raise ValueError("--worker-interval must be greater than 0")
     if config.startup_timeout_seconds <= 0:
         raise ValueError("--startup-timeout-seconds must be greater than 0")
+    if config.ollama_timeout_seconds <= 0:
+        raise ValueError("--ollama-timeout-seconds must be greater than 0")
 
     invite = load_alpha_invite(config.invite_path)
     home = config.home.expanduser().resolve()
@@ -2837,6 +2853,8 @@ def _validate_inference_proof_config(config: AlphaInferenceProofConfig) -> None:
         raise ValueError("--min-expected-worker-results cannot be negative")
     if config.timeout_seconds <= 0:
         raise ValueError("--timeout-seconds must be greater than 0")
+    if config.request_timeout_seconds <= 0:
+        raise ValueError("--request-timeout-seconds must be greater than 0")
     if config.poll_interval <= 0:
         raise ValueError("--poll-interval must be greater than 0")
     if config.expected_worker_id is not None and not config.expected_worker_id.strip():
@@ -2882,6 +2900,8 @@ def _validate_alpha_soak_config(config: AlphaSoakConfig) -> None:
         raise ValueError("--expected-worker-id is required when --min-expected-worker-results-total is positive")
     if config.poll_interval <= 0:
         raise ValueError("--poll-interval must be greater than 0")
+    if config.request_timeout_seconds <= 0:
+        raise ValueError("--request-timeout-seconds must be greater than 0")
     if config.expected_worker_id is not None and not config.expected_worker_id.strip():
         raise ValueError("--expected-worker-id cannot be blank")
 
@@ -3089,6 +3109,25 @@ def _live_nodes_with_ollama_model(snapshot: dict[str, Any], model: str | None) -
     return capable
 
 
+def _live_nodes_supporting_job_type(snapshot: dict[str, Any], job_type: str | None) -> list[dict[str, Any]]:
+    if job_type is None:
+        return []
+    capable = []
+    for node in snapshot.get("nodes", []):
+        if node.get("liveness_status") != "live":
+            continue
+        if job_type not in node.get("supported_job_types", []):
+            continue
+        capable.append(
+            {
+                "node_id": node.get("node_id"),
+                "capability_tier": node.get("capability_tier"),
+                "supported_job_types": node.get("supported_job_types", []),
+            }
+        )
+    return capable
+
+
 def _node_ollama_models(node: dict[str, Any]) -> list[str]:
     top_level = node.get("ollama_models")
     if isinstance(top_level, list):
@@ -3165,6 +3204,108 @@ def _inference_proof_empty_criteria(config: AlphaInferenceProofConfig) -> dict[s
     }
 
 
+def _selected_job_type_from_created_jobs(created_jobs: list[dict[str, Any]]) -> str | None:
+    for job in created_jobs:
+        job_type = job.get("job_type")
+        if isinstance(job_type, str) and job_type:
+            return job_type
+    return None
+
+
+def _inference_routing_summary(
+    *,
+    selected_job_type: str | None,
+    model: str | None,
+    snapshot: dict[str, Any] | None,
+    created_job_ids: set[str],
+    initial_result_ids: set[tuple[str, str, str]],
+) -> dict[str, Any]:
+    requested_model = model.strip() if model else None
+    policy = "ollama_model_match" if selected_job_type == "inference.ollama.v1" else "generic_inference"
+    if snapshot is None:
+        return {
+            "policy": policy,
+            "selected_job_type": selected_job_type,
+            "requested_model": requested_model,
+            "capable_live_nodes": [],
+            "result_routes": [],
+            "result_node_counts": {},
+            "capable_result_count": 0,
+            "unexpected_result_count": 0,
+            "model_mismatch_count": 0,
+            "all_results_from_capable_nodes": policy != "ollama_model_match",
+            "all_result_models_match": policy != "ollama_model_match",
+        }
+
+    created_results = _snapshot_results_for_ids(snapshot, created_job_ids, initial_result_ids)
+    if policy == "ollama_model_match" and requested_model:
+        capable_live_nodes = _live_nodes_with_ollama_model(snapshot, requested_model)
+    else:
+        capable_live_nodes = _live_nodes_supporting_job_type(snapshot, selected_job_type)
+    result_routes: list[dict[str, Any]] = []
+    capable_result_count = 0
+    unexpected_result_count = 0
+    model_mismatch_count = 0
+
+    for result in created_results:
+        node_id = str(result.get("node_id"))
+        node = _snapshot_node(snapshot, node_id)
+        node_models = _node_ollama_models(node) if node else []
+        output = result.get("output", {})
+        output_model = output.get("model") if isinstance(output, dict) else None
+        supported_job_types = node.get("supported_job_types", []) if node else []
+        node_supports_selected_job_type = bool(
+            selected_job_type is not None and selected_job_type in supported_job_types
+        )
+        node_supports_ollama = "inference.ollama.v1" in supported_job_types
+        node_has_model = bool(requested_model and requested_model in node_models)
+        from_capable_node = (
+            (node_supports_ollama and node_has_model)
+            if policy == "ollama_model_match"
+            else node_supports_selected_job_type
+        )
+        model_matches = policy != "ollama_model_match" or output_model == requested_model
+
+        if from_capable_node:
+            capable_result_count += 1
+        else:
+            unexpected_result_count += 1
+        if not model_matches:
+            model_mismatch_count += 1
+
+        result_routes.append(
+            {
+                "job_id": result.get("job_id"),
+                "node_id": node_id,
+                "route": (
+                    "ollama_model_worker"
+                    if policy == "ollama_model_match" and from_capable_node
+                    else ("capable_worker" if from_capable_node else "unexpected_worker")
+                ),
+                "node_supports_selected_job_type": node_supports_selected_job_type,
+                "node_supports_ollama": node_supports_ollama,
+                "node_advertised_requested_model": node_has_model,
+                "advertised_models": node_models,
+                "output_model": output_model,
+                "output_model_matches_request": model_matches,
+            }
+        )
+
+    return {
+        "policy": policy,
+        "selected_job_type": selected_job_type,
+        "requested_model": requested_model,
+        "capable_live_nodes": capable_live_nodes,
+        "result_routes": result_routes,
+        "result_node_counts": _result_node_counts(created_results),
+        "capable_result_count": capable_result_count,
+        "unexpected_result_count": unexpected_result_count,
+        "model_mismatch_count": model_mismatch_count,
+        "all_results_from_capable_nodes": unexpected_result_count == 0,
+        "all_result_models_match": model_mismatch_count == 0,
+    }
+
+
 def _inference_proof_criteria(
     snapshot: dict[str, Any],
     created_job_ids: set[str],
@@ -3193,7 +3334,7 @@ def _inference_proof_criteria(
     )
     expected_worker_required = _inference_required_expected_worker_results(config)
 
-    return {
+    criteria = {
         "created_jobs": {
             "actual": len(created_job_ids),
             "required": config.jobs,
@@ -3245,6 +3386,25 @@ def _inference_proof_criteria(
             "passed": expected_worker_results >= expected_worker_required,
         },
     }
+    routing_summary = _inference_routing_summary(
+        selected_job_type=_selected_job_type_from_created_jobs(created_jobs),
+        model=config.model,
+        snapshot=snapshot,
+        created_job_ids=created_job_ids,
+        initial_result_ids=initial_result_ids,
+    )
+    if routing_summary["policy"] == "ollama_model_match":
+        criteria["ollama_results_from_capable_nodes"] = {
+            "actual": routing_summary["unexpected_result_count"],
+            "required": 0,
+            "passed": routing_summary["unexpected_result_count"] == 0,
+        }
+        criteria["ollama_result_models"] = {
+            "actual": routing_summary["model_mismatch_count"],
+            "required": 0,
+            "passed": routing_summary["model_mismatch_count"] == 0,
+        }
+    return criteria
 
 
 def _remote_proof_report(
@@ -3314,6 +3474,7 @@ def _inference_proof_report(
     created_jobs: list[dict[str, Any]],
     criteria: dict[str, Any],
     errors: list[str],
+    warnings: list[str],
     initial_result_ids: set[tuple[str, str, str]],
 ) -> dict[str, Any]:
     ok = not errors and all(item["passed"] for item in criteria.values())
@@ -3361,9 +3522,17 @@ def _inference_proof_report(
         "created_job_statuses": created_job_statuses,
         "created_results": _inference_result_summaries(created_results),
         "result_node_counts": _result_node_counts(created_results),
+        "routing_summary": _inference_routing_summary(
+            selected_job_type=selected_job_type,
+            model=config.model,
+            snapshot=final_snapshot,
+            created_job_ids=created_job_ids,
+            initial_result_ids=initial_result_ids,
+        ),
         "expected_worker": expected_worker,
         "criteria": criteria,
         "errors": errors,
+        "warnings": warnings,
     }
 
 
@@ -3458,6 +3627,7 @@ def _alpha_soak_round_summary(
         "expected_worker": expected_worker,
         "expected_worker_results": _criterion_actual(criteria, "expected_worker_results"),
         "result_node_counts": report.get("result_node_counts") or {},
+        "routing_summary": report.get("routing_summary") or {},
         "criteria": criteria,
         "errors": report.get("errors") or [],
     }
@@ -3791,6 +3961,7 @@ def _evidence_inference_proof_summary(report: dict[str, Any] | None) -> dict[str
         "verified_jobs": (criteria.get("verified_jobs") or {}).get("actual"),
         "disputed_jobs": (criteria.get("disputed_jobs") or {}).get("actual"),
         "result_node_counts": report.get("result_node_counts", {}),
+        "routing_summary": report.get("routing_summary", {}),
         "expected_worker": expected_worker or None,
         "expected_worker_contributed": bool(expected_worker_results.get("actual", 0) > 0),
         "criteria": criteria,
@@ -4098,6 +4269,8 @@ def _worker_loop_argv(config: AlphaJoinConfig, invite: AlphaInvite) -> list[str]
         invite.admission_token,
         "--ollama-base-url",
         config.ollama_base_url,
+        "--ollama-timeout-seconds",
+        str(config.ollama_timeout_seconds),
         "--interval",
         str(config.worker_interval),
     ]

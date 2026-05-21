@@ -20,9 +20,17 @@ from .packets import (
 
 
 class CoordinatorClient:
-    def __init__(self, base_url: str, admission_token: str | None = None):
+    def __init__(
+        self,
+        base_url: str,
+        admission_token: str | None = None,
+        timeout_seconds: float = 10.0,
+    ):
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be greater than 0")
         self.base_url = base_url.rstrip("/")
         self.admission_token = admission_token
+        self.timeout_seconds = timeout_seconds
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -35,7 +43,7 @@ class CoordinatorClient:
             method=method,
             headers=headers,
         )
-        with urlopen(request, timeout=10) as response:
+        with urlopen(request, timeout=self.timeout_seconds) as response:
             raw = response.read()
         if not raw:
             return {}
