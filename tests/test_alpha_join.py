@@ -17,6 +17,7 @@ from chatp2p.alpha import (
     AlphaInferenceProofConfig,
     AlphaInvite,
     AlphaJoinConfig,
+    NodeCapabilityRefreshConfig,
     AlphaPreflightConfig,
     AlphaRemoteProofConfig,
     AlphaRouteConfig,
@@ -35,6 +36,7 @@ from chatp2p.alpha import (
     run_alpha_route,
     run_alpha_smoke,
     run_alpha_status,
+    refresh_node_capabilities,
     run_node_watchdog,
     write_alpha_invite,
     _invite_url_check,
@@ -75,6 +77,16 @@ def _benchmark_report():
         },
     }
     report["capability_tier"] = "standard"
+    report["capabilities"] = capabilities_from_benchmark(report)
+    return report
+
+
+def _ollama_benchmark_report(models=("llama3.2:3b",)):
+    report = _benchmark_report()
+    report["model_runtimes"]["ollama"]["available"] = True
+    report["model_runtimes"]["ollama"]["path"] = "ollama"
+    report["model_runtimes"]["ollama"]["models"] = list(models)
+    report["model_runtimes"]["ollama"]["model_discovery_error"] = None
     report["capabilities"] = capabilities_from_benchmark(report)
     return report
 
@@ -833,6 +845,74 @@ def test_alpha_evidence_pack_can_include_inference_proof_sidecar(tmp_path):
     assert sidecar["schema"] == ALPHA_INFERENCE_PROOF_REPORT_SCHEMA
     assert token not in json.dumps(report)
     assert token not in sidecar_path.read_text(encoding="utf-8")
+
+
+def test_refresh_node_capabilities_saves_new_profile(tmp_path, monkeypatch):
+    home = tmp_path / ".mesh"
+    report_path = tmp_path / "refresh-report.json"
+    _save_benchmark(home)
+    monkeypatch.setattr(alpha_module, "run_node_benchmark", lambda **_: _ollama_benchmark_report())
+
+    report = refresh_node_capabilities(
+        NodeCapabilityRefreshConfig(
+            home=home,
+            report_path=report_path,
+        )
+    )
+
+    saved = json.loads((home / CAPABILITY_PROFILE_NAME).read_text(encoding="utf-8"))
+    assert report["schema"] == "chatp2p.node-capability-refresh-report.v1"
+    assert report["ok"] is True
+    assert report["status"] == "pass"
+    assert report["current_capabilities"]["ollama_models"] == ["llama3.2:3b"]
+    assert "inference.ollama.v1" in report["changes"]["supported_job_types_added"]
+    assert report["changes"]["ollama_models_added"] == ["llama3.2:3b"]
+    assert saved["capabilities"]["ollama_models"] == ["llama3.2:3b"]
+    assert report_path.exists()
+
+
+def test_refresh_node_capabilities_can_restart_worker_to_advertise_models(tmp_path, monkeypatch):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    home = tmp_path / ".mesh"
+    invite_path = tmp_path / "alpha-invite.json"
+    write_alpha_invite(invite_path, AlphaInvite.create(coordinator=coordinator_url, admission_token=token))
+    _save_benchmark(home)
+
+    try:
+        join_report = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=invite_path,
+                home=home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        monkeypatch.setattr(alpha_module, "run_node_benchmark", lambda **_: _ollama_benchmark_report())
+        report = refresh_node_capabilities(
+            NodeCapabilityRefreshConfig(
+                home=home,
+                invite_path=invite_path,
+                restart_worker=True,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+            )
+        )
+        snapshot = CoordinatorClient(coordinator_url, admission_token=token).snapshot()
+    finally:
+        stop_managed_process(home=home, role="worker")
+        _stop_server(server, thread)
+
+    node = next(node for node in snapshot["nodes"] if node["node_id"] == join_report["worker_node_id"])
+    assert join_report["ok"] is True
+    assert report["ok"] is True
+    assert report["restart"]["ok"] is True
+    assert report["advertisement"]["ok"] is True
+    assert report["managed_worker_after"]["alive"] is True
+    assert node["ollama_models"] == ["llama3.2:3b"]
+    assert "inference.ollama.v1" in node["supported_job_types"]
+    assert token not in json.dumps(report)
 
 
 def test_node_watchdog_starts_missing_worker_from_invite(tmp_path):

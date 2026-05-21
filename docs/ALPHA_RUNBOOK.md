@@ -140,10 +140,19 @@ The default mode is `echo`, which creates `inference.echo.v1` jobs. These jobs d
 When a live worker advertises a local Ollama model, run:
 
 ```bash
-python -m chatp2p.cli operator alpha-inference-proof --invite D:\ChatP2PData\alpha-invite.json --mode ollama --model llama3.2:3b --jobs 2 --min-live-workers 1 --report D:\ChatP2PData\alpha-ollama-proof-report.json
+python -m chatp2p.cli operator alpha-inference-proof --invite D:\ChatP2PData\alpha-invite.json --mode ollama --model llama3.2:3b --jobs 1 --min-live-workers 1 --report D:\ChatP2PData\alpha-ollama-proof-report.json
 ```
 
 Use `--mode auto --model MODEL` when you want the command to use Ollama if a live capable node advertises the model, and otherwise fall back to echo.
+Keep this proof to one job while the coordinator uses the default 30-second lease timeout; larger model batches need longer leases or worker-side lease renewal.
+
+If a node installs Ollama or pulls a new model after it already joined, refresh its capability profile and restart the managed worker:
+
+```bash
+python -m chatp2p.cli node refresh-capabilities --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --restart-worker --report D:\ChatP2PData\capability-refresh-report.json
+```
+
+Contributor machines use the same command with their own runtime home and private invite path. The refresh report shows newly advertised job types, Ollama models, and whether the restarted worker registered successfully.
 
 ## Alpha Status
 

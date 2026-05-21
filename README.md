@@ -93,6 +93,11 @@ chatp2p job create-ollama --model llama3.2:3b --prompt "Explain peer-to-peer AI 
 ```
 
 `inference.ollama.v1` jobs are leased only to workers that advertised Ollama support and the requested local model from `chatp2p node benchmark`.
+After installing Ollama or pulling a new model, refresh the profile and restart the managed worker so the coordinator sees the new capability:
+
+```bash
+chatp2p node refresh-capabilities --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --restart-worker --report D:\ChatP2PData\capability-refresh-report.json
+```
 Workers call local Ollama at `http://127.0.0.1:11434` by default; override that with `--ollama-base-url` on `chatp2p worker run-once` or `chatp2p worker loop`.
 
 Inspect jobs and state:
@@ -157,7 +162,7 @@ Troubleshooting:
 - token rejected: ask the operator for a fresh invite file
 - coordinator unreachable: confirm the `coordinator` URL in the invite is reachable from your machine
 - missing Ollama: deterministic and echo jobs still work, but Ollama jobs need Ollama running locally
-- stale capabilities: run `chatp2p node benchmark --home .mesh` again after installing Ollama or pulling models
+- stale capabilities: run `chatp2p node refresh-capabilities --home .mesh --invite alpha-invite.json --restart-worker` after installing Ollama or pulling models
 
 Workers and job producers can still pass the token manually when needed:
 

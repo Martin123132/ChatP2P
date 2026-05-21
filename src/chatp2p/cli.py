@@ -15,6 +15,7 @@ from .alpha import (
     AlphaEvidenceConfig,
     AlphaInferenceProofConfig,
     AlphaJoinConfig,
+    NodeCapabilityRefreshConfig,
     AlphaPreflightConfig,
     AlphaRemoteProofConfig,
     AlphaRouteConfig,
@@ -34,6 +35,7 @@ from .alpha import (
     run_alpha_route,
     run_alpha_smoke,
     run_alpha_status,
+    refresh_node_capabilities,
     run_node_watchdog,
 )
 from .benchmark import CAPABILITY_PROFILE_NAME, load_node_capabilities, run_node_benchmark, save_node_benchmark
@@ -752,6 +754,27 @@ def run_node_benchmark_command(args: argparse.Namespace) -> None:
     output = Path(args.output) if args.output else _capabilities_path(home)
     save_node_benchmark(report, output)
     print(json.dumps({"saved": str(output), **report}, indent=2, sort_keys=True))
+
+
+def run_node_refresh_capabilities_command(args: argparse.Namespace) -> None:
+    try:
+        report = refresh_node_capabilities(
+            NodeCapabilityRefreshConfig(
+                home=Path(args.home),
+                invite_path=Path(args.invite) if args.invite else None,
+                report_path=Path(args.report) if args.report else None,
+                restart_worker=args.restart_worker,
+                worker_interval=args.worker_interval,
+                startup_timeout_seconds=args.startup_timeout_seconds,
+                cpu_duration_seconds=args.cpu_duration_seconds,
+                ollama_base_url=args.ollama_base_url,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
 
 
 def run_node_doctor_command(args: argparse.Namespace) -> None:
@@ -1474,6 +1497,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="Local Ollama base URL for model discovery",
     )
     benchmark_parser.set_defaults(func=run_node_benchmark_command)
+
+    refresh_capabilities_parser = node_subcommands.add_parser(
+        "refresh-capabilities",
+        help="Re-benchmark this machine and optionally restart the managed worker",
+    )
+    refresh_capabilities_parser.add_argument("--home", default=".mesh", help="Directory for node identity and capabilities")
+    refresh_capabilities_parser.add_argument(
+        "--invite",
+        default=None,
+        help="Alpha invite path. Required when --restart-worker is used",
+    )
+    refresh_capabilities_parser.add_argument(
+        "--report",
+        default=None,
+        help="Optional JSON report path",
+    )
+    refresh_capabilities_parser.add_argument(
+        "--restart-worker",
+        action="store_true",
+        help="Restart the managed worker after saving refreshed capabilities",
+    )
+    refresh_capabilities_parser.add_argument(
+        "--worker-interval",
+        default=0.5,
+        type=float,
+        help="Worker loop interval when --restart-worker is used",
+    )
+    refresh_capabilities_parser.add_argument(
+        "--startup-timeout-seconds",
+        default=15.0,
+        type=float,
+        help="Seconds to wait for restarted worker registration",
+    )
+    refresh_capabilities_parser.add_argument(
+        "--cpu-duration-seconds",
+        default=0.25,
+        type=float,
+        help="Seconds to spend on the tiny CPU benchmark",
+    )
+    refresh_capabilities_parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="Local Ollama base URL for model discovery",
+    )
+    refresh_capabilities_parser.set_defaults(func=run_node_refresh_capabilities_command)
 
     doctor_parser = node_subcommands.add_parser(
         "doctor",

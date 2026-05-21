@@ -34,6 +34,7 @@ ALPHA_REMOTE_PROOF_REPORT_SCHEMA = "chatp2p.alpha-remote-proof-report.v1"
 ALPHA_STATUS_REPORT_SCHEMA = "chatp2p.alpha-status-report.v1"
 ALPHA_EVIDENCE_PACK_SCHEMA = "chatp2p.alpha-evidence-pack.v1"
 ALPHA_INFERENCE_PROOF_REPORT_SCHEMA = "chatp2p.alpha-inference-proof-report.v1"
+NODE_CAPABILITY_REFRESH_REPORT_SCHEMA = "chatp2p.node-capability-refresh-report.v1"
 NODE_WATCHDOG_REPORT_SCHEMA = "chatp2p.node-watchdog-report.v1"
 DEFAULT_ALPHA_NOTES = "ChatP2P public alpha invite. Keep this file private; it contains the admission token."
 DEFAULT_OPERATOR_TASK_NAME = "ChatP2P Operator Watchdog"
@@ -232,6 +233,18 @@ class NodeWatchdogConfig:
     coordinator_port: int | None = None
     lease_timeout_seconds: float = 30.0
     node_stale_seconds: float = 60.0
+    worker_interval: float = 0.5
+    startup_timeout_seconds: float = 15.0
+    cpu_duration_seconds: float = 0.25
+    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
+
+
+@dataclass(frozen=True)
+class NodeCapabilityRefreshConfig:
+    home: Path
+    invite_path: Path | None = None
+    report_path: Path | None = None
+    restart_worker: bool = False
     worker_interval: float = 0.5
     startup_timeout_seconds: float = 15.0
     cpu_duration_seconds: float = 0.25
@@ -1301,6 +1314,88 @@ def run_node_watchdog(config: NodeWatchdogConfig) -> dict[str, Any]:
     )
 
 
+def refresh_node_capabilities(config: NodeCapabilityRefreshConfig) -> dict[str, Any]:
+    _validate_capability_refresh_config(config)
+    started_at = time.time()
+    home = config.home.expanduser().resolve()
+    profile_path = home / CAPABILITY_PROFILE_NAME
+    previous_capabilities = load_node_capabilities(home)
+    worker_before = managed_process_status(home=home, role="worker")
+
+    benchmark_report = run_node_benchmark(
+        cpu_duration_seconds=config.cpu_duration_seconds,
+        ollama_base_url=config.ollama_base_url,
+    )
+    save_node_benchmark(benchmark_report, profile_path)
+    current_capabilities = benchmark_report["capabilities"]
+
+    restart_report = None
+    warnings: list[str] = []
+    if config.restart_worker:
+        assert config.invite_path is not None
+        restart_report = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=config.invite_path,
+                home=home,
+                ollama_base_url=config.ollama_base_url,
+                worker_interval=config.worker_interval,
+                startup_timeout_seconds=config.startup_timeout_seconds,
+                cpu_duration_seconds=config.cpu_duration_seconds,
+                force=True,
+            )
+        )
+        if restart_report.get("ok"):
+            invite = load_alpha_invite(config.invite_path)
+            advertisement_report = _wait_for_worker_capability_advertisement(
+                invite=invite,
+                node_id=restart_report["worker_node_id"],
+                expected_capabilities=current_capabilities,
+                timeout_seconds=config.startup_timeout_seconds,
+            )
+        else:
+            advertisement_report = None
+    elif worker_before.get("alive"):
+        advertisement_report = None
+        warnings.append("managed worker is running; restart it to advertise refreshed capabilities")
+    else:
+        advertisement_report = None
+
+    worker_after = managed_process_status(home=home, role="worker")
+    ok = restart_report.get("ok", False) if restart_report is not None else True
+    if advertisement_report is not None:
+        ok = ok and bool(advertisement_report.get("ok"))
+    status = "fail" if not ok else ("warn" if warnings else "pass")
+    report = {
+        "schema": NODE_CAPABILITY_REFRESH_REPORT_SCHEMA,
+        "ok": ok,
+        "status": status,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(time.time() - started_at, 3),
+        "home": str(home),
+        "profile_path": str(profile_path),
+        "config": {
+            "invite_path": str(config.invite_path) if config.invite_path else None,
+            "report_path": str(config.report_path) if config.report_path else None,
+            "restart_worker": config.restart_worker,
+            "worker_interval": config.worker_interval,
+            "startup_timeout_seconds": config.startup_timeout_seconds,
+            "cpu_duration_seconds": config.cpu_duration_seconds,
+            "ollama_base_url": config.ollama_base_url,
+        },
+        "previous_capabilities": _capability_refresh_summary(previous_capabilities),
+        "current_capabilities": _capability_refresh_summary(current_capabilities),
+        "changes": _capability_refresh_changes(previous_capabilities, current_capabilities),
+        "managed_worker_before": worker_before,
+        "managed_worker_after": worker_after,
+        "restart": restart_report,
+        "advertisement": advertisement_report,
+        "warnings": warnings,
+    }
+    if config.report_path is not None:
+        _write_json_report(config.report_path, report)
+    return report
+
+
 def run_alpha_join(config: AlphaJoinConfig) -> dict[str, Any]:
     if config.worker_interval <= 0:
         raise ValueError("--worker-interval must be greater than 0")
@@ -1980,6 +2075,107 @@ def _validate_node_watchdog_config(config: NodeWatchdogConfig) -> None:
         raise ValueError("--startup-timeout-seconds must be greater than 0")
     if config.cpu_duration_seconds < 0:
         raise ValueError("--cpu-duration-seconds cannot be negative")
+
+
+def _validate_capability_refresh_config(config: NodeCapabilityRefreshConfig) -> None:
+    if config.cpu_duration_seconds < 0:
+        raise ValueError("--cpu-duration-seconds cannot be negative")
+    if config.worker_interval <= 0:
+        raise ValueError("--worker-interval must be greater than 0")
+    if config.startup_timeout_seconds <= 0:
+        raise ValueError("--startup-timeout-seconds must be greater than 0")
+    if config.restart_worker and config.invite_path is None:
+        raise ValueError("--invite is required when --restart-worker is used")
+
+
+def _capability_refresh_summary(capabilities: dict[str, Any] | None) -> dict[str, Any] | None:
+    if capabilities is None:
+        return None
+    return {
+        "capability_tier": capabilities.get("capability_tier"),
+        "supported_job_types": capabilities.get("supported_job_types", []),
+        "ollama_available": _capability_ollama_available(capabilities),
+        "ollama_models": capabilities.get("ollama_models", []),
+        "gpu": capabilities.get("gpu", {}),
+        "benchmark": capabilities.get("benchmark", {}),
+    }
+
+
+def _capability_refresh_changes(
+    previous: dict[str, Any] | None,
+    current: dict[str, Any],
+) -> dict[str, Any]:
+    previous_supported = set((previous or {}).get("supported_job_types", []))
+    current_supported = set(current.get("supported_job_types", []))
+    previous_models = set((previous or {}).get("ollama_models", []))
+    current_models = set(current.get("ollama_models", []))
+    return {
+        "supported_job_types_added": sorted(current_supported - previous_supported),
+        "supported_job_types_removed": sorted(previous_supported - current_supported),
+        "ollama_models_added": sorted(current_models - previous_models),
+        "ollama_models_removed": sorted(previous_models - current_models),
+        "ollama_available_changed": _capability_ollama_available(previous) != _capability_ollama_available(current),
+        "capability_tier_changed": (previous or {}).get("capability_tier") != current.get("capability_tier"),
+    }
+
+
+def _capability_ollama_available(capabilities: dict[str, Any] | None) -> bool:
+    if capabilities is None:
+        return False
+    runtime = capabilities.get("model_runtimes", {}).get("ollama", {})
+    return bool(runtime.get("available")) if isinstance(runtime, dict) else False
+
+
+def _wait_for_worker_capability_advertisement(
+    *,
+    invite: AlphaInvite,
+    node_id: str,
+    expected_capabilities: dict[str, Any],
+    timeout_seconds: float,
+    poll_interval: float = 0.2,
+) -> dict[str, Any]:
+    client = CoordinatorClient(invite.coordinator, admission_token=invite.admission_token)
+    expected_supported = set(expected_capabilities.get("supported_job_types", []))
+    expected_models = set(expected_capabilities.get("ollama_models", []))
+    deadline = time.time() + timeout_seconds
+    last_node = None
+    last_error = None
+    while time.time() <= deadline:
+        try:
+            snapshot = client.snapshot()
+            last_node = _snapshot_node(snapshot, node_id)
+            if last_node is not None:
+                actual_supported = set(last_node.get("supported_job_types", []))
+                actual_models = set(_node_ollama_models(last_node))
+                if expected_supported.issubset(actual_supported) and expected_models.issubset(actual_models):
+                    return {
+                        "ok": True,
+                        "node_id": node_id,
+                        "supported_job_types": sorted(actual_supported),
+                        "ollama_models": sorted(actual_models),
+                    }
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        time.sleep(poll_interval)
+    return {
+        "ok": False,
+        "node_id": node_id,
+        "expected_supported_job_types": sorted(expected_supported),
+        "expected_ollama_models": sorted(expected_models),
+        "last_node": _capability_advertisement_node_summary(last_node),
+        "last_error": last_error,
+    }
+
+
+def _capability_advertisement_node_summary(node: dict[str, Any] | None) -> dict[str, Any] | None:
+    if node is None:
+        return None
+    return {
+        "node_id": node.get("node_id"),
+        "liveness_status": node.get("liveness_status"),
+        "supported_job_types": node.get("supported_job_types", []),
+        "ollama_models": _node_ollama_models(node),
+    }
 
 
 def _run_watchdog_iteration(

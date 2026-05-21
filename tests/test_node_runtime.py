@@ -127,6 +127,26 @@ def test_operator_alpha_evidence_command_parses(tmp_path):
     assert args.inference_jobs == 2
 
 
+def test_node_refresh_capabilities_command_parses(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "node",
+            "refresh-capabilities",
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--invite",
+            str(tmp_path / "alpha-invite.json"),
+            "--restart-worker",
+            "--report",
+            str(tmp_path / "refresh.json"),
+        ]
+    )
+
+    assert args.func.__name__ == "run_node_refresh_capabilities_command"
+    assert args.restart_worker is True
+
+
 def test_operator_alpha_inference_proof_command_parses(tmp_path):
     parser = build_parser()
     args = parser.parse_args(
