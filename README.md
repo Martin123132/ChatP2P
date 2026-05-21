@@ -160,6 +160,13 @@ chatp2p operator provider-ops-pack --provider-config D:\ChatP2PData\provider-con
 
 The ops pack creates `provider-edge-proof.json`, `provider-ops-pack-summary.json`, `provider-ops-pack-summary.md`, `provider-handoff.md`, and `OUT.zip` by default.
 
+To advertise provider roles from a real alpha worker and run provider-shaped work on the live coordinator:
+
+```bash
+chatp2p node refresh-capabilities --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --provider-config D:\ChatP2PData\provider-config.json --node-role provider_edge_worker --restart-worker
+chatp2p operator provider-remote-proof --invite D:\ChatP2PData\alpha-invite.json --provider-config D:\ChatP2PData\provider-config.json --expected-worker-id worker_... --jobs 10 --report D:\ChatP2PData\provider-remote-proof.json
+```
+
 ## Public Alpha Seed Mode
 
 Do not expose a coordinator to the internet without an admission token. Bootstrap an operator config and invite file:

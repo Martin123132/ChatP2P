@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .benchmark import CAPABILITY_PROFILE_NAME
+from .client import CoordinatorClient
 from .coordinator import Coordinator
 from .crypto import NodeIdentity
 from .packets import JobLeaseAcknowledgement, JobLeaseGrant, JobLeaseRequest, NodeRegistration
@@ -20,6 +21,7 @@ PROVIDER_CONFIG_SCHEMA = "chatp2p.provider-config.v1"
 PROVIDER_JOIN_REPORT_SCHEMA = "chatp2p.provider-join-report.v1"
 PROVIDER_EDGE_PROOF_REPORT_SCHEMA = "chatp2p.provider-edge-proof-report.v1"
 PROVIDER_OPS_PACK_SCHEMA = "chatp2p.provider-ops-pack.v1"
+PROVIDER_REMOTE_PROOF_REPORT_SCHEMA = "chatp2p.provider-remote-proof-report.v1"
 
 DEFAULT_ALLOWED_JOB_TYPES = ["eval.deterministic.v1", "inference.echo.v1"]
 DEFAULT_ROUTING_POLICY = ["prefer_local", "prefer_provider_edge", "prefer_trusted_peer", "fallback_placeholder"]
@@ -175,6 +177,23 @@ class ProviderOpsPackConfig:
     zip_path: Path | None = None
 
 
+@dataclass(frozen=True)
+class ProviderRemoteProofConfig:
+    provider_config_path: Path
+    coordinator_url: str
+    admission_token: str | None
+    report_path: Path
+    expected_worker_id: str | None = None
+    subscriber_id: str | None = None
+    jobs: int = 10
+    min_live_workers: int = 2
+    min_accepted_results: int | None = None
+    min_verified_jobs: int | None = None
+    min_expected_worker_results: int | None = None
+    timeout_seconds: float = 120.0
+    poll_interval: float = 0.5
+
+
 def bootstrap_provider_config(
     *,
     config_path: Path,
@@ -252,6 +271,43 @@ def join_provider_node(
             "subscriber_id": subscriber_id if subscriber_id else None,
         },
     }
+
+
+def apply_provider_metadata(
+    *,
+    capabilities: dict[str, Any],
+    config: ProviderConfig,
+    node_role: str,
+    subscriber_id: str | None = None,
+) -> dict[str, Any]:
+    if node_role not in PROVIDER_NODE_ROLES:
+        raise ValueError(f"unsupported provider node role: {node_role}")
+    if node_role.startswith("subscriber_") and not subscriber_id:
+        raise ValueError("subscriber_id is required for subscriber provider roles")
+    if subscriber_id and subscriber_id not in config.subscribers:
+        raise ValueError(f"unknown subscriber_id: {subscriber_id}")
+
+    updated = dict(capabilities)
+    supported = list(dict.fromkeys([*updated.get("supported_job_types", []), *config.allowed_job_types]))
+    subscriber = config.subscribers.get(subscriber_id or "", {})
+    updated.update(
+        {
+            "supported_job_types": supported,
+            "node_role": node_role,
+            "provider_role": node_role,
+            "provider_id": config.provider_id,
+            "provider_name": config.provider_name,
+            "region": config.region,
+            "subscriber_id": subscriber_id,
+            "subscriber_plan": subscriber.get("plan"),
+            "privacy_mode": dict(config.privacy_mode_defaults),
+        }
+    )
+    hardware = dict(updated.get("hardware", {}))
+    hardware.setdefault("provider_mode", "provider-edge-simulation")
+    hardware.setdefault("provider_role", node_role)
+    updated["hardware"] = hardware
+    return updated
 
 
 def run_provider_edge_proof(config: ProviderEdgeProofConfig) -> dict[str, Any]:
@@ -523,6 +579,106 @@ def run_provider_ops_pack(config: ProviderOpsPackConfig) -> dict[str, Any]:
     return report
 
 
+def run_provider_remote_proof(config: ProviderRemoteProofConfig) -> dict[str, Any]:
+    _validate_provider_remote_proof_config(config)
+    provider = load_provider_config(config.provider_config_path)
+    started_at = time.time()
+    client = CoordinatorClient(config.coordinator_url, admission_token=config.admission_token)
+    errors: list[str] = []
+    created_jobs: list[dict[str, Any]] = []
+    initial_snapshot: dict[str, Any] | None = None
+    final_snapshot: dict[str, Any] | None = None
+    initial_result_ids: set[tuple[str, str, str]] = set()
+
+    try:
+        initial_snapshot = client.snapshot()
+        initial_result_ids = _result_ids(initial_snapshot)
+    except Exception as exc:
+        errors.append(f"{type(exc).__name__}: {exc}")
+
+    subscriber_ids = _remote_subscriber_ids(provider, config.subscriber_id)
+    if not errors:
+        try:
+            for index in range(config.jobs):
+                route = _remote_requested_route(index)
+                subscriber_id = subscriber_ids[index % len(subscriber_ids)]
+                job = client.create_job(
+                    job_type="eval.deterministic.v1",
+                    payload=_provider_deterministic_payload(index),
+                    resource_requirements={
+                        "provider_mode": True,
+                        "provider_id": provider.provider_id,
+                        "subscriber_id": subscriber_id,
+                        "provider_route": route,
+                        "provider_routing_policy": provider.default_routing_policy,
+                        "remote_provider_proof": True,
+                    },
+                    ttl_seconds=300,
+                )
+                created_jobs.append(
+                    {
+                        "job_id": job.job_id,
+                        "job_type": job.job_type,
+                        "provider_route": route,
+                        "subscriber_id": subscriber_id,
+                        "verification_strategy": job.verification_strategy,
+                    }
+                )
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    created_job_ids = {job["job_id"] for job in created_jobs}
+    deadline = started_at + config.timeout_seconds
+    criteria = _provider_remote_empty_criteria(config)
+    while time.time() <= deadline and created_jobs and not errors:
+        try:
+            final_snapshot = client.snapshot()
+            criteria = _provider_remote_criteria(final_snapshot, created_job_ids, initial_result_ids, config)
+            if all(item["passed"] for item in criteria.values()):
+                break
+            if (
+                criteria["all_created_jobs_terminal"]["passed"]
+                and (
+                    not criteria["verified_jobs"]["passed"]
+                    or not criteria["disputed_jobs"]["passed"]
+                    or not criteria["expired_jobs"]["passed"]
+                )
+            ):
+                break
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+            break
+        time.sleep(config.poll_interval)
+
+    if final_snapshot is None and not errors:
+        try:
+            final_snapshot = client.snapshot()
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    if final_snapshot is not None:
+        criteria = _provider_remote_criteria(final_snapshot, created_job_ids, initial_result_ids, config)
+
+    if created_jobs and not errors and not all(item["passed"] for item in criteria.values()):
+        errors.append("provider remote proof criteria were not met before timeout")
+    if len(created_jobs) != config.jobs and not errors:
+        errors.append(f"created {len(created_jobs)} of {config.jobs} requested jobs")
+
+    report = _provider_remote_report(
+        config=config,
+        provider=provider,
+        duration_seconds=time.time() - started_at,
+        initial_snapshot=initial_snapshot,
+        final_snapshot=final_snapshot,
+        created_jobs=created_jobs,
+        criteria=criteria,
+        errors=errors,
+        initial_result_ids=initial_result_ids,
+    )
+    _write_json(config.report_path, report)
+    return report
+
+
 def provider_capability_profile(
     *,
     config: ProviderConfig,
@@ -695,6 +851,27 @@ def _validate_provider_ops_pack_config(config: ProviderOpsPackConfig) -> None:
     )
 
 
+def _validate_provider_remote_proof_config(config: ProviderRemoteProofConfig) -> None:
+    if not config.coordinator_url.strip():
+        raise ValueError("coordinator_url must be non-empty")
+    if config.jobs < 1:
+        raise ValueError("--jobs must be at least 1")
+    if config.min_live_workers < 0:
+        raise ValueError("--min-live-workers cannot be negative")
+    if config.min_accepted_results is not None and config.min_accepted_results < 0:
+        raise ValueError("--min-accepted-results cannot be negative")
+    if config.min_verified_jobs is not None and config.min_verified_jobs < 0:
+        raise ValueError("--min-verified-jobs cannot be negative")
+    if config.min_expected_worker_results is not None and config.min_expected_worker_results < 0:
+        raise ValueError("--min-expected-worker-results cannot be negative")
+    if config.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0")
+    if config.poll_interval <= 0:
+        raise ValueError("--poll-interval must be greater than 0")
+    if config.expected_worker_id is not None and not config.expected_worker_id.strip():
+        raise ValueError("--expected-worker-id cannot be blank")
+
+
 def _provider_public_summary(config: ProviderConfig) -> dict[str, Any]:
     return {
         "schema": config.schema,
@@ -705,6 +882,308 @@ def _provider_public_summary(config: ProviderConfig) -> dict[str, Any]:
         "default_routing_policy": list(config.default_routing_policy),
         "subscriber_count": len(config.subscribers),
     }
+
+
+def _provider_remote_required_accepted_results(config: ProviderRemoteProofConfig) -> int:
+    if config.min_accepted_results is not None:
+        return config.min_accepted_results
+    return config.jobs * 2
+
+
+def _provider_remote_required_verified_jobs(config: ProviderRemoteProofConfig) -> int:
+    if config.min_verified_jobs is not None:
+        return config.min_verified_jobs
+    return config.jobs
+
+
+def _provider_remote_required_expected_worker_results(config: ProviderRemoteProofConfig) -> int:
+    if config.min_expected_worker_results is not None:
+        return config.min_expected_worker_results
+    return 1 if config.expected_worker_id else 0
+
+
+def _provider_remote_empty_criteria(config: ProviderRemoteProofConfig) -> dict[str, Any]:
+    expected_required = _provider_remote_required_expected_worker_results(config)
+    return {
+        "created_jobs": {"actual": 0, "required": config.jobs, "passed": False},
+        "live_workers": {"actual": 0, "required": config.min_live_workers, "passed": False},
+        "accepted_results": {
+            "actual": 0,
+            "required": _provider_remote_required_accepted_results(config),
+            "passed": False,
+        },
+        "verified_jobs": {
+            "actual": 0,
+            "required": _provider_remote_required_verified_jobs(config),
+            "passed": False,
+        },
+        "all_created_jobs_terminal": {"actual": 0, "required": config.jobs, "passed": False},
+        "disputed_jobs": {"actual": 0, "required": 0, "passed": True},
+        "expired_jobs": {"actual": 0, "required": 0, "passed": True},
+        "incomplete_jobs": {"actual": config.jobs, "required": 0, "passed": False},
+        "expected_worker_live": {
+            "actual": 0,
+            "required": 1 if config.expected_worker_id else 0,
+            "passed": config.expected_worker_id is None,
+        },
+        "expected_worker_results": {
+            "actual": 0,
+            "required": expected_required,
+            "passed": expected_required == 0,
+        },
+    }
+
+
+def _provider_remote_criteria(
+    snapshot: dict[str, Any],
+    created_job_ids: set[str],
+    initial_result_ids: set[tuple[str, str, str]],
+    config: ProviderRemoteProofConfig,
+) -> dict[str, Any]:
+    status = snapshot.get("status", {})
+    created_jobs = _snapshot_jobs_for_ids(snapshot, created_job_ids)
+    created_results = _snapshot_results_for_ids(snapshot, created_job_ids, initial_result_ids)
+    status_counts = _job_status_counts(created_jobs)
+    terminal_jobs = sum(1 for job in created_jobs if job.get("status") in {"verified", "disputed", "expired"})
+    incomplete_jobs = sum(1 for job in created_jobs if job.get("status") not in {"verified", "disputed", "expired"})
+    expected_worker = _snapshot_node(snapshot, config.expected_worker_id) if config.expected_worker_id else None
+    expected_worker_live = int(
+        bool(expected_worker is not None and expected_worker.get("liveness_status") == "live")
+    )
+    expected_worker_results = (
+        sum(1 for result in created_results if result.get("node_id") == config.expected_worker_id)
+        if config.expected_worker_id
+        else 0
+    )
+    expected_results_required = _provider_remote_required_expected_worker_results(config)
+    return {
+        "created_jobs": {
+            "actual": len(created_job_ids),
+            "required": config.jobs,
+            "passed": len(created_job_ids) == config.jobs,
+        },
+        "live_workers": {
+            "actual": int(status.get("live_nodes") or 0),
+            "required": config.min_live_workers,
+            "passed": int(status.get("live_nodes") or 0) >= config.min_live_workers,
+        },
+        "accepted_results": {
+            "actual": len(created_results),
+            "required": _provider_remote_required_accepted_results(config),
+            "passed": len(created_results) >= _provider_remote_required_accepted_results(config),
+        },
+        "verified_jobs": {
+            "actual": status_counts["verified"],
+            "required": _provider_remote_required_verified_jobs(config),
+            "passed": status_counts["verified"] >= _provider_remote_required_verified_jobs(config),
+        },
+        "all_created_jobs_terminal": {
+            "actual": terminal_jobs,
+            "required": len(created_job_ids),
+            "passed": bool(created_job_ids) and terminal_jobs == len(created_job_ids),
+        },
+        "disputed_jobs": {
+            "actual": status_counts["disputed"],
+            "required": 0,
+            "passed": status_counts["disputed"] == 0,
+        },
+        "expired_jobs": {
+            "actual": status_counts["expired"],
+            "required": 0,
+            "passed": status_counts["expired"] == 0,
+        },
+        "incomplete_jobs": {
+            "actual": incomplete_jobs,
+            "required": 0,
+            "passed": incomplete_jobs == 0,
+        },
+        "expected_worker_live": {
+            "actual": expected_worker_live,
+            "required": 1 if config.expected_worker_id else 0,
+            "passed": config.expected_worker_id is None or expected_worker_live == 1,
+        },
+        "expected_worker_results": {
+            "actual": expected_worker_results,
+            "required": expected_results_required,
+            "passed": expected_worker_results >= expected_results_required,
+        },
+    }
+
+
+def _provider_remote_report(
+    *,
+    config: ProviderRemoteProofConfig,
+    provider: ProviderConfig,
+    duration_seconds: float,
+    initial_snapshot: dict[str, Any] | None,
+    final_snapshot: dict[str, Any] | None,
+    created_jobs: list[dict[str, Any]],
+    criteria: dict[str, Any],
+    errors: list[str],
+    initial_result_ids: set[tuple[str, str, str]],
+) -> dict[str, Any]:
+    created_job_ids = {job["job_id"] for job in created_jobs}
+    final_created_jobs = _snapshot_jobs_for_ids(final_snapshot or {}, created_job_ids)
+    created_results = _snapshot_results_for_ids(final_snapshot or {}, created_job_ids, initial_result_ids)
+    expected_worker = _snapshot_node(final_snapshot or {}, config.expected_worker_id) if config.expected_worker_id else None
+    ok = not errors and all(item["passed"] for item in criteria.values())
+    return {
+        "ok": ok,
+        "status": "pass" if ok else "fail",
+        "schema": PROVIDER_REMOTE_PROOF_REPORT_SCHEMA,
+        "generated_at": _iso_now(),
+        "duration_seconds": round(duration_seconds, 3),
+        "provider": _provider_public_summary(provider),
+        "coordinator": config.coordinator_url,
+        "parameters": {
+            "jobs": config.jobs,
+            "subscriber_id": config.subscriber_id,
+            "expected_worker_id": config.expected_worker_id,
+            "min_live_workers": config.min_live_workers,
+            "min_accepted_results": _provider_remote_required_accepted_results(config),
+            "min_verified_jobs": _provider_remote_required_verified_jobs(config),
+            "min_expected_worker_results": _provider_remote_required_expected_worker_results(config),
+            "timeout_seconds": config.timeout_seconds,
+            "poll_interval": config.poll_interval,
+        },
+        "baseline": {
+            "job_count": len((initial_snapshot or {}).get("jobs", [])),
+            "result_count": len((initial_snapshot or {}).get("results", [])),
+            "status": (initial_snapshot or {}).get("status"),
+        },
+        "created_jobs": created_jobs,
+        "created_job_statuses": final_created_jobs,
+        "created_job_status_counts": _job_status_counts(final_created_jobs),
+        "created_result_count": len(created_results),
+        "result_node_counts": _result_node_counts(created_results),
+        "requested_route_counts": _requested_route_counts(created_jobs),
+        "actual_result_route_counts": _actual_result_route_counts(final_snapshot or {}, created_results),
+        "expected_worker": _provider_remote_expected_worker_summary(expected_worker, created_results, config),
+        "provider_snapshot": provider_snapshot_summary(final_snapshot or {}),
+        "criteria": criteria,
+        "errors": errors,
+        "final_summary": {
+            "status": (final_snapshot or {}).get("status"),
+            "provider": (final_snapshot or {}).get("provider"),
+        },
+        "final_snapshot": final_snapshot,
+    }
+
+
+def _provider_remote_expected_worker_summary(
+    node: dict[str, Any] | None,
+    created_results: list[dict[str, Any]],
+    config: ProviderRemoteProofConfig,
+) -> dict[str, Any] | None:
+    if config.expected_worker_id is None:
+        return None
+    results = [result for result in created_results if result.get("node_id") == config.expected_worker_id]
+    return {
+        "node_id": config.expected_worker_id,
+        "present": node is not None,
+        "live": bool(node and node.get("liveness_status") == "live"),
+        "node_role": (node or {}).get("node_role"),
+        "provider_id": (node or {}).get("provider_id"),
+        "subscriber_id": (node or {}).get("subscriber_id"),
+        "supported_job_types": (node or {}).get("supported_job_types", []),
+        "result_count": len(results),
+    }
+
+
+def _remote_requested_route(index: int) -> str:
+    return ["local", "provider_edge", "peer"][index % 3]
+
+
+def _remote_subscriber_ids(provider: ProviderConfig, subscriber_id: str | None) -> list[str]:
+    if subscriber_id:
+        if subscriber_id not in provider.subscribers:
+            raise ValueError(f"unknown subscriber_id: {subscriber_id}")
+        return [subscriber_id]
+    if provider.subscribers:
+        return list(provider.subscribers)
+    return ["sub_demo_001"]
+
+
+def _result_ids(snapshot: dict[str, Any]) -> set[tuple[str, str, str]]:
+    return {
+        (str(result.get("job_id")), str(result.get("node_id")), str(result.get("output_hash")))
+        for result in snapshot.get("results", [])
+    }
+
+
+def _snapshot_node(snapshot: dict[str, Any], node_id: str | None) -> dict[str, Any] | None:
+    if not node_id:
+        return None
+    for node in snapshot.get("nodes", []):
+        if node.get("node_id") == node_id:
+            return node
+    return None
+
+
+def _snapshot_jobs_for_ids(snapshot: dict[str, Any], job_ids: set[str]) -> list[dict[str, Any]]:
+    return [job for job in snapshot.get("jobs", []) if job.get("job_id") in job_ids]
+
+
+def _snapshot_results_for_ids(
+    snapshot: dict[str, Any],
+    job_ids: set[str],
+    initial_result_ids: set[tuple[str, str, str]],
+) -> list[dict[str, Any]]:
+    return [
+        result for result in snapshot.get("results", [])
+        if result.get("job_id") in job_ids
+        and (
+            str(result.get("job_id")),
+            str(result.get("node_id")),
+            str(result.get("output_hash")),
+        )
+        not in initial_result_ids
+    ]
+
+
+def _job_status_counts(jobs: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"queued": 0, "leased": 0, "pending": 0, "verified": 0, "disputed": 0, "expired": 0}
+    for job in jobs:
+        status = str(job.get("status", "queued"))
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _result_node_counts(results: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for result in results:
+        node_id = str(result.get("node_id"))
+        counts[node_id] = counts.get(node_id, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _requested_route_counts(created_jobs: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {route: 0 for route in ROUTE_NAMES}
+    for job in created_jobs:
+        route = job.get("provider_route")
+        if route in counts:
+            counts[route] += 1
+    return counts
+
+
+def _actual_result_route_counts(snapshot: dict[str, Any], results: list[dict[str, Any]]) -> dict[str, int]:
+    nodes = {node.get("node_id"): node for node in snapshot.get("nodes", [])}
+    counts = {route: 0 for route in [*ROUTE_NAMES, "unknown"]}
+    for result in results:
+        role = (nodes.get(result.get("node_id")) or {}).get("node_role")
+        route = _route_for_node_role(role)
+        counts[route] += 1
+    return counts
+
+
+def _route_for_node_role(role: str | None) -> str:
+    if role in {"subscriber_gateway", "subscriber_device"}:
+        return "local"
+    if role == "provider_edge_worker":
+        return "provider_edge"
+    if role == "contributor_worker":
+        return "peer"
+    return "unknown"
 
 
 def _provider_ops_pack_report(

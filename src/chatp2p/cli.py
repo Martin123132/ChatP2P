@@ -64,11 +64,13 @@ from .proof import OllamaProofConfig, SwarmProofConfig, proof_summary, run_ollam
 from .provider import (
     ProviderEdgeProofConfig,
     ProviderOpsPackConfig,
+    ProviderRemoteProofConfig,
     add_provider_subscriber,
     bootstrap_provider_config,
     join_provider_node,
     run_provider_edge_proof,
     run_provider_ops_pack,
+    run_provider_remote_proof,
 )
 from .storage import SQLiteCoordinatorStore
 from .worker import WorkerNode
@@ -632,6 +634,55 @@ def provider_ops_pack_command(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def provider_remote_proof_command(args: argparse.Namespace) -> None:
+    try:
+        invite = load_alpha_invite(Path(args.invite))
+        report = run_provider_remote_proof(
+            ProviderRemoteProofConfig(
+                provider_config_path=Path(args.provider_config),
+                coordinator_url=invite.coordinator,
+                admission_token=invite.admission_token,
+                expected_worker_id=args.expected_worker_id,
+                subscriber_id=args.subscriber_id,
+                jobs=args.jobs,
+                min_live_workers=args.min_live_workers,
+                min_accepted_results=args.min_accepted_results,
+                min_verified_jobs=args.min_verified_jobs,
+                min_expected_worker_results=args.min_expected_worker_results,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval=args.poll_interval,
+                report_path=Path(args.report),
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(
+        json.dumps(
+            {
+                "ok": report["ok"],
+                "status": report["status"],
+                "schema": report["schema"],
+                "provider": report["provider"],
+                "coordinator": report["coordinator"],
+                "created_jobs": len(report["created_jobs"]),
+                "created_job_status_counts": report["created_job_status_counts"],
+                "created_result_count": report["created_result_count"],
+                "result_node_counts": report["result_node_counts"],
+                "requested_route_counts": report["requested_route_counts"],
+                "actual_result_route_counts": report["actual_result_route_counts"],
+                "expected_worker": report["expected_worker"],
+                "criteria": report["criteria"],
+                "errors": report["errors"],
+                "report": str(Path(args.report).expanduser().resolve()),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
 def provider_create_subscriber_command(args: argparse.Namespace) -> None:
     try:
         report = add_provider_subscriber(
@@ -1059,6 +1110,9 @@ def run_node_refresh_capabilities_command(args: argparse.Namespace) -> None:
                 home=Path(args.home),
                 invite_path=Path(args.invite) if args.invite else None,
                 report_path=Path(args.report) if args.report else None,
+                provider_config_path=Path(args.provider_config) if args.provider_config else None,
+                provider_node_role=args.node_role,
+                provider_subscriber_id=args.subscriber_id,
                 restart_worker=args.restart_worker,
                 worker_interval=args.worker_interval,
                 startup_timeout_seconds=args.startup_timeout_seconds,
@@ -1855,6 +1909,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional JSON report path",
     )
     refresh_capabilities_parser.add_argument(
+        "--provider-config",
+        default=None,
+        help="Provider config JSON used to stamp provider-mode role metadata into capabilities",
+    )
+    refresh_capabilities_parser.add_argument(
+        "--node-role",
+        default=None,
+        choices=[
+            "subscriber_gateway",
+            "subscriber_device",
+            "provider_edge_worker",
+            "contributor_worker",
+            "verifier",
+        ],
+        help="Provider-mode role to advertise with refreshed capabilities",
+    )
+    refresh_capabilities_parser.add_argument(
+        "--subscriber-id",
+        default=None,
+        help="Provider subscriber id for subscriber_gateway or subscriber_device roles",
+    )
+    refresh_capabilities_parser.add_argument(
         "--restart-worker",
         action="store_true",
         help="Restart the managed worker after saving refreshed capabilities",
@@ -1977,6 +2053,54 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip zip creation and leave the ops pack as a folder only",
     )
     provider_ops_pack_parser.set_defaults(func=provider_ops_pack_command)
+
+    provider_remote_proof_parser = operator_subcommands.add_parser(
+        "provider-remote-proof",
+        help="Run provider-shaped proof jobs on a live alpha coordinator",
+    )
+    provider_remote_proof_parser.add_argument("--invite", required=True, help="Path to alpha invite JSON")
+    provider_remote_proof_parser.add_argument("--provider-config", required=True, help="Path to provider config JSON")
+    provider_remote_proof_parser.add_argument("--expected-worker-id", default=None, help="Worker that should contribute")
+    provider_remote_proof_parser.add_argument("--subscriber-id", default=None, help="Subscriber id to attach to proof jobs")
+    provider_remote_proof_parser.add_argument("--jobs", default=10, type=int, help="Provider-shaped jobs to create")
+    provider_remote_proof_parser.add_argument(
+        "--min-live-workers",
+        default=2,
+        type=int,
+        help="Minimum live workers required",
+    )
+    provider_remote_proof_parser.add_argument(
+        "--min-accepted-results",
+        default=None,
+        type=int,
+        help="Minimum accepted results. Defaults to jobs * 2",
+    )
+    provider_remote_proof_parser.add_argument(
+        "--min-verified-jobs",
+        default=None,
+        type=int,
+        help="Minimum verified proof jobs. Defaults to jobs",
+    )
+    provider_remote_proof_parser.add_argument(
+        "--min-expected-worker-results",
+        default=None,
+        type=int,
+        help="Minimum results from expected worker. Defaults to 1 when expected worker is set",
+    )
+    provider_remote_proof_parser.add_argument(
+        "--timeout-seconds",
+        default=120.0,
+        type=float,
+        help="Maximum time to wait for proof thresholds",
+    )
+    provider_remote_proof_parser.add_argument(
+        "--poll-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between coordinator snapshot polls",
+    )
+    provider_remote_proof_parser.add_argument("--report", required=True, help="Path for provider remote proof report")
+    provider_remote_proof_parser.set_defaults(func=provider_remote_proof_command)
 
     bootstrap_alpha_parser = operator_subcommands.add_parser(
         "bootstrap-alpha",

@@ -56,6 +56,7 @@ from chatp2p.crypto import NodeIdentity
 from chatp2p.http_api import create_coordinator_http_server
 from chatp2p.node_runtime import managed_process_status, stop_managed_process
 from chatp2p.operator_config import OperatorConfig, write_operator_config
+from chatp2p.provider import ProviderConfig, write_provider_config
 
 
 def _benchmark_report():
@@ -1165,6 +1166,37 @@ def test_refresh_node_capabilities_saves_new_profile(tmp_path, monkeypatch):
     assert report["changes"]["ollama_models_added"] == ["llama3.2:3b"]
     assert saved["capabilities"]["ollama_models"] == ["llama3.2:3b"]
     assert report_path.exists()
+
+
+def test_refresh_node_capabilities_can_stamp_provider_role(tmp_path, monkeypatch):
+    home = tmp_path / ".mesh"
+    provider_config_path = tmp_path / "provider-config.json"
+    provider_config = ProviderConfig.create(
+        provider_name="Demo Fibre AI",
+        region="Hull",
+        provider_id="provider_demo",
+    )
+    write_provider_config(provider_config_path, provider_config)
+    monkeypatch.setattr(alpha_module, "run_node_benchmark", lambda **_: _benchmark_report())
+
+    report = refresh_node_capabilities(
+        NodeCapabilityRefreshConfig(
+            home=home,
+            provider_config_path=provider_config_path,
+            provider_node_role="contributor_worker",
+        )
+    )
+
+    saved = json.loads((home / CAPABILITY_PROFILE_NAME).read_text(encoding="utf-8"))
+    capabilities = saved["capabilities"]
+    assert report["ok"] is True
+    assert report["current_capabilities"]["provider_id"] == "provider_demo"
+    assert report["current_capabilities"]["node_role"] == "contributor_worker"
+    assert report["changes"]["provider_id_changed"] is True
+    assert capabilities["provider_id"] == "provider_demo"
+    assert capabilities["node_role"] == "contributor_worker"
+    assert capabilities["region"] == "Hull"
+    assert "eval.deterministic.v1" in capabilities["supported_job_types"]
 
 
 def test_refresh_node_capabilities_can_restart_worker_to_advertise_models(tmp_path, monkeypatch):

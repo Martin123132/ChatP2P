@@ -2,17 +2,26 @@ import json
 import zipfile
 
 from chatp2p.cli import build_parser
+from chatp2p.alpha import AlphaInvite, AlphaJoinConfig, run_alpha_join, write_alpha_invite
+from chatp2p.benchmark import CAPABILITY_PROFILE_NAME, capabilities_from_benchmark, save_node_benchmark
+from chatp2p.client import CoordinatorClient
 from chatp2p.coordinator import Coordinator
 from chatp2p.crypto import NodeIdentity
+from chatp2p.http_api import create_coordinator_http_server
+from chatp2p.node_runtime import stop_managed_process
+from chatp2p.operator_config import OperatorConfig
 from chatp2p.packets import NodeRegistration
 from chatp2p.provider import (
     PROVIDER_CONFIG_SCHEMA,
     PROVIDER_EDGE_PROOF_REPORT_SCHEMA,
     PROVIDER_OPS_PACK_SCHEMA,
+    PROVIDER_REMOTE_PROOF_REPORT_SCHEMA,
     ProviderConfig,
     ProviderEdgeProofConfig,
     ProviderOpsPackConfig,
+    ProviderRemoteProofConfig,
     add_provider_subscriber,
+    apply_provider_metadata,
     bootstrap_provider_config,
     join_provider_node,
     load_provider_config,
@@ -20,10 +29,74 @@ from chatp2p.provider import (
     provider_snapshot_summary,
     run_provider_edge_proof,
     run_provider_ops_pack,
+    run_provider_remote_proof,
     select_provider_route,
     write_provider_config,
 )
 from chatp2p.worker import WorkerNode
+import threading
+
+
+def _benchmark_report():
+    report = {
+        "schema": "chatp2p.node-benchmark.v1",
+        "hardware": {
+            "machine": "test",
+            "processor": "test",
+            "python_version": "3.13",
+            "system": "test",
+            "system_version": "test",
+            "cpu_count": 4,
+            "ram_total_mb": 8_000,
+            "disk_free_mb": 100_000,
+        },
+        "gpu": {"available": False, "provider": None, "devices": [], "total_vram_mb": None},
+        "benchmark": {"cpu_iterations_per_second": 10_000},
+        "model_runtimes": {
+            "ollama": {
+                "available": False,
+                "path": None,
+                "base_url": "http://127.0.0.1:11434",
+                "models": [],
+            },
+            "llama_cpp": {"available": False, "path": None, "command": None},
+            "vllm": {"available": False},
+        },
+    }
+    report["capability_tier"] = "standard"
+    report["capabilities"] = capabilities_from_benchmark(report)
+    return report
+
+
+def _start_public_alpha(token="alpha-token-123"):
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    operator_config = OperatorConfig(public_alpha=True, admission_token=token)
+    server = create_coordinator_http_server(
+        coordinator,
+        host="127.0.0.1",
+        port=0,
+        operator_config=operator_config,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    return server, thread, f"http://{host}:{port}"
+
+
+def _stop_server(server, thread):
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=2)
+
+
+def _save_provider_benchmark(home, provider, role):
+    report = _benchmark_report()
+    report["capabilities"] = apply_provider_metadata(
+        capabilities=report["capabilities"],
+        config=provider,
+        node_role=role,
+    )
+    save_node_benchmark(report, home / CAPABILITY_PROFILE_NAME)
 
 
 def test_provider_config_creation_and_subscriber_round_trip(tmp_path):
@@ -247,6 +320,82 @@ def test_provider_ops_pack_builds_summary_handoff_and_zip(tmp_path):
     assert "provider-ops-pack/provider-handoff.md" in names
 
 
+def test_provider_remote_proof_runs_on_public_alpha_with_provider_roles(tmp_path):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    provider_config_path = tmp_path / "provider-config.json"
+    provider = ProviderConfig.create(
+        provider_name="Demo Fibre AI",
+        region="Hull",
+        provider_id="provider_demo",
+    ).with_subscriber("sub_demo_001", "Broadband AI Plus")
+    write_provider_config(provider_config_path, provider)
+    invite_path = tmp_path / "alpha-invite.json"
+    write_alpha_invite(invite_path, AlphaInvite.create(coordinator=coordinator_url, admission_token=token))
+    operator_home = tmp_path / ".mesh-operator"
+    partner_home = tmp_path / ".mesh-partner"
+    report_path = tmp_path / "provider-remote-proof.json"
+    _save_provider_benchmark(operator_home, provider, "provider_edge_worker")
+    _save_provider_benchmark(partner_home, provider, "contributor_worker")
+
+    try:
+        operator_join = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=invite_path,
+                home=operator_home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        partner_join = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=invite_path,
+                home=partner_home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        report = run_provider_remote_proof(
+            ProviderRemoteProofConfig(
+                provider_config_path=provider_config_path,
+                coordinator_url=coordinator_url,
+                admission_token=token,
+                expected_worker_id=partner_join["worker_node_id"],
+                subscriber_id="sub_demo_001",
+                jobs=3,
+                min_live_workers=2,
+                timeout_seconds=15.0,
+                poll_interval=0.2,
+                report_path=report_path,
+            )
+        )
+        snapshot = CoordinatorClient(coordinator_url, admission_token=token).snapshot()
+    finally:
+        stop_managed_process(home=operator_home, role="worker")
+        stop_managed_process(home=partner_home, role="worker")
+        _stop_server(server, thread)
+
+    expected_node = next(node for node in snapshot["nodes"] if node["node_id"] == partner_join["worker_node_id"])
+    assert operator_join["ok"] is True
+    assert partner_join["ok"] is True
+    assert expected_node["node_role"] == "contributor_worker"
+    assert report["schema"] == PROVIDER_REMOTE_PROOF_REPORT_SCHEMA
+    assert report["ok"] is True
+    assert report["criteria"]["verified_jobs"]["actual"] == 3
+    assert report["criteria"]["expected_worker_results"]["actual"] >= 1
+    assert report["expected_worker"]["node_role"] == "contributor_worker"
+    assert report["requested_route_counts"] == {
+        "fallback_placeholder": 0,
+        "local": 1,
+        "peer": 1,
+        "provider_edge": 1,
+    }
+    assert report_path.exists()
+    assert token not in json.dumps(report)
+
+
 def test_provider_cli_commands_parse(tmp_path):
     parser = build_parser()
 
@@ -306,9 +455,26 @@ def test_provider_cli_commands_parse(tmp_path):
             "3",
         ]
     )
+    remote_proof = parser.parse_args(
+        [
+            "operator",
+            "provider-remote-proof",
+            "--invite",
+            str(tmp_path / "alpha-invite.json"),
+            "--provider-config",
+            str(tmp_path / "provider-config.json"),
+            "--expected-worker-id",
+            "worker_test",
+            "--jobs",
+            "3",
+            "--report",
+            str(tmp_path / "provider-remote-proof.json"),
+        ]
+    )
 
     assert bootstrap.func.__name__ == "bootstrap_provider_command"
     assert subscriber.func.__name__ == "provider_create_subscriber_command"
     assert join.func.__name__ == "node_join_provider_command"
     assert proof.func.__name__ == "run_proof_provider_edge"
     assert ops_pack.func.__name__ == "provider_ops_pack_command"
+    assert remote_proof.func.__name__ == "provider_remote_proof_command"

@@ -103,3 +103,32 @@ The pack writes:
 - `D:\ChatP2PData\provider-ops-pack.zip`
 
 Pass means the underlying provider proof passed, disputes stayed at `0`, no job routed to `fallback_placeholder`, and the zip was created unless `--no-zip` was used.
+
+## Live Alpha Bridge
+
+Provider metadata can be advertised by real alpha workers without changing the signed registration protocol. Refresh a worker capability profile with a provider role and restart it:
+
+```powershell
+python -m chatp2p.cli node refresh-capabilities `
+  --home D:\ChatP2PData\.mesh `
+  --invite D:\ChatP2PData\alpha-invite.json `
+  --provider-config D:\ChatP2PData\provider-config.json `
+  --node-role provider_edge_worker `
+  --restart-worker `
+  --report D:\ChatP2PData\provider-role-refresh-report.json
+```
+
+For a trusted outside worker, use `--node-role contributor_worker` on their machine after they pull the latest code and have the same provider config file.
+
+Then run a live provider-shaped proof against the alpha coordinator:
+
+```powershell
+python -m chatp2p.cli operator provider-remote-proof `
+  --invite D:\ChatP2PData\alpha-invite.json `
+  --provider-config D:\ChatP2PData\provider-config.json `
+  --expected-worker-id worker_87b5cefe53e67c6c `
+  --jobs 10 `
+  --report D:\ChatP2PData\provider-remote-proof.json
+```
+
+The report schema is `chatp2p.provider-remote-proof-report.v1`. It records requested provider routes, actual result routes inferred from worker roles, result counts per node, expected-worker contribution, provider snapshot stats, and the final coordinator snapshot. This proves provider-shaped work can run across the existing alpha coordinator-worker network.

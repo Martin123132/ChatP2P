@@ -24,6 +24,7 @@ from .crypto import NodeIdentity
 from .node_runtime import managed_process_status, start_managed_process, stop_managed_process
 from .ollama import DEFAULT_OLLAMA_BASE_URL
 from .operator_config import DEFAULT_ALLOWED_JOB_TYPES, OperatorConfig, write_operator_config
+from .provider import apply_provider_metadata, load_provider_config
 
 
 ALPHA_INVITE_SCHEMA = "chatp2p.alpha-invite.v1"
@@ -295,6 +296,9 @@ class NodeCapabilityRefreshConfig:
     home: Path
     invite_path: Path | None = None
     report_path: Path | None = None
+    provider_config_path: Path | None = None
+    provider_node_role: str | None = None
+    provider_subscriber_id: str | None = None
     restart_worker: bool = False
     worker_interval: float = 0.5
     startup_timeout_seconds: float = 15.0
@@ -1692,6 +1696,14 @@ def refresh_node_capabilities(config: NodeCapabilityRefreshConfig) -> dict[str, 
         cpu_duration_seconds=config.cpu_duration_seconds,
         ollama_base_url=config.ollama_base_url,
     )
+    if config.provider_config_path is not None:
+        provider_config = load_provider_config(config.provider_config_path)
+        benchmark_report["capabilities"] = apply_provider_metadata(
+            capabilities=benchmark_report["capabilities"],
+            config=provider_config,
+            node_role=config.provider_node_role or "contributor_worker",
+            subscriber_id=config.provider_subscriber_id,
+        )
     save_node_benchmark(benchmark_report, profile_path)
     current_capabilities = benchmark_report["capabilities"]
 
@@ -1747,6 +1759,9 @@ def refresh_node_capabilities(config: NodeCapabilityRefreshConfig) -> dict[str, 
             "startup_timeout_seconds": config.startup_timeout_seconds,
             "cpu_duration_seconds": config.cpu_duration_seconds,
             "ollama_base_url": config.ollama_base_url,
+            "provider_config_path": str(config.provider_config_path) if config.provider_config_path else None,
+            "provider_node_role": config.provider_node_role,
+            "provider_subscriber_id": config.provider_subscriber_id,
         },
         "previous_capabilities": _capability_refresh_summary(previous_capabilities),
         "current_capabilities": _capability_refresh_summary(current_capabilities),
@@ -2477,6 +2492,10 @@ def _validate_capability_refresh_config(config: NodeCapabilityRefreshConfig) -> 
         raise ValueError("--startup-timeout-seconds must be greater than 0")
     if config.restart_worker and config.invite_path is None:
         raise ValueError("--invite is required when --restart-worker is used")
+    if config.provider_node_role is not None and config.provider_config_path is None:
+        raise ValueError("--provider-config is required when --node-role is used")
+    if config.provider_subscriber_id is not None and config.provider_config_path is None:
+        raise ValueError("--provider-config is required when --subscriber-id is used")
 
 
 def _capability_refresh_summary(capabilities: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -2487,6 +2506,10 @@ def _capability_refresh_summary(capabilities: dict[str, Any] | None) -> dict[str
         "supported_job_types": capabilities.get("supported_job_types", []),
         "ollama_available": _capability_ollama_available(capabilities),
         "ollama_models": capabilities.get("ollama_models", []),
+        "provider_id": capabilities.get("provider_id"),
+        "node_role": capabilities.get("node_role"),
+        "subscriber_id": capabilities.get("subscriber_id"),
+        "region": capabilities.get("region"),
         "gpu": capabilities.get("gpu", {}),
         "benchmark": capabilities.get("benchmark", {}),
     }
@@ -2507,6 +2530,9 @@ def _capability_refresh_changes(
         "ollama_models_removed": sorted(previous_models - current_models),
         "ollama_available_changed": _capability_ollama_available(previous) != _capability_ollama_available(current),
         "capability_tier_changed": (previous or {}).get("capability_tier") != current.get("capability_tier"),
+        "provider_id_changed": (previous or {}).get("provider_id") != current.get("provider_id"),
+        "node_role_changed": (previous or {}).get("node_role") != current.get("node_role"),
+        "subscriber_id_changed": (previous or {}).get("subscriber_id") != current.get("subscriber_id"),
     }
 
 
@@ -2528,6 +2554,9 @@ def _wait_for_worker_capability_advertisement(
     client = CoordinatorClient(invite.coordinator, admission_token=invite.admission_token)
     expected_supported = set(expected_capabilities.get("supported_job_types", []))
     expected_models = set(expected_capabilities.get("ollama_models", []))
+    expected_provider_id = expected_capabilities.get("provider_id")
+    expected_node_role = expected_capabilities.get("node_role")
+    expected_subscriber_id = expected_capabilities.get("subscriber_id")
     deadline = time.time() + timeout_seconds
     last_node = None
     last_error = None
@@ -2538,12 +2567,20 @@ def _wait_for_worker_capability_advertisement(
             if last_node is not None:
                 actual_supported = set(last_node.get("supported_job_types", []))
                 actual_models = set(_node_ollama_models(last_node))
-                if expected_supported.issubset(actual_supported) and expected_models.issubset(actual_models):
+                provider_matches = (
+                    (not expected_provider_id or last_node.get("provider_id") == expected_provider_id)
+                    and (not expected_node_role or last_node.get("node_role") == expected_node_role)
+                    and (expected_subscriber_id is None or last_node.get("subscriber_id") == expected_subscriber_id)
+                )
+                if expected_supported.issubset(actual_supported) and expected_models.issubset(actual_models) and provider_matches:
                     return {
                         "ok": True,
                         "node_id": node_id,
                         "supported_job_types": sorted(actual_supported),
                         "ollama_models": sorted(actual_models),
+                        "provider_id": last_node.get("provider_id"),
+                        "node_role": last_node.get("node_role"),
+                        "subscriber_id": last_node.get("subscriber_id"),
                     }
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
@@ -2553,6 +2590,9 @@ def _wait_for_worker_capability_advertisement(
         "node_id": node_id,
         "expected_supported_job_types": sorted(expected_supported),
         "expected_ollama_models": sorted(expected_models),
+        "expected_provider_id": expected_provider_id,
+        "expected_node_role": expected_node_role,
+        "expected_subscriber_id": expected_subscriber_id,
         "last_node": _capability_advertisement_node_summary(last_node),
         "last_error": last_error,
     }
@@ -2566,6 +2606,9 @@ def _capability_advertisement_node_summary(node: dict[str, Any] | None) -> dict[
         "liveness_status": node.get("liveness_status"),
         "supported_job_types": node.get("supported_job_types", []),
         "ollama_models": _node_ollama_models(node),
+        "provider_id": node.get("provider_id"),
+        "node_role": node.get("node_role"),
+        "subscriber_id": node.get("subscriber_id"),
     }
 
 
