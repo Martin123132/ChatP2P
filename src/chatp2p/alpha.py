@@ -34,6 +34,7 @@ ALPHA_REMOTE_PROOF_REPORT_SCHEMA = "chatp2p.alpha-remote-proof-report.v1"
 ALPHA_STATUS_REPORT_SCHEMA = "chatp2p.alpha-status-report.v1"
 ALPHA_EVIDENCE_PACK_SCHEMA = "chatp2p.alpha-evidence-pack.v1"
 ALPHA_INFERENCE_PROOF_REPORT_SCHEMA = "chatp2p.alpha-inference-proof-report.v1"
+ALPHA_SOAK_REPORT_SCHEMA = "chatp2p.alpha-soak-report.v1"
 NODE_CAPABILITY_REFRESH_REPORT_SCHEMA = "chatp2p.node-capability-refresh-report.v1"
 NODE_WATCHDOG_REPORT_SCHEMA = "chatp2p.node-watchdog-report.v1"
 DEFAULT_ALPHA_NOTES = "ChatP2P public alpha invite. Keep this file private; it contains the admission token."
@@ -187,6 +188,28 @@ class AlphaInferenceProofConfig:
     min_expected_worker_results: int | None = None
     timeout_seconds: float = 120.0
     poll_interval: float = 0.5
+
+
+@dataclass(frozen=True)
+class AlphaSoakConfig:
+    invite_path: Path
+    report_path: Path
+    jobs_per_round: int = 10
+    rounds: int = 5
+    duration_seconds: float | None = None
+    round_timeout_seconds: float = 120.0
+    round_interval_seconds: float = 5.0
+    mode: str = "echo"
+    model: str | None = None
+    prompt: str = DEFAULT_INFERENCE_PROOF_PROMPT
+    temperature: float | None = None
+    expected_worker_id: str | None = None
+    min_live_workers: int = 1
+    min_accepted_results_per_round: int | None = None
+    min_verified_jobs_per_round: int | None = None
+    min_expected_worker_results_per_round: int | None = None
+    poll_interval: float = 0.5
+    stop_on_failure: bool = False
 
 
 @dataclass(frozen=True)
@@ -772,6 +795,127 @@ def run_alpha_inference_proof(config: AlphaInferenceProofConfig) -> dict[str, An
         criteria=criteria,
         errors=errors,
         initial_result_ids=initial_result_ids,
+    )
+    _write_json_report(config.report_path, report)
+    return report
+
+
+def run_alpha_soak(config: AlphaSoakConfig) -> dict[str, Any]:
+    _validate_alpha_soak_config(config)
+    invite = load_alpha_invite(config.invite_path)
+    started_at = time.time()
+    deadline = started_at + config.duration_seconds if config.duration_seconds is not None else None
+    client = CoordinatorClient(invite.coordinator, admission_token=invite.admission_token)
+    initial_snapshot: dict[str, Any] | None = None
+    final_snapshot: dict[str, Any] | None = None
+    errors: list[str] = []
+    round_summaries: list[dict[str, Any]] = []
+    stop_reason = "round_limit_reached"
+
+    try:
+        initial_snapshot = client.snapshot()
+    except Exception as exc:
+        errors.append(f"initial snapshot failed: {type(exc).__name__}: {exc}")
+        stop_reason = "initial_snapshot_failed"
+
+    for round_index in range(config.rounds):
+        round_number = round_index + 1
+        if errors and config.stop_on_failure:
+            stop_reason = "failure"
+            break
+        if errors and not round_summaries:
+            break
+        if round_index > 0:
+            if deadline is not None and time.time() >= deadline:
+                stop_reason = "duration_limit_reached"
+                break
+            if config.round_interval_seconds > 0:
+                sleep_for = config.round_interval_seconds
+                if deadline is not None:
+                    sleep_for = min(sleep_for, max(0.0, deadline - time.time()))
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+        if deadline is not None and round_index > 0 and time.time() >= deadline:
+            stop_reason = "duration_limit_reached"
+            break
+
+        timeout_seconds = config.round_timeout_seconds
+        if deadline is not None:
+            remaining = deadline - time.time()
+            if remaining <= 0 and round_summaries:
+                stop_reason = "duration_limit_reached"
+                break
+            timeout_seconds = max(config.poll_interval, min(config.round_timeout_seconds, max(remaining, 0.0)))
+
+        round_report_path = _alpha_soak_round_report_path(config.report_path, round_number)
+        round_report = run_alpha_inference_proof(
+            AlphaInferenceProofConfig(
+                invite_path=config.invite_path,
+                report_path=round_report_path,
+                jobs=config.jobs_per_round,
+                mode=config.mode,
+                model=config.model,
+                prompt=_alpha_soak_round_prompt(config, round_number),
+                temperature=config.temperature,
+                expected_worker_id=config.expected_worker_id,
+                min_live_workers=config.min_live_workers,
+                min_accepted_results=config.min_accepted_results_per_round,
+                min_verified_jobs=config.min_verified_jobs_per_round,
+                min_expected_worker_results=config.min_expected_worker_results_per_round,
+                timeout_seconds=timeout_seconds,
+                poll_interval=config.poll_interval,
+            )
+        )
+        summary = _alpha_soak_round_summary(round_report, round_number=round_number, report_path=round_report_path)
+        round_summaries.append(summary)
+        if not round_report.get("ok"):
+            errors.append(f"round {round_number} failed")
+            if config.stop_on_failure:
+                stop_reason = "failure"
+                break
+
+        try:
+            final_snapshot = client.snapshot()
+        except Exception:
+            final_snapshot = None
+        partial_report = _alpha_soak_report(
+            config=config,
+            invite=invite,
+            duration_seconds=time.time() - started_at,
+            initial_snapshot=initial_snapshot,
+            final_snapshot=final_snapshot,
+            rounds=round_summaries,
+            errors=errors,
+            stop_reason="running" if round_number < config.rounds and not errors else stop_reason,
+            completed=False,
+        )
+        _write_json_report(config.report_path, partial_report)
+
+        if deadline is not None and time.time() >= deadline:
+            stop_reason = "duration_limit_reached"
+            break
+
+    if not round_summaries and stop_reason == "round_limit_reached":
+        stop_reason = "no_rounds_completed"
+    elif round_summaries and stop_reason == "round_limit_reached" and len(round_summaries) < config.rounds:
+        stop_reason = "failure" if errors else "stopped_early"
+
+    try:
+        final_snapshot = client.snapshot()
+    except Exception as exc:
+        final_snapshot = None
+        errors.append(f"final snapshot failed: {type(exc).__name__}: {exc}")
+
+    report = _alpha_soak_report(
+        config=config,
+        invite=invite,
+        duration_seconds=time.time() - started_at,
+        initial_snapshot=initial_snapshot,
+        final_snapshot=final_snapshot,
+        rounds=round_summaries,
+        errors=errors,
+        stop_reason=stop_reason,
+        completed=True,
     )
     _write_json_report(config.report_path, report)
     return report
@@ -2698,6 +2842,41 @@ def _validate_inference_proof_config(config: AlphaInferenceProofConfig) -> None:
         raise ValueError("--expected-worker-id cannot be blank")
 
 
+def _validate_alpha_soak_config(config: AlphaSoakConfig) -> None:
+    if config.jobs_per_round < 1:
+        raise ValueError("--jobs-per-round must be at least 1")
+    if config.rounds < 1:
+        raise ValueError("--rounds must be at least 1")
+    if config.duration_seconds is not None and config.duration_seconds <= 0:
+        raise ValueError("--duration-seconds must be greater than 0")
+    if config.round_timeout_seconds <= 0:
+        raise ValueError("--round-timeout-seconds must be greater than 0")
+    if config.round_interval_seconds < 0:
+        raise ValueError("--round-interval-seconds cannot be negative")
+    if config.mode not in {"echo", "ollama", "auto"}:
+        raise ValueError("--mode must be echo, ollama, or auto")
+    if config.mode == "ollama" and not (config.model and config.model.strip()):
+        raise ValueError("--model is required when --mode ollama")
+    if config.model is not None and not config.model.strip():
+        raise ValueError("--model cannot be blank")
+    if not config.prompt.strip():
+        raise ValueError("--prompt cannot be blank")
+    if config.temperature is not None and not 0 <= config.temperature <= 2:
+        raise ValueError("--temperature must be between 0 and 2")
+    if config.min_live_workers < 0:
+        raise ValueError("--min-live-workers cannot be negative")
+    if config.min_accepted_results_per_round is not None and config.min_accepted_results_per_round < 0:
+        raise ValueError("--min-accepted-results-per-round cannot be negative")
+    if config.min_verified_jobs_per_round is not None and config.min_verified_jobs_per_round < 0:
+        raise ValueError("--min-verified-jobs-per-round cannot be negative")
+    if config.min_expected_worker_results_per_round is not None and config.min_expected_worker_results_per_round < 0:
+        raise ValueError("--min-expected-worker-results-per-round cannot be negative")
+    if config.poll_interval <= 0:
+        raise ValueError("--poll-interval must be greater than 0")
+    if config.expected_worker_id is not None and not config.expected_worker_id.strip():
+        raise ValueError("--expected-worker-id cannot be blank")
+
+
 def _remote_proof_required_accepted_results(config: AlphaRemoteProofConfig) -> int:
     if config.min_accepted_results is not None:
         return config.min_accepted_results
@@ -3176,6 +3355,222 @@ def _inference_proof_report(
         "expected_worker": expected_worker,
         "criteria": criteria,
         "errors": errors,
+    }
+
+
+def _alpha_soak_report(
+    *,
+    config: AlphaSoakConfig,
+    invite: AlphaInvite,
+    duration_seconds: float,
+    initial_snapshot: dict[str, Any] | None,
+    final_snapshot: dict[str, Any] | None,
+    rounds: list[dict[str, Any]],
+    errors: list[str],
+    stop_reason: str,
+    completed: bool,
+) -> dict[str, Any]:
+    totals = _alpha_soak_totals(rounds, duration_seconds=duration_seconds)
+    criteria = _alpha_soak_criteria(config, rounds, totals)
+    ok = completed and not errors and all(item["passed"] for item in criteria.values())
+    return {
+        "schema": ALPHA_SOAK_REPORT_SCHEMA,
+        "ok": ok,
+        "status": "pass" if ok else "fail" if completed else "running",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(duration_seconds, 3),
+        "stop_reason": stop_reason,
+        "invite": invite.public_summary(),
+        "parameters": {
+            "jobs_per_round": config.jobs_per_round,
+            "rounds": config.rounds,
+            "duration_seconds": config.duration_seconds,
+            "round_timeout_seconds": config.round_timeout_seconds,
+            "round_interval_seconds": config.round_interval_seconds,
+            "mode": config.mode,
+            "model": config.model,
+            "prompt": config.prompt,
+            "temperature": config.temperature,
+            "expected_worker_id": config.expected_worker_id,
+            "min_live_workers": config.min_live_workers,
+            "min_accepted_results_per_round": _alpha_soak_required_accepted_results(config),
+            "min_verified_jobs_per_round": _alpha_soak_required_verified_jobs(config),
+            "min_expected_worker_results_per_round": _alpha_soak_required_expected_worker_results(config),
+            "poll_interval": config.poll_interval,
+            "stop_on_failure": config.stop_on_failure,
+        },
+        "baseline": _snapshot_baseline(initial_snapshot),
+        "final_summary": _snapshot_baseline(final_snapshot),
+        "totals": totals,
+        "criteria": criteria,
+        "rounds": rounds,
+        "round_report_paths": [round_item["report_path"] for round_item in rounds],
+        "errors": errors,
+    }
+
+
+def _alpha_soak_round_report_path(report_path: Path, round_number: int) -> Path:
+    return _sidecar_report_path(report_path, f"round-{round_number:03d}")
+
+
+def _alpha_soak_round_prompt(config: AlphaSoakConfig, round_number: int) -> str:
+    return f"{config.prompt.strip()}\n\nSoak round {round_number} of {config.rounds}."
+
+
+def _alpha_soak_round_summary(
+    report: dict[str, Any],
+    *,
+    round_number: int,
+    report_path: Path,
+) -> dict[str, Any]:
+    criteria = report.get("criteria") or {}
+    parameters = report.get("parameters") or {}
+    expected_worker = report.get("expected_worker")
+    return {
+        "round": round_number,
+        "ok": bool(report.get("ok")),
+        "status": report.get("status"),
+        "duration_seconds": report.get("duration_seconds"),
+        "report_path": str(report_path),
+        "mode": parameters.get("mode"),
+        "selected_job_type": parameters.get("selected_job_type"),
+        "model": parameters.get("model"),
+        "jobs_created": _criterion_actual(criteria, "created_jobs"),
+        "accepted_results": _criterion_actual(criteria, "accepted_results"),
+        "verified_jobs": _criterion_actual(criteria, "verified_jobs"),
+        "disputed_jobs": _criterion_actual(criteria, "disputed_jobs"),
+        "expired_jobs": _criterion_actual(criteria, "expired_jobs"),
+        "incomplete_jobs": _criterion_actual(criteria, "incomplete_jobs"),
+        "live_workers": _criterion_actual(criteria, "live_workers"),
+        "expected_worker": expected_worker,
+        "expected_worker_results": _criterion_actual(criteria, "expected_worker_results"),
+        "result_node_counts": report.get("result_node_counts") or {},
+        "criteria": criteria,
+        "errors": report.get("errors") or [],
+    }
+
+
+def _criterion_actual(criteria: dict[str, Any], key: str) -> int:
+    item = criteria.get(key) or {}
+    try:
+        return int(item.get("actual") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _alpha_soak_required_accepted_results(config: AlphaSoakConfig) -> int:
+    if config.min_accepted_results_per_round is not None:
+        return config.min_accepted_results_per_round
+    return config.jobs_per_round
+
+
+def _alpha_soak_required_verified_jobs(config: AlphaSoakConfig) -> int:
+    if config.min_verified_jobs_per_round is not None:
+        return config.min_verified_jobs_per_round
+    return config.jobs_per_round
+
+
+def _alpha_soak_required_expected_worker_results(config: AlphaSoakConfig) -> int:
+    if config.min_expected_worker_results_per_round is not None:
+        return config.min_expected_worker_results_per_round
+    return 1 if config.expected_worker_id else 0
+
+
+def _alpha_soak_totals(rounds: list[dict[str, Any]], *, duration_seconds: float) -> dict[str, Any]:
+    result_node_counts: dict[str, int] = {}
+    for round_item in rounds:
+        for node_id, count in (round_item.get("result_node_counts") or {}).items():
+            result_node_counts[str(node_id)] = result_node_counts.get(str(node_id), 0) + int(count or 0)
+
+    verified_jobs = _sum_round_int(rounds, "verified_jobs")
+    expected_worker_results = _sum_round_int(rounds, "expected_worker_results")
+    return {
+        "rounds_completed": len(rounds),
+        "rounds_passed": sum(1 for round_item in rounds if round_item.get("ok")),
+        "jobs_created": _sum_round_int(rounds, "jobs_created"),
+        "accepted_results": _sum_round_int(rounds, "accepted_results"),
+        "verified_jobs": verified_jobs,
+        "disputed_jobs": _sum_round_int(rounds, "disputed_jobs"),
+        "expired_jobs": _sum_round_int(rounds, "expired_jobs"),
+        "incomplete_jobs": _sum_round_int(rounds, "incomplete_jobs"),
+        "expected_worker_results": expected_worker_results,
+        "expected_worker_rounds": sum(
+            1 for round_item in rounds
+            if int(round_item.get("expected_worker_results") or 0) > 0
+        ),
+        "result_node_counts": dict(sorted(result_node_counts.items())),
+        "verified_jobs_per_second": round(verified_jobs / duration_seconds, 3) if duration_seconds > 0 else None,
+        "accepted_results_per_second": round(_sum_round_int(rounds, "accepted_results") / duration_seconds, 3)
+        if duration_seconds > 0
+        else None,
+    }
+
+
+def _sum_round_int(rounds: list[dict[str, Any]], key: str) -> int:
+    total = 0
+    for round_item in rounds:
+        try:
+            total += int(round_item.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
+def _alpha_soak_criteria(
+    config: AlphaSoakConfig,
+    rounds: list[dict[str, Any]],
+    totals: dict[str, Any],
+) -> dict[str, Any]:
+    completed_required = 1 if config.duration_seconds is not None else config.rounds
+    completed = int(totals["rounds_completed"])
+    round_created_requirement = config.jobs_per_round * completed
+    expected_worker_required = _alpha_soak_required_expected_worker_results(config) * completed
+    return {
+        "rounds_completed": {
+            "actual": completed,
+            "required": completed_required,
+            "passed": completed >= completed_required,
+        },
+        "rounds_passed": {
+            "actual": int(totals["rounds_passed"]),
+            "required": completed,
+            "passed": completed > 0 and int(totals["rounds_passed"]) == completed,
+        },
+        "jobs_created": {
+            "actual": int(totals["jobs_created"]),
+            "required": round_created_requirement,
+            "passed": completed > 0 and int(totals["jobs_created"]) >= round_created_requirement,
+        },
+        "accepted_results": {
+            "actual": int(totals["accepted_results"]),
+            "required": _alpha_soak_required_accepted_results(config) * completed,
+            "passed": int(totals["accepted_results"]) >= _alpha_soak_required_accepted_results(config) * completed,
+        },
+        "verified_jobs": {
+            "actual": int(totals["verified_jobs"]),
+            "required": _alpha_soak_required_verified_jobs(config) * completed,
+            "passed": int(totals["verified_jobs"]) >= _alpha_soak_required_verified_jobs(config) * completed,
+        },
+        "disputed_jobs": {
+            "actual": int(totals["disputed_jobs"]),
+            "required": 0,
+            "passed": int(totals["disputed_jobs"]) == 0,
+        },
+        "expired_jobs": {
+            "actual": int(totals["expired_jobs"]),
+            "required": 0,
+            "passed": int(totals["expired_jobs"]) == 0,
+        },
+        "incomplete_jobs": {
+            "actual": int(totals["incomplete_jobs"]),
+            "required": 0,
+            "passed": int(totals["incomplete_jobs"]) == 0,
+        },
+        "expected_worker_results": {
+            "actual": int(totals["expected_worker_results"]),
+            "required": expected_worker_required,
+            "passed": int(totals["expected_worker_results"]) >= expected_worker_required,
+        },
     }
 
 

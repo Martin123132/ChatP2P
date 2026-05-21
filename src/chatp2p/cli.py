@@ -21,6 +21,7 @@ from .alpha import (
     AlphaRemoteProofConfig,
     AlphaRouteConfig,
     AlphaSmokeConfig,
+    AlphaSoakConfig,
     AlphaStatusConfig,
     DEFAULT_ALPHA_NOTES,
     DEFAULT_INFERENCE_PROOF_PROMPT,
@@ -35,6 +36,7 @@ from .alpha import (
     run_alpha_remote_proof,
     run_alpha_route,
     run_alpha_smoke,
+    run_alpha_soak,
     run_alpha_status,
     refresh_node_capabilities,
     run_node_watchdog,
@@ -636,6 +638,37 @@ def alpha_inference_proof_command(args: argparse.Namespace) -> None:
                 min_expected_worker_results=args.min_expected_worker_results,
                 timeout_seconds=args.timeout_seconds,
                 poll_interval=args.poll_interval,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def alpha_soak_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_alpha_soak(
+            AlphaSoakConfig(
+                invite_path=Path(args.invite),
+                report_path=Path(args.report),
+                jobs_per_round=args.jobs_per_round,
+                rounds=args.rounds,
+                duration_seconds=args.duration_seconds,
+                round_timeout_seconds=args.round_timeout_seconds,
+                round_interval_seconds=args.round_interval_seconds,
+                mode=args.mode,
+                model=args.model,
+                prompt=args.prompt,
+                temperature=args.temperature,
+                expected_worker_id=args.expected_worker_id,
+                min_live_workers=args.min_live_workers,
+                min_accepted_results_per_round=args.min_accepted_results_per_round,
+                min_verified_jobs_per_round=args.min_verified_jobs_per_round,
+                min_expected_worker_results_per_round=args.min_expected_worker_results_per_round,
+                poll_interval=args.poll_interval,
+                stop_on_failure=args.stop_on_failure,
             )
         )
     except (OSError, ValueError) as exc:
@@ -2044,6 +2077,106 @@ def build_parser() -> argparse.ArgumentParser:
     )
     alpha_inference_proof_parser.add_argument("--report", required=True, help="Path for inference proof JSON report")
     alpha_inference_proof_parser.set_defaults(func=alpha_inference_proof_command)
+
+    alpha_soak_parser = operator_subcommands.add_parser(
+        "alpha-soak",
+        help="Run repeated inference proof rounds and write a reliability soak report",
+    )
+    alpha_soak_parser.add_argument("--invite", required=True, help="Path to alpha invite JSON")
+    alpha_soak_parser.add_argument(
+        "--jobs-per-round",
+        default=10,
+        type=int,
+        help="Inference proof jobs to create in each soak round",
+    )
+    alpha_soak_parser.add_argument(
+        "--rounds",
+        default=5,
+        type=int,
+        help="Maximum number of soak rounds to run",
+    )
+    alpha_soak_parser.add_argument(
+        "--duration-seconds",
+        default=None,
+        type=float,
+        help="Optional wall-clock cap for the soak run; at least one round is attempted",
+    )
+    alpha_soak_parser.add_argument(
+        "--round-timeout-seconds",
+        default=120.0,
+        type=float,
+        help="Maximum time to wait for each inference proof round",
+    )
+    alpha_soak_parser.add_argument(
+        "--round-interval-seconds",
+        default=5.0,
+        type=float,
+        help="Seconds to wait between completed rounds",
+    )
+    alpha_soak_parser.add_argument(
+        "--mode",
+        choices=("echo", "ollama", "auto"),
+        default="echo",
+        help="Inference proof mode to use for every soak round",
+    )
+    alpha_soak_parser.add_argument(
+        "--model",
+        default=None,
+        help="Ollama model name for --mode ollama or optional --mode auto upgrade",
+    )
+    alpha_soak_parser.add_argument(
+        "--prompt",
+        default=DEFAULT_INFERENCE_PROOF_PROMPT,
+        help="Base prompt for soak inference proof jobs",
+    )
+    alpha_soak_parser.add_argument(
+        "--temperature",
+        default=None,
+        type=float,
+        help="Optional Ollama temperature",
+    )
+    alpha_soak_parser.add_argument(
+        "--expected-worker-id",
+        default=None,
+        help="Worker node ID that should remain live and return proof results",
+    )
+    alpha_soak_parser.add_argument(
+        "--min-live-workers",
+        default=1,
+        type=int,
+        help="Minimum live workers required in every round",
+    )
+    alpha_soak_parser.add_argument(
+        "--min-accepted-results-per-round",
+        default=None,
+        type=int,
+        help="Minimum accepted results required in each round. Defaults to jobs-per-round",
+    )
+    alpha_soak_parser.add_argument(
+        "--min-verified-jobs-per-round",
+        default=None,
+        type=int,
+        help="Minimum verified jobs required in each round. Defaults to jobs-per-round",
+    )
+    alpha_soak_parser.add_argument(
+        "--min-expected-worker-results-per-round",
+        default=None,
+        type=int,
+        help="Minimum results from the expected worker in each round. Defaults to 1 when expected worker is set",
+    )
+    alpha_soak_parser.add_argument(
+        "--poll-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between coordinator snapshot polls inside each round",
+    )
+    alpha_soak_parser.add_argument(
+        "--stop-on-failure",
+        action="store_true",
+        help="Stop after the first failed soak round instead of collecting more evidence",
+    )
+    alpha_soak_parser.add_argument("--report", required=True, help="Path for soak JSON report")
+    alpha_soak_parser.set_defaults(func=alpha_soak_command)
 
     alpha_drill_parser = operator_subcommands.add_parser(
         "alpha-drill",

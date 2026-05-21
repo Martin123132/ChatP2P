@@ -211,6 +211,14 @@ chatp2p operator alpha-inference-proof --invite D:\ChatP2PData\alpha-invite.json
 
 Echo mode creates signed `inference.echo.v1` jobs and verifies the result path that real model inference will use. When workers advertise a local Ollama model, use `--mode ollama --model MODEL`, or `--mode auto --model MODEL` to use Ollama only when a live capable node is present.
 
+For a longer two-machine stability run, use the soak harness. It runs repeated inference-proof rounds, writes one sidecar report per round, and rolls everything into a single pass/fail report:
+
+```bash
+chatp2p operator alpha-soak --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_... --min-live-workers 2 --jobs-per-round 10 --rounds 6 --round-interval-seconds 30 --report D:\ChatP2PData\alpha-soak-report.json
+```
+
+Pass means every completed round met its live-worker, accepted-result, verified-job, expected-worker, and zero-dispute/zero-expiry thresholds. Add `--duration-seconds 3600` when you want a wall-clock cap for a longer unattended run.
+
 For a quick health check, use:
 
 ```bash

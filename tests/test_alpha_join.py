@@ -1,5 +1,6 @@
 import json
 import threading
+from pathlib import Path
 
 import chatp2p.alpha as alpha_module
 from chatp2p.alpha import (
@@ -11,6 +12,7 @@ from chatp2p.alpha import (
     ALPHA_REMOTE_PROOF_REPORT_SCHEMA,
     ALPHA_ROUTE_REPORT_SCHEMA,
     ALPHA_SMOKE_REPORT_SCHEMA,
+    ALPHA_SOAK_REPORT_SCHEMA,
     ALPHA_STATUS_REPORT_SCHEMA,
     AlphaDrillConfig,
     AlphaEvidenceConfig,
@@ -22,6 +24,7 @@ from chatp2p.alpha import (
     AlphaRemoteProofConfig,
     AlphaRouteConfig,
     AlphaSmokeConfig,
+    AlphaSoakConfig,
     AlphaStatusConfig,
     NODE_WATCHDOG_REPORT_SCHEMA,
     NodeWatchdogConfig,
@@ -35,6 +38,7 @@ from chatp2p.alpha import (
     run_alpha_remote_proof,
     run_alpha_route,
     run_alpha_smoke,
+    run_alpha_soak,
     run_alpha_status,
     refresh_node_capabilities,
     run_node_watchdog,
@@ -646,6 +650,64 @@ def test_alpha_inference_proof_runs_echo_jobs_and_tracks_expected_worker(tmp_pat
     assert proof_report["created_results"][0]["answer_preview"].startswith("alpha echo proof")
     assert report_path.exists()
     assert token not in json.dumps(proof_report)
+
+
+def test_alpha_soak_runs_repeated_echo_rounds_and_redacts_reports(tmp_path):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    home = tmp_path / ".mesh"
+    invite_path = tmp_path / "alpha-invite.json"
+    report_path = tmp_path / "alpha-soak-report.json"
+    write_alpha_invite(invite_path, AlphaInvite.create(coordinator=coordinator_url, admission_token=token))
+    _save_benchmark(home)
+
+    try:
+        join_report = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=invite_path,
+                home=home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        soak_report = run_alpha_soak(
+            AlphaSoakConfig(
+                invite_path=invite_path,
+                report_path=report_path,
+                jobs_per_round=1,
+                rounds=2,
+                round_timeout_seconds=10.0,
+                round_interval_seconds=0.0,
+                mode="echo",
+                prompt="alpha soak proof",
+                expected_worker_id=join_report["worker_node_id"],
+                min_live_workers=1,
+                poll_interval=0.2,
+            )
+        )
+    finally:
+        stop_managed_process(home=home, role="worker")
+        _stop_server(server, thread)
+
+    assert join_report["ok"] is True
+    assert soak_report["schema"] == ALPHA_SOAK_REPORT_SCHEMA
+    assert soak_report["ok"] is True
+    assert soak_report["totals"]["rounds_completed"] == 2
+    assert soak_report["totals"]["rounds_passed"] == 2
+    assert soak_report["totals"]["jobs_created"] == 2
+    assert soak_report["totals"]["accepted_results"] == 2
+    assert soak_report["totals"]["verified_jobs"] == 2
+    assert soak_report["totals"]["expected_worker_results"] == 2
+    assert soak_report["totals"]["result_node_counts"] == {join_report["worker_node_id"]: 2}
+    assert soak_report["criteria"]["disputed_jobs"]["actual"] == 0
+    assert soak_report["criteria"]["expired_jobs"]["actual"] == 0
+    assert report_path.exists()
+    for round_path in soak_report["round_report_paths"]:
+        assert Path(round_path).exists()
+        assert token not in Path(round_path).read_text(encoding="utf-8")
+    assert token not in json.dumps(soak_report)
+    assert token not in report_path.read_text(encoding="utf-8")
 
 
 def test_alpha_status_reports_expected_worker_without_exposing_token(tmp_path):
