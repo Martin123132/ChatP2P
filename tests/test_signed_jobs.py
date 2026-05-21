@@ -4,6 +4,7 @@ from chatp2p.packets import (
     JobLeaseAcknowledgement,
     JobLeaseGrant,
     JobLeaseRequest,
+    JobLeaseRenewal,
     JobResult,
     NodeHeartbeat,
     NodeRegistration,
@@ -183,6 +184,41 @@ def test_lease_acknowledgement_replay_and_tampered_grant_are_rejected():
     assert coordinator.acknowledge_lease(acknowledgement)
     assert coordinator.acknowledge_lease(acknowledgement) is False
     assert coordinator.signed_node_packet_rejection_reason(acknowledgement) == "replayed packet"
+
+
+def test_signed_lease_renewal_extends_active_acknowledged_lease(monkeypatch):
+    coordinator = Coordinator(
+        identity=NodeIdentity.generate(prefix="coordinator"),
+        lease_timeout_seconds=5.0,
+    )
+    worker_identity = NodeIdentity.generate(prefix="worker")
+    worker = WorkerNode(identity=worker_identity)
+    coordinator.register_node(worker_identity.public(), capabilities=worker.capabilities())
+    coordinator.create_echo_inference_job("renew me")
+
+    monkeypatch.setattr("chatp2p.coordinator.time.time", lambda: 100.0)
+    monkeypatch.setattr("chatp2p.packets.time.time", lambda: 100.0)
+    leased = coordinator.lease_next_signed_job(JobLeaseRequest.create(node=worker_identity))
+    assert leased is not None
+    _job, lease = leased
+    grant = JobLeaseGrant.from_dict(lease["grant"])
+    acknowledgement = JobLeaseAcknowledgement.create(node=worker_identity, grant=grant)
+    assert coordinator.acknowledge_lease(acknowledgement)
+
+    monkeypatch.setattr("chatp2p.coordinator.time.time", lambda: 103.0)
+    monkeypatch.setattr("chatp2p.packets.time.time", lambda: 103.0)
+    renewal = JobLeaseRenewal.create(
+        node=worker_identity,
+        lease_id=grant.lease_id,
+        job_id=grant.job_id,
+        grant_hash=grant.grant_hash(),
+    )
+    renewed = coordinator.renew_lease(renewal)
+
+    assert renewed is not None
+    assert renewed["expires_at"] == 108.0
+    assert coordinator.renew_lease(renewal) is None
+    assert coordinator.signed_node_packet_rejection_reason(renewal) == "replayed packet"
 
 
 def test_coordinator_leases_only_supported_job_types():

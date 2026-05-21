@@ -306,7 +306,8 @@ Workers are expected to disappear sometimes, so the coordinator now treats lease
 - job pulls use signed `job.lease-request.v1` packets
 - the coordinator replies with a signed `job.lease-grant.v1`
 - workers sign a `job.lease-ack.v1` acknowledgement over the grant hash
-- signed heartbeat, lease request, and lease acknowledgement packets are rejected when stale or replayed
+- long-running jobs send signed `job.lease-renewal.v1` packets before the active lease expires
+- signed heartbeat, lease request, lease acknowledgement, and lease renewal packets are rejected when stale or replayed
 - expired leases are removed from the active queue and can be picked up by another worker
 - late results from expired leases are rejected
 - node `last_seen_at` is updated on registration, heartbeat, job pull, and result submission

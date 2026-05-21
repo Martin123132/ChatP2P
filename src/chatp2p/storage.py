@@ -321,6 +321,17 @@ class SQLiteCoordinatorStore:
                 ),
             )
 
+    def renew_lease(self, job_id: str, node_id: str, *, expires_at: float) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE leases
+                SET expires_at = ?
+                WHERE job_id = ? AND node_id = ? AND expired_at IS NULL
+                """,
+                (expires_at, job_id, node_id),
+            )
+
     def mark_lease_expired(self, job_id: str, node_id: str, *, expired_at: float) -> None:
         with self.connect() as connection:
             connection.execute(

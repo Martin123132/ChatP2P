@@ -140,11 +140,11 @@ The default mode is `echo`, which creates `inference.echo.v1` jobs. These jobs d
 When a live worker advertises a local Ollama model, run:
 
 ```bash
-python -m chatp2p.cli operator alpha-inference-proof --invite D:\ChatP2PData\alpha-invite.json --mode ollama --model llama3.2:3b --jobs 1 --min-live-workers 1 --report D:\ChatP2PData\alpha-ollama-proof-report.json
+python -m chatp2p.cli operator alpha-inference-proof --invite D:\ChatP2PData\alpha-invite.json --mode ollama --model llama3.2:3b --jobs 2 --min-live-workers 1 --report D:\ChatP2PData\alpha-ollama-proof-report.json
 ```
 
 Use `--mode auto --model MODEL` when you want the command to use Ollama if a live capable node advertises the model, and otherwise fall back to echo.
-Keep this proof to one job while the coordinator uses the default 30-second lease timeout; larger model batches need longer leases or worker-side lease renewal.
+Workers renew active leases while blocked inside local model inference, so an Ollama proof can run past the default 30-second lease timeout without losing the job.
 
 If a node installs Ollama or pulls a new model after it already joined, refresh its capability profile and restart the managed worker:
 

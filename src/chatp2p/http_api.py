@@ -11,7 +11,14 @@ from urllib.parse import urlparse
 
 from .coordinator import Coordinator
 from .operator_config import OperatorConfig
-from .packets import JobLeaseAcknowledgement, JobLeaseRequest, JobResult, NodeHeartbeat, NodeRegistration
+from .packets import (
+    JobLeaseAcknowledgement,
+    JobLeaseRenewal,
+    JobLeaseRequest,
+    JobResult,
+    NodeHeartbeat,
+    NodeRegistration,
+)
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
@@ -591,6 +598,31 @@ def create_coordinator_http_server(
                         "accepted": accepted,
                         "job_id": acknowledgement.job_id,
                         "node_id": acknowledgement.node_id,
+                        "lease": lease,
+                    },
+                )
+                return
+
+            if parsed.path == "/jobs/lease/renew":
+                request = self._read_json_or_reject()
+                if request is None:
+                    return
+                try:
+                    renewal = JobLeaseRenewal.from_dict(request)
+                except (KeyError, TypeError) as exc:
+                    _json_response(self, 400, {"accepted": False, "error": str(exc)})
+                    return
+                with lock:
+                    lease = coordinator.renew_lease(renewal)
+                accepted = lease is not None
+                status = 200 if accepted else 403
+                _json_response(
+                    self,
+                    status,
+                    {
+                        "accepted": accepted,
+                        "job_id": renewal.job_id,
+                        "node_id": renewal.node_id,
                         "lease": lease,
                     },
                 )

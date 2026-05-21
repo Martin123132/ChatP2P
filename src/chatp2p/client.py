@@ -11,6 +11,7 @@ from .packets import (
     JobLeaseAcknowledgement,
     JobLeaseGrant,
     JobLeaseRequest,
+    JobLeaseRenewal,
     JobPacket,
     JobResult,
     NodeHeartbeat,
@@ -101,7 +102,7 @@ class CoordinatorClient:
         response = self._request("POST", "/jobs", request)
         return JobPacket.from_dict(response["job"])
 
-    def next_job(self, node: NodeIdentity) -> JobPacket | None:
+    def next_job_with_lease(self, node: NodeIdentity) -> tuple[JobPacket, dict[str, Any]] | None:
         response = self._request("POST", "/jobs/next", JobLeaseRequest.create(node=node).to_dict())
         if response["job"] is None:
             return None
@@ -116,10 +117,17 @@ class CoordinatorClient:
         ack_response = self.acknowledge_lease(acknowledgement)
         if not ack_response.get("accepted"):
             raise RuntimeError(f"lease acknowledgement rejected: {ack_response}")
-        return job
+        return job, ack_response.get("lease") or lease
+
+    def next_job(self, node: NodeIdentity) -> JobPacket | None:
+        leased = self.next_job_with_lease(node)
+        return leased[0] if leased is not None else None
 
     def acknowledge_lease(self, acknowledgement: JobLeaseAcknowledgement) -> dict[str, Any]:
         return self._request("POST", "/jobs/lease/ack", acknowledgement.to_dict())
+
+    def renew_lease(self, renewal: JobLeaseRenewal) -> dict[str, Any]:
+        return self._request("POST", "/jobs/lease/renew", renewal.to_dict())
 
     def submit_result(self, result: JobResult) -> dict[str, Any]:
         return self._request("POST", "/jobs/result", result.to_dict())

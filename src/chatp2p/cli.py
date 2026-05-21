@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -53,7 +54,7 @@ from .node_runtime import (
 )
 from .ollama import DEFAULT_OLLAMA_BASE_URL
 from .operator_config import OperatorConfig, write_operator_config
-from .packets import NodeRegistration
+from .packets import JobLeaseRenewal, NodeRegistration
 from .proof import OllamaProofConfig, SwarmProofConfig, proof_summary, run_ollama_proof, run_swarm_proof
 from .storage import SQLiteCoordinatorStore
 from .worker import WorkerNode
@@ -325,11 +326,19 @@ def _register_worker(client: CoordinatorClient, worker: WorkerNode) -> None:
 
 
 def _run_one_remote_job(client: CoordinatorClient, worker: WorkerNode) -> dict:
-    job = client.next_job(worker.identity)
-    if job is None:
+    leased = client.next_job_with_lease(worker.identity)
+    if leased is None:
         return {"worker": worker.identity.node_id, "job": None, "status": "idle"}
+    job, lease = leased
 
-    result = worker.run_job(job)
+    renewal_tracker = _start_lease_renewal_loop(client, worker.identity, lease)
+    try:
+        result = worker.run_job(job)
+    finally:
+        renewal_tracker["stop"].set()
+        thread = renewal_tracker.get("thread")
+        if thread is not None:
+            thread.join(timeout=2.0)
     submit_response = client.submit_result(result)
     return {
         "worker": worker.identity.node_id,
@@ -338,8 +347,64 @@ def _run_one_remote_job(client: CoordinatorClient, worker: WorkerNode) -> dict:
         "result_accepted": submit_response.get("accepted"),
         "credits": submit_response.get("credits"),
         "output": result.output,
+        "lease_renewals": renewal_tracker["renewals"],
+        "lease_renewal_errors": renewal_tracker["errors"],
         "status": "submitted" if submit_response.get("accepted") else "rejected",
     }
+
+
+def _start_lease_renewal_loop(
+    client: CoordinatorClient,
+    identity: NodeIdentity,
+    lease: dict[str, Any] | None,
+) -> dict[str, Any]:
+    tracker: dict[str, Any] = {"stop": threading.Event(), "thread": None, "renewals": [], "errors": []}
+    if not lease or not lease.get("lease_id") or not lease.get("grant_hash"):
+        return tracker
+
+    stop_event: threading.Event = tracker["stop"]
+
+    def renew_until_stopped() -> None:
+        while True:
+            wait_seconds = _lease_renewal_wait_seconds(lease)
+            if stop_event.wait(wait_seconds):
+                return
+            try:
+                renewal = JobLeaseRenewal.create(
+                    node=identity,
+                    lease_id=str(lease["lease_id"]),
+                    job_id=str(lease["job_id"]),
+                    grant_hash=str(lease["grant_hash"]),
+                )
+                response = client.renew_lease(renewal)
+                if not response.get("accepted"):
+                    tracker["errors"].append(response)
+                    return
+                renewed_lease = response.get("lease") or {}
+                lease.update(renewed_lease)
+                tracker["renewals"].append(
+                    {
+                        "renewal_id": renewal.renewal_id,
+                        "expires_at": renewed_lease.get("expires_at"),
+                    }
+                )
+            except Exception as exc:
+                tracker["errors"].append({"error": f"{type(exc).__name__}: {exc}"})
+                return
+
+    thread = threading.Thread(target=renew_until_stopped, daemon=True)
+    tracker["thread"] = thread
+    thread.start()
+    return tracker
+
+
+def _lease_renewal_wait_seconds(lease: dict[str, Any]) -> float:
+    expires_at = lease.get("expires_at")
+    try:
+        remaining = float(expires_at) - time.time()
+    except (TypeError, ValueError):
+        return 10.0
+    return max(0.1, min(10.0, remaining / 3.0))
 
 
 def run_worker_loop(args: argparse.Namespace) -> None:
@@ -370,7 +435,8 @@ def run_worker_loop(args: argparse.Namespace) -> None:
             completed += 1
             print(
                 f"[{timestamp}] {identity.node_id} {result['status']} "
-                f"{result['job_type']} {result['job_id']} credits={result['credits']}"
+                f"{result['job_type']} {result['job_id']} credits={result['credits']} "
+                f"renewals={len(result.get('lease_renewals', []))}"
             )
             if args.max_jobs is not None and completed >= args.max_jobs:
                 return

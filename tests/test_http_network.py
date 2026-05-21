@@ -1,15 +1,23 @@
 import json
 import threading
+import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from chatp2p.client import CoordinatorClient
+from chatp2p.cli import _run_one_remote_job
 from chatp2p.coordinator import Coordinator
 from chatp2p.crypto import NodeIdentity
 from chatp2p.http_api import create_coordinator_http_server
 from chatp2p.operator_config import OperatorConfig
 from chatp2p.packets import NodeHeartbeat, NodeRegistration
 from chatp2p.worker import WorkerNode
+
+
+class SlowWorkerNode(WorkerNode):
+    def run_job(self, job):
+        time.sleep(0.7)
+        return super().run_job(job)
 
 
 def test_http_worker_registers_leases_job_and_submits_result():
@@ -69,6 +77,41 @@ def test_http_worker_registers_leases_job_and_submits_result():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_http_worker_renews_short_lease_while_job_runs():
+    coordinator_identity = NodeIdentity.generate(prefix="coordinator")
+    coordinator = Coordinator(identity=coordinator_identity, lease_timeout_seconds=0.5)
+    coordinator.create_job(
+        job_type="inference.echo.v1",
+        payload={"prompt": "slow lease renewal proof"},
+        ttl_seconds=10,
+    )
+    server = create_coordinator_http_server(coordinator, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        host, port = server.server_address
+        client = CoordinatorClient(f"http://{host}:{port}")
+        worker_identity = NodeIdentity.generate(prefix="worker")
+        worker = SlowWorkerNode(identity=worker_identity)
+        registration = NodeRegistration.create(node=worker_identity, capabilities=worker.capabilities())
+        assert client.register(registration)["accepted"] is True
+
+        result = _run_one_remote_job(client, worker)
+        snapshot = client.snapshot()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert result["status"] == "submitted"
+    assert result["result_accepted"] is True
+    assert len(result["lease_renewals"]) >= 1
+    assert result["lease_renewal_errors"] == []
+    assert snapshot["status"]["expired_leases"] == 0
+    assert snapshot["status"]["verified_jobs"] == 1
 
 
 def test_http_producer_creates_job_after_coordinator_start():

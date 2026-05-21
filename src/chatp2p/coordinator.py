@@ -12,6 +12,7 @@ from .packets import (
     JobLeaseAcknowledgement,
     JobLeaseGrant,
     JobLeaseRequest,
+    JobLeaseRenewal,
     JobPacket,
     JobResult,
     NodeHeartbeat,
@@ -510,6 +511,40 @@ class Coordinator:
             self.store.save_lease_acknowledgement(acknowledgement)
         return True
 
+    def renew_lease(self, renewal: JobLeaseRenewal) -> dict[str, Any] | None:
+        now = time.time()
+        self.reap_expired_leases(now=now)
+        if not self.consume_signed_node_packet(renewal, now=now):
+            return None
+        if renewal.job_id not in self.jobs:
+            return None
+        if renewal.node_id not in self.leased_jobs.get(renewal.job_id, set()):
+            return None
+        if renewal.node_id not in self.lease_acknowledged_at.get(renewal.job_id, {}):
+            return None
+        if self._lease_is_expired(renewal.job_id, renewal.node_id, now):
+            return None
+
+        grant = self.lease_grants.get(renewal.job_id, {}).get(renewal.node_id)
+        if grant is None:
+            return None
+        if not self._grant_matches_coordinator(grant):
+            return None
+        if renewal.lease_id != grant.lease_id:
+            return None
+        if renewal.grant_hash != grant.grant_hash():
+            return None
+
+        job = self.jobs[renewal.job_id]
+        expires_at = round(min(now + self.lease_timeout_seconds, job.deadline), 3)
+        if expires_at <= now:
+            return None
+        self.lease_expires_at.setdefault(renewal.job_id, {})[renewal.node_id] = expires_at
+        self.touch_node(renewal.node_id, seen_at=now)
+        if self.store is not None:
+            self.store.renew_lease(renewal.job_id, renewal.node_id, expires_at=expires_at)
+        return self.lease_metadata(renewal.job_id, renewal.node_id)
+
     def submit_result(self, result: JobResult) -> bool:
         now = time.time()
         self.reap_expired_leases(now=now)
@@ -964,6 +999,8 @@ class Coordinator:
             return packet.request_id
         if isinstance(packet, JobLeaseAcknowledgement):
             return packet.acknowledgement_id
+        if isinstance(packet, JobLeaseRenewal):
+            return packet.renewal_id
         return None
 
     def _packet_is_fresh(self, packet: Any, now: float | None = None) -> bool:
