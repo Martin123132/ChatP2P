@@ -678,6 +678,11 @@ class Coordinator:
                     "active_leases": self._active_lease_count_for_node(node_id, now=now),
                     "expired_leases": self._expired_lease_count_for_node(node_id),
                     "capability_tier": capabilities.get("capability_tier", "light"),
+                    "node_role": capabilities.get("node_role", "worker"),
+                    "provider_id": capabilities.get("provider_id"),
+                    "subscriber_id": capabilities.get("subscriber_id"),
+                    "subscriber_plan": capabilities.get("subscriber_plan"),
+                    "region": capabilities.get("region"),
                     "supported_job_types": capabilities.get("supported_job_types", []),
                     "ollama_models": capabilities.get("ollama_models", []),
                     "hardware": capabilities.get("hardware", {}),
@@ -790,6 +795,47 @@ class Coordinator:
             "results": self.result_summaries(),
             "reputation": list(self.reputation_summaries().values()),
             "leasing_policy": self.leasing_policy(),
+            "provider": self.provider_summary(),
+        }
+
+    def provider_summary(self) -> dict[str, Any]:
+        self.reap_expired_leases()
+        nodes = self.node_summaries()
+        jobs = self.job_summaries()
+        route_counts = {
+            "local": 0,
+            "provider_edge": 0,
+            "peer": 0,
+            "fallback_placeholder": 0,
+        }
+        subscriber_ids = set()
+        for node in nodes:
+            subscriber_id = node.get("subscriber_id")
+            if subscriber_id:
+                subscriber_ids.add(subscriber_id)
+        for job in jobs:
+            route = job.get("resource_requirements", {}).get("provider_route")
+            if route in route_counts:
+                route_counts[route] += 1
+        return {
+            "subscribers": len(subscriber_ids),
+            "subscriber_nodes": self._role_liveness_counts(nodes, lambda node: str(node.get("node_role", "")).startswith("subscriber_")),
+            "provider_edge_workers": self._role_liveness_counts(nodes, lambda node: node.get("node_role") == "provider_edge_worker"),
+            "contributor_workers": self._role_liveness_counts(nodes, lambda node: node.get("node_role") == "contributor_worker"),
+            "verifiers": self._role_liveness_counts(nodes, lambda node: node.get("node_role") == "verifier"),
+            "jobs_routed": route_counts,
+            "verification_rate": round(self.status()["verified_jobs"] / len(jobs), 3) if jobs else 0.0,
+            "disputed_jobs": self.status()["disputed_jobs"],
+            "expired_jobs": self.status()["expired_jobs"],
+        }
+
+    def _role_liveness_counts(self, nodes: list[dict[str, Any]], predicate: Any) -> dict[str, int]:
+        matching = [node for node in nodes if predicate(node)]
+        return {
+            "total": len(matching),
+            "live": sum(1 for node in matching if node["liveness_status"] == "live"),
+            "stale": sum(1 for node in matching if node["liveness_status"] == "stale"),
+            "offline": sum(1 for node in matching if node["liveness_status"] == "offline"),
         }
 
     def leasing_policy(self) -> dict[str, Any]:

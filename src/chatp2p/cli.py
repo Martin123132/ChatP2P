@@ -61,6 +61,13 @@ from .ollama import DEFAULT_OLLAMA_BASE_URL
 from .operator_config import OperatorConfig, write_operator_config
 from .packets import JobLeaseRenewal, NodeRegistration
 from .proof import OllamaProofConfig, SwarmProofConfig, proof_summary, run_ollama_proof, run_swarm_proof
+from .provider import (
+    ProviderEdgeProofConfig,
+    add_provider_subscriber,
+    bootstrap_provider_config,
+    join_provider_node,
+    run_provider_edge_proof,
+)
 from .storage import SQLiteCoordinatorStore
 from .worker import WorkerNode
 from .windows_task import (
@@ -567,6 +574,45 @@ def write_operator_config_command(args: argparse.Namespace) -> None:
     print(json.dumps({"saved": str(path), "operator": config.public_summary()}, indent=2, sort_keys=True))
 
 
+def bootstrap_provider_command(args: argparse.Namespace) -> None:
+    try:
+        report = bootstrap_provider_config(
+            config_path=Path(args.config),
+            provider_name=args.provider_name,
+            region=args.region,
+            provider_id=args.provider_id,
+            force=args.force,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
+def provider_create_subscriber_command(args: argparse.Namespace) -> None:
+    try:
+        report = add_provider_subscriber(
+            config_path=Path(args.config),
+            subscriber_id=args.subscriber_id,
+            plan=args.plan,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
+def node_join_provider_command(args: argparse.Namespace) -> None:
+    try:
+        report = join_provider_node(
+            provider_config_path=Path(args.provider_config),
+            subscriber_id=args.subscriber_id,
+            home=Path(args.home),
+            node_role=args.node_role,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+
+
 def bootstrap_alpha_command(args: argparse.Namespace) -> None:
     try:
         report = bootstrap_alpha(
@@ -906,6 +952,48 @@ def run_proof_ollama(args: argparse.Namespace) -> None:
 
     print(json.dumps(proof_summary(report), indent=2, sort_keys=True))
     if not report["passed"]:
+        raise SystemExit(1)
+
+
+def run_proof_provider_edge(args: argparse.Namespace) -> None:
+    config = ProviderEdgeProofConfig(
+        provider_config_path=Path(args.provider_config),
+        subscribers=args.subscribers,
+        edge_workers=args.edge_workers,
+        peer_workers=args.peer_workers,
+        verifier_workers=args.verifier_workers,
+        jobs=args.jobs,
+        report_path=Path(args.report),
+        timeout_seconds=args.timeout_seconds,
+    )
+    try:
+        report = run_provider_edge_proof(config)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(
+        json.dumps(
+            {
+                "ok": report["ok"],
+                "status": report["status"],
+                "schema": report["schema"],
+                "provider_id": report["provider_id"],
+                "report": str(Path(args.report).expanduser().resolve()),
+                "subscribers_created": report["subscribers_created"],
+                "subscriber_nodes_live": report["subscriber_nodes_live"],
+                "edge_workers_live": report["edge_workers_live"],
+                "jobs_created": report["jobs_created"],
+                "jobs_verified": report["jobs_verified"],
+                "jobs_disputed": report["jobs_disputed"],
+                "jobs_expired": report["jobs_expired"],
+                "route_counts": report["route_counts"],
+                "verification_rate": report["verification_rate"],
+                "failure_reasons": report["failure_reasons"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if not report["ok"]:
         raise SystemExit(1)
 
 
@@ -1305,6 +1393,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     join_parser.add_argument("--force", action="store_true", help="Replace an existing managed worker process")
     join_parser.set_defaults(func=run_node_join_command)
+
+    join_provider_parser = node_subcommands.add_parser(
+        "join-provider",
+        help="Create a provider-mode node identity and capability profile",
+    )
+    join_provider_parser.add_argument("--provider-config", required=True, help="Path to provider config JSON")
+    join_provider_parser.add_argument("--subscriber-id", required=True, help="Subscriber ID from the provider config")
+    join_provider_parser.add_argument("--home", default=".mesh", help="Directory for node identity and capabilities")
+    join_provider_parser.add_argument(
+        "--node-role",
+        default="subscriber_gateway",
+        choices=[
+            "subscriber_gateway",
+            "subscriber_device",
+            "provider_edge_worker",
+            "contributor_worker",
+            "verifier",
+        ],
+        help="Provider-mode node role to advertise",
+    )
+    join_provider_parser.set_defaults(func=node_join_provider_command)
 
     up_parser = node_subcommands.add_parser("up", help="Start managed background coordinator and worker processes")
     up_parser.add_argument("--home", default=".mesh", help="Directory for node identity, database, run state, and logs")
@@ -1788,6 +1897,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     operator_config_parser.add_argument("--force", action="store_true", help="Replace an existing config")
     operator_config_parser.set_defaults(func=write_operator_config_command)
+
+    bootstrap_provider_parser = operator_subcommands.add_parser(
+        "bootstrap-provider",
+        help="Write an ISP-edge / broadband-bundle provider simulation config",
+    )
+    bootstrap_provider_parser.add_argument("--config", required=True, help="Path for provider config JSON")
+    bootstrap_provider_parser.add_argument("--provider-name", required=True, help="Provider display name")
+    bootstrap_provider_parser.add_argument("--region", required=True, help="Provider region label")
+    bootstrap_provider_parser.add_argument("--provider-id", default=None, help="Optional stable provider id")
+    bootstrap_provider_parser.add_argument("--force", action="store_true", help="Replace an existing config")
+    bootstrap_provider_parser.set_defaults(func=bootstrap_provider_command)
 
     bootstrap_alpha_parser = operator_subcommands.add_parser(
         "bootstrap-alpha",
@@ -2660,6 +2780,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reputation_parser.set_defaults(func=show_reputation)
 
+    provider_parser = subcommands.add_parser("provider", help="Provider simulation commands")
+    provider_subcommands = provider_parser.add_subparsers(dest="provider_command", required=True)
+
+    create_subscriber_parser = provider_subcommands.add_parser(
+        "create-subscriber",
+        help="Add a subscriber to a provider simulation config",
+    )
+    create_subscriber_parser.add_argument("--config", required=True, help="Path to provider config JSON")
+    create_subscriber_parser.add_argument("--subscriber-id", required=True, help="Subscriber id to create")
+    create_subscriber_parser.add_argument("--plan", required=True, help="Subscriber plan name")
+    create_subscriber_parser.set_defaults(func=provider_create_subscriber_command)
+
     proof_parser = subcommands.add_parser("proof", help="Run local proof harnesses")
     proof_subcommands = proof_parser.add_subparsers(dest="proof_command", required=True)
 
@@ -2759,6 +2891,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Workers that advertise a different Ollama model to prove model-aware routing",
     )
     ollama_proof_parser.set_defaults(func=run_proof_ollama)
+
+    provider_edge_parser = proof_subcommands.add_parser(
+        "provider-edge",
+        help="Run an ISP-edge / broadband-bundle simulation proof",
+    )
+    provider_edge_parser.add_argument("--provider-config", required=True, help="Path to provider config JSON")
+    provider_edge_parser.add_argument("--subscribers", default=3, type=int, help="Subscribers to simulate")
+    provider_edge_parser.add_argument("--edge-workers", default=1, type=int, help="Provider edge workers to simulate")
+    provider_edge_parser.add_argument("--peer-workers", default=1, type=int, help="Trusted peer workers to simulate")
+    provider_edge_parser.add_argument("--verifier-workers", default=1, type=int, help="Verifier workers to simulate")
+    provider_edge_parser.add_argument("--jobs", default=25, type=int, help="Subscriber jobs to create")
+    provider_edge_parser.add_argument(
+        "--report",
+        default=".mesh/proof/provider-edge-report.json",
+        help="Path for provider-edge JSON report",
+    )
+    provider_edge_parser.add_argument(
+        "--timeout-seconds",
+        default=60.0,
+        type=float,
+        help="Maximum proof runtime before marking the run failed",
+    )
+    provider_edge_parser.set_defaults(func=run_proof_provider_edge)
 
     return parser
 

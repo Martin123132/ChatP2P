@@ -140,6 +140,18 @@ chatp2p proof ollama --model llama3.2:3b --workers 4 --jobs 8 --report .mesh/pro
 The Ollama proof preflights `/api/tags`, starts a local coordinator, registers separate worker identities that advertise the requested model, creates signed `inference.ollama.v1` jobs, and records result previews in the JSON report. Add `--mismatched-workers 1` to prove workers without the requested model register successfully but do not receive those jobs.
 Alpha inference reports also include a routing summary for Ollama mode and fail if a result comes from a node that did not advertise the requested model or if the returned model name does not match.
 
+## Broadband / ISP Edge Simulation
+
+ChatP2P includes a provider-edge proof harness for the broadband-bundle architecture lane. This is not AI inside fibre and not a real ISP deployment; it simulates a provider coordinator, subscriber gateway nodes, provider edge workers, trusted peer workers, policy routing, signed results, verification, and simple usage credits.
+
+```bash
+chatp2p operator bootstrap-provider --config D:\ChatP2PData\provider-config.json --provider-name "Demo Fibre AI" --region "Hull"
+chatp2p provider create-subscriber --config D:\ChatP2PData\provider-config.json --subscriber-id sub_demo_001 --plan "Broadband AI Plus"
+chatp2p proof provider-edge --provider-config D:\ChatP2PData\provider-config.json --subscribers 3 --edge-workers 1 --jobs 25 --report D:\ChatP2PData\provider-edge-proof.json
+```
+
+The report schema is `chatp2p.provider-edge-proof-report.v1`. A happy-path pass shows local/provider-edge/peer route counts, verified jobs, zero disputes, zero fallback placeholder routes, and a credit summary. See `docs/PROVIDER_EDGE_MODE.md` for the full runbook.
+
 ## Public Alpha Seed Mode
 
 Do not expose a coordinator to the internet without an admission token. Bootstrap an operator config and invite file:
