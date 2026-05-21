@@ -16,6 +16,7 @@ from .alpha import (
     AlphaEvidenceConfig,
     AlphaInferenceProofConfig,
     AlphaJoinConfig,
+    AlphaOpsPackConfig,
     NodeCapabilityRefreshConfig,
     AlphaPreflightConfig,
     AlphaRemoteProofConfig,
@@ -32,6 +33,7 @@ from .alpha import (
     run_alpha_evidence,
     run_alpha_inference_proof,
     run_alpha_join,
+    run_alpha_ops_pack,
     run_alpha_preflight,
     run_alpha_remote_proof,
     run_alpha_route,
@@ -740,6 +742,42 @@ def alpha_evidence_command(args: argparse.Namespace) -> None:
                 inference_mode=args.inference_mode,
                 inference_model=args.inference_model,
                 inference_jobs=args.inference_jobs,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def alpha_ops_pack_command(args: argparse.Namespace) -> None:
+    home = Path(args.home)
+    invite = Path(args.invite) if args.invite else home.parent / "alpha-invite.json"
+    out_dir = Path(args.out) if args.out else home.parent / "alpha-ops-pack"
+    watchdog_report = Path(args.watchdog_report) if args.watchdog_report else None
+    zip_path = Path(args.zip) if args.zip else None
+    try:
+        report = run_alpha_ops_pack(
+            AlphaOpsPackConfig(
+                home=home,
+                invite_path=invite,
+                out_dir=out_dir,
+                expected_worker_id=args.expected_worker_id,
+                jobs=args.jobs,
+                min_live_workers=args.min_live_workers,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval=args.poll_interval,
+                status_timeout_seconds=args.status_timeout_seconds,
+                watchdog_report_path=watchdog_report,
+                operator_task_name=args.operator_task_name,
+                query_operator_task=not args.no_task_query,
+                include_routing_evidence=args.include_routing_evidence,
+                inference_mode=args.inference_mode,
+                inference_model=args.inference_model,
+                inference_jobs=args.inference_jobs,
+                create_zip=not args.no_zip,
+                zip_path=zip_path,
             )
         )
     except (OSError, ValueError) as exc:
@@ -1911,6 +1949,105 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inference jobs to create when --include-inference-proof is set",
     )
     alpha_evidence_parser.set_defaults(func=alpha_evidence_command)
+
+    alpha_ops_pack_parser = operator_subcommands.add_parser(
+        "alpha-ops-pack",
+        help="Build a redacted operator pack with evidence, handoff notes, and an optional zip",
+    )
+    alpha_ops_pack_parser.add_argument("--home", required=True, help="Coordinator and primary worker home directory")
+    alpha_ops_pack_parser.add_argument(
+        "--invite",
+        default=None,
+        help="Path to alpha invite JSON. Defaults to HOME parent/alpha-invite.json",
+    )
+    alpha_ops_pack_parser.add_argument(
+        "--out",
+        default=None,
+        help="Ops pack directory. Defaults to HOME parent/alpha-ops-pack",
+    )
+    alpha_ops_pack_parser.add_argument(
+        "--expected-worker-id",
+        default=None,
+        help="Worker node ID that should be live and return proof results",
+    )
+    alpha_ops_pack_parser.add_argument(
+        "--include-routing-evidence",
+        action="store_true",
+        help="Run echo/auto/Ollama inference proof and include routing evidence",
+    )
+    alpha_ops_pack_parser.add_argument(
+        "--jobs",
+        default=25,
+        type=int,
+        help="Deterministic eval jobs to create for the remote proof",
+    )
+    alpha_ops_pack_parser.add_argument(
+        "--min-live-workers",
+        default=2,
+        type=int,
+        help="Minimum live workers required for status and proofs",
+    )
+    alpha_ops_pack_parser.add_argument(
+        "--timeout-seconds",
+        default=300.0,
+        type=float,
+        help="Maximum time to wait for proof runs",
+    )
+    alpha_ops_pack_parser.add_argument(
+        "--poll-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between coordinator snapshot polls during proof runs",
+    )
+    alpha_ops_pack_parser.add_argument(
+        "--status-timeout-seconds",
+        default=5.0,
+        type=float,
+        help="Timeout for status health and snapshot checks",
+    )
+    alpha_ops_pack_parser.add_argument(
+        "--watchdog-report",
+        default=None,
+        help="Existing watchdog report to copy. Defaults to HOME parent/node-watchdog-report.json",
+    )
+    alpha_ops_pack_parser.add_argument(
+        "--operator-task-name",
+        default=DEFAULT_OPERATOR_TASK_NAME,
+        help="Windows Scheduled Task name to query for operator watchdog evidence",
+    )
+    alpha_ops_pack_parser.add_argument(
+        "--no-task-query",
+        action="store_true",
+        help="Skip Windows Scheduled Task query",
+    )
+    alpha_ops_pack_parser.add_argument(
+        "--inference-mode",
+        choices=("echo", "auto", "ollama"),
+        default="echo",
+        help="Inference proof mode when --include-routing-evidence is set",
+    )
+    alpha_ops_pack_parser.add_argument(
+        "--inference-model",
+        default=None,
+        help="Ollama model to require for auto/ollama routing evidence",
+    )
+    alpha_ops_pack_parser.add_argument(
+        "--inference-jobs",
+        default=20,
+        type=int,
+        help="Inference jobs to create when --include-routing-evidence is set",
+    )
+    alpha_ops_pack_parser.add_argument(
+        "--zip",
+        default=None,
+        help="Optional zip output path. Defaults to OUT.zip",
+    )
+    alpha_ops_pack_parser.add_argument(
+        "--no-zip",
+        action="store_true",
+        help="Skip zip creation and leave the ops pack as a folder only",
+    )
+    alpha_ops_pack_parser.set_defaults(func=alpha_ops_pack_command)
 
     alpha_route_parser = operator_subcommands.add_parser(
         "alpha-route",

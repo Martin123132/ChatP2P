@@ -201,6 +201,25 @@ The command writes:
 
 Pass means the current alpha status passed, the command created fresh deterministic proof jobs, the optional inference proof passed, the expected partner worker contributed accepted results, all proof-created jobs verified, and no raw admission token was found in the evidence artifacts. Missing watchdog or Scheduled Task evidence is a warning so the network proof remains usable while you are still setting up background reliability.
 
+## Alpha Ops Pack
+
+Once the evidence command is passing, use the ops pack command for the repeatable operator handoff:
+
+```bash
+python -m chatp2p.cli operator alpha-ops-pack --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --out D:\ChatP2PData\alpha-ops-pack-live --expected-worker-id worker_87b5cefe53e67c6c --include-routing-evidence
+```
+
+The command writes:
+
+- `D:\ChatP2PData\alpha-ops-pack-live\evidence\`
+- `D:\ChatP2PData\alpha-ops-pack-live\alpha-ops-pack-summary.json`
+- `D:\ChatP2PData\alpha-ops-pack-live\alpha-ops-pack-summary.md`
+- `D:\ChatP2PData\alpha-ops-pack-live\operator-handoff.md`
+- `D:\ChatP2PData\alpha-ops-pack-live\partner-handoff.md`
+- `D:\ChatP2PData\alpha-ops-pack-live.zip`
+
+Pass means the underlying evidence pack passed, routing evidence passed when requested, token redaction passed, and the zip was created. Share the ops pack folder or zip only after `token_redaction` is passing. Keep `alpha-invite.json`, `operator-config.json`, `.mesh`, identity files, and SQLite databases private.
+
 ## Node Watchdog
 
 Run a one-shot check and restart unhealthy managed roles:

@@ -1,5 +1,6 @@
 import json
 import threading
+import zipfile
 from pathlib import Path
 
 import chatp2p.alpha as alpha_module
@@ -8,6 +9,7 @@ from chatp2p.alpha import (
     ALPHA_EVIDENCE_PACK_SCHEMA,
     ALPHA_INFERENCE_PROOF_REPORT_SCHEMA,
     ALPHA_INVITE_SCHEMA,
+    ALPHA_OPS_PACK_SCHEMA,
     ALPHA_PREFLIGHT_REPORT_SCHEMA,
     ALPHA_REMOTE_PROOF_REPORT_SCHEMA,
     ALPHA_ROUTE_REPORT_SCHEMA,
@@ -19,6 +21,7 @@ from chatp2p.alpha import (
     AlphaInferenceProofConfig,
     AlphaInvite,
     AlphaJoinConfig,
+    AlphaOpsPackConfig,
     NodeCapabilityRefreshConfig,
     AlphaPreflightConfig,
     AlphaRemoteProofConfig,
@@ -34,6 +37,7 @@ from chatp2p.alpha import (
     run_alpha_evidence,
     run_alpha_inference_proof,
     run_alpha_join,
+    run_alpha_ops_pack,
     run_alpha_preflight,
     run_alpha_remote_proof,
     run_alpha_route,
@@ -1056,6 +1060,87 @@ def test_alpha_evidence_pack_can_include_inference_proof_sidecar(tmp_path):
     assert sidecar["schema"] == ALPHA_INFERENCE_PROOF_REPORT_SCHEMA
     assert token not in json.dumps(report)
     assert token not in sidecar_path.read_text(encoding="utf-8")
+
+
+def test_alpha_ops_pack_builds_handoff_zip_and_redacts_token(tmp_path):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    operator_home = tmp_path / ".mesh-operator"
+    partner_home = tmp_path / ".mesh-partner"
+    invite_path = tmp_path / "alpha-invite.json"
+    out_dir = tmp_path / "ops-pack"
+    zip_path = tmp_path / "ops-pack.zip"
+    watchdog_report = tmp_path / "node-watchdog-report.json"
+    write_alpha_invite(invite_path, AlphaInvite.create(coordinator=coordinator_url, admission_token=token))
+    _save_benchmark(operator_home)
+    _save_benchmark(partner_home)
+    watchdog_report.write_text(json.dumps({"admission_token": token}), encoding="utf-8")
+
+    try:
+        operator_join = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=invite_path,
+                home=operator_home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        partner_join = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=invite_path,
+                home=partner_home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        report = run_alpha_ops_pack(
+            AlphaOpsPackConfig(
+                home=operator_home,
+                invite_path=invite_path,
+                out_dir=out_dir,
+                expected_worker_id=partner_join["worker_node_id"],
+                jobs=1,
+                min_live_workers=2,
+                timeout_seconds=15.0,
+                poll_interval=0.2,
+                status_timeout_seconds=5.0,
+                watchdog_report_path=watchdog_report,
+                query_operator_task=False,
+                include_routing_evidence=True,
+                inference_mode="echo",
+                inference_jobs=2,
+                zip_path=zip_path,
+            )
+        )
+    finally:
+        stop_managed_process(home=operator_home, role="worker")
+        stop_managed_process(home=partner_home, role="worker")
+        _stop_server(server, thread)
+
+    assert operator_join["ok"] is True
+    assert partner_join["ok"] is True
+    assert report["schema"] == ALPHA_OPS_PACK_SCHEMA
+    assert report["ok"] is True
+    assert report["status"] == "pass"
+    assert report["evidence"]["remote_proof"]["created_jobs"] == 1
+    assert report["evidence"]["inference_proof"]["verified_jobs"] == 2
+    assert report["evidence"]["inference_proof"]["routing_summary"]["policy"] == "generic_inference"
+    assert (out_dir / "alpha-ops-pack-summary.json").exists()
+    assert (out_dir / "alpha-ops-pack-summary.md").exists()
+    assert (out_dir / "operator-handoff.md").exists()
+    assert (out_dir / "partner-handoff.md").exists()
+    assert (out_dir / "evidence" / "alpha-evidence-summary.json").exists()
+    assert zip_path.exists()
+    with zipfile.ZipFile(zip_path) as archive:
+        names = set(archive.namelist())
+    assert "ops-pack/alpha-ops-pack-summary.json" in names
+    assert "ops-pack/operator-handoff.md" in names
+    assert "ops-pack/evidence/alpha-evidence-summary.json" in names
+    assert token not in json.dumps(report)
+    assert token not in (out_dir / "operator-handoff.md").read_text(encoding="utf-8")
+    assert token not in (out_dir / "partner-handoff.md").read_text(encoding="utf-8")
 
 
 def test_refresh_node_capabilities_saves_new_profile(tmp_path, monkeypatch):

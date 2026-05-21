@@ -235,6 +235,14 @@ chatp2p operator alpha-evidence --home D:\ChatP2PData\.mesh --invite D:\ChatP2PD
 
 The evidence pack writes `alpha-status.json`, `alpha-remote-proof.json`, optional `alpha-evidence-inference-proof.json`, a copied watchdog report, a Windows task query report, and `alpha-evidence-summary.md`. The status and inference reports show each live node's supported job types and advertised Ollama models when present. The raw admission token is redacted before files are written.
 
+To wrap that into an operator handoff folder and zip, run:
+
+```bash
+chatp2p operator alpha-ops-pack --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --out D:\ChatP2PData\alpha-ops-pack-live --expected-worker-id worker_... --include-routing-evidence
+```
+
+The ops pack creates a nested evidence folder, `alpha-ops-pack-summary.json`, `alpha-ops-pack-summary.md`, `operator-handoff.md`, `partner-handoff.md`, and `OUT.zip` by default. It is meant to be the repeatable "show the measurements" artifact for an alpha operator. The original invite, operator config, runtime homes, identities, and SQLite databases remain private.
+
 To let the node check and restart managed processes from the invite, run a one-shot watchdog check:
 
 ```bash

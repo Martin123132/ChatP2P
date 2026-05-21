@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,7 @@ ALPHA_ROUTE_REPORT_SCHEMA = "chatp2p.alpha-route-report.v1"
 ALPHA_REMOTE_PROOF_REPORT_SCHEMA = "chatp2p.alpha-remote-proof-report.v1"
 ALPHA_STATUS_REPORT_SCHEMA = "chatp2p.alpha-status-report.v1"
 ALPHA_EVIDENCE_PACK_SCHEMA = "chatp2p.alpha-evidence-pack.v1"
+ALPHA_OPS_PACK_SCHEMA = "chatp2p.alpha-ops-pack.v1"
 ALPHA_INFERENCE_PROOF_REPORT_SCHEMA = "chatp2p.alpha-inference-proof-report.v1"
 ALPHA_SOAK_REPORT_SCHEMA = "chatp2p.alpha-soak-report.v1"
 NODE_CAPABILITY_REFRESH_REPORT_SCHEMA = "chatp2p.node-capability-refresh-report.v1"
@@ -244,6 +246,28 @@ class AlphaEvidenceConfig:
     inference_mode: str = "echo"
     inference_model: str | None = None
     inference_jobs: int = 20
+
+
+@dataclass(frozen=True)
+class AlphaOpsPackConfig:
+    home: Path
+    invite_path: Path
+    out_dir: Path
+    expected_worker_id: str | None = None
+    jobs: int = 25
+    min_live_workers: int = 2
+    timeout_seconds: float = 300.0
+    poll_interval: float = 0.5
+    status_timeout_seconds: float = 5.0
+    watchdog_report_path: Path | None = None
+    operator_task_name: str | None = DEFAULT_OPERATOR_TASK_NAME
+    query_operator_task: bool = True
+    include_routing_evidence: bool = False
+    inference_mode: str = "echo"
+    inference_model: str | None = None
+    inference_jobs: int = 20
+    create_zip: bool = True
+    zip_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -1433,6 +1457,189 @@ def run_alpha_evidence(config: AlphaEvidenceConfig) -> dict[str, Any]:
     return report
 
 
+def run_alpha_ops_pack(config: AlphaOpsPackConfig) -> dict[str, Any]:
+    _validate_alpha_ops_pack_config(config)
+    started_at = time.time()
+    home = config.home.expanduser().resolve()
+    out_dir = config.out_dir.expanduser().resolve()
+    evidence_dir = out_dir / "evidence"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    invite = load_alpha_invite(config.invite_path)
+    secrets_to_redact = tuple(value for value in (invite.admission_token,) if value)
+    summary_path = out_dir / "alpha-ops-pack-summary.json"
+    markdown_path = out_dir / "alpha-ops-pack-summary.md"
+    operator_handoff_path = out_dir / "operator-handoff.md"
+    partner_handoff_path = out_dir / "partner-handoff.md"
+    zip_path = (
+        config.zip_path.expanduser().resolve()
+        if config.zip_path is not None
+        else out_dir.with_suffix(".zip")
+    )
+
+    checks: list[dict[str, Any]] = []
+    errors: list[str] = []
+    evidence_report: dict[str, Any] | None = None
+
+    try:
+        evidence_report = run_alpha_evidence(
+            AlphaEvidenceConfig(
+                home=home,
+                invite_path=config.invite_path,
+                out_dir=evidence_dir,
+                expected_worker_id=config.expected_worker_id,
+                jobs=config.jobs,
+                min_live_workers=config.min_live_workers,
+                timeout_seconds=config.timeout_seconds,
+                poll_interval=config.poll_interval,
+                status_timeout_seconds=config.status_timeout_seconds,
+                watchdog_report_path=config.watchdog_report_path,
+                operator_task_name=config.operator_task_name,
+                query_operator_task=config.query_operator_task,
+                include_inference_proof=config.include_routing_evidence,
+                inference_mode=config.inference_mode,
+                inference_model=config.inference_model,
+                inference_jobs=config.inference_jobs,
+            )
+        )
+        checks.append(
+            _alpha_check(
+                "evidence_pack",
+                "pass" if evidence_report.get("ok") else "fail",
+                "Evidence pack passed." if evidence_report.get("ok") else "Evidence pack failed.",
+                details=_alpha_ops_evidence_summary(evidence_report),
+            )
+        )
+    except Exception as exc:
+        message = f"{type(exc).__name__}: {exc}"
+        errors.append(message)
+        checks.append(
+            _alpha_check(
+                "evidence_pack",
+                "fail",
+                "Evidence pack could not be created.",
+                details={"error": message},
+            )
+        )
+
+    if config.include_routing_evidence:
+        inference_summary = (evidence_report or {}).get("inference_proof") or {}
+        checks.append(
+            _alpha_check(
+                "routing_evidence",
+                "pass" if inference_summary.get("status") == "pass" else "fail",
+                "Routing evidence passed."
+                if inference_summary.get("status") == "pass"
+                else "Routing evidence did not pass.",
+                details={
+                    "status": inference_summary.get("status"),
+                    "routing_summary": inference_summary.get("routing_summary", {}),
+                    "result_node_counts": inference_summary.get("result_node_counts", {}),
+                },
+            )
+        )
+
+    artifacts = {
+        "directory": str(out_dir),
+        "summary_json": str(summary_path),
+        "summary_markdown": str(markdown_path),
+        "operator_handoff": str(operator_handoff_path),
+        "partner_handoff": str(partner_handoff_path),
+        "evidence_directory": str(evidence_dir),
+        "evidence_summary_json": str(evidence_dir / "alpha-evidence-summary.json"),
+        "evidence_summary_markdown": str(evidence_dir / "alpha-evidence-summary.md"),
+    }
+    if config.create_zip:
+        artifacts["zip"] = {"path": str(zip_path), "status": "planned"}
+
+    report = {
+        "schema": ALPHA_OPS_PACK_SCHEMA,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(time.time() - started_at, 3),
+        "config": {
+            "home": str(home),
+            "invite_path": str(config.invite_path),
+            "out_dir": str(out_dir),
+            "expected_worker_id": config.expected_worker_id,
+            "jobs": config.jobs,
+            "min_live_workers": config.min_live_workers,
+            "timeout_seconds": config.timeout_seconds,
+            "poll_interval": config.poll_interval,
+            "status_timeout_seconds": config.status_timeout_seconds,
+            "watchdog_report_path": str(config.watchdog_report_path) if config.watchdog_report_path else None,
+            "operator_task_name": config.operator_task_name,
+            "query_operator_task": config.query_operator_task,
+            "include_routing_evidence": config.include_routing_evidence,
+            "inference_mode": config.inference_mode,
+            "inference_model": config.inference_model,
+            "inference_jobs": config.inference_jobs,
+            "create_zip": config.create_zip,
+            "zip_path": str(zip_path) if config.create_zip else None,
+        },
+        "invite": invite.public_summary(),
+        "artifacts": artifacts,
+        "evidence": _alpha_ops_evidence_summary(evidence_report),
+        "checks": checks,
+        "errors": errors,
+    }
+    report = _redact_evidence_value(report, secrets_to_redact)
+    report = _finalize_alpha_ops_report(report)
+    _write_json_report(summary_path, report)
+    _write_text_report(markdown_path, _alpha_ops_pack_markdown(report))
+    _write_text_report(operator_handoff_path, _alpha_ops_operator_handoff(report))
+    _write_text_report(partner_handoff_path, _alpha_ops_partner_handoff(report))
+
+    secret_scan = _scan_artifacts_for_secrets(_ops_pack_secret_scan_paths(out_dir), secrets_to_redact)
+    checks.append(
+        _alpha_check(
+            "token_redaction",
+            "pass" if not secret_scan["leaks"] else "fail",
+            "No raw admission token was found in ops pack artifacts."
+            if not secret_scan["leaks"]
+            else "A raw admission token was found in ops pack artifacts.",
+            details=secret_scan,
+        )
+    )
+
+    if config.create_zip:
+        try:
+            _zip_directory(out_dir, zip_path)
+            artifacts["zip"] = {"path": str(zip_path), "status": "created"}
+            checks.append(
+                _alpha_check(
+                    "zip_pack",
+                    "pass",
+                    "Ops pack zip was created.",
+                    details=artifacts["zip"],
+                )
+            )
+        except OSError as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            errors.append(message)
+            artifacts["zip"] = {"path": str(zip_path), "status": "failed", "error": message}
+            checks.append(
+                _alpha_check(
+                    "zip_pack",
+                    "warn",
+                    "Ops pack folder was created, but zip creation failed.",
+                    details=artifacts["zip"],
+                )
+            )
+
+    report["duration_seconds"] = round(time.time() - started_at, 3)
+    report["checks"] = checks
+    report["errors"] = errors
+    report["artifacts"] = artifacts
+    report = _redact_evidence_value(_finalize_alpha_ops_report(report), secrets_to_redact)
+    _write_json_report(summary_path, report)
+    _write_text_report(markdown_path, _alpha_ops_pack_markdown(report))
+    _write_text_report(operator_handoff_path, _alpha_ops_operator_handoff(report))
+    _write_text_report(partner_handoff_path, _alpha_ops_partner_handoff(report))
+    if config.create_zip and artifacts.get("zip", {}).get("status") == "created":
+        _zip_directory(out_dir, zip_path)
+    return report
+
+
 def run_node_watchdog(config: NodeWatchdogConfig) -> dict[str, Any]:
     _validate_node_watchdog_config(config)
     invite = load_alpha_invite(config.invite_path)
@@ -2053,6 +2260,29 @@ def _validate_alpha_status_config(config: AlphaStatusConfig) -> None:
 
 
 def _validate_alpha_evidence_config(config: AlphaEvidenceConfig) -> None:
+    if config.jobs < 1:
+        raise ValueError("--jobs must be at least 1")
+    if config.min_live_workers < 0:
+        raise ValueError("--min-live-workers cannot be negative")
+    if config.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0")
+    if config.poll_interval <= 0:
+        raise ValueError("--poll-interval must be greater than 0")
+    if config.status_timeout_seconds <= 0:
+        raise ValueError("--status-timeout-seconds must be greater than 0")
+    if config.inference_mode not in {"echo", "auto", "ollama"}:
+        raise ValueError("--inference-mode must be echo, auto, or ollama")
+    if config.inference_jobs < 1:
+        raise ValueError("--inference-jobs must be at least 1")
+    if config.inference_mode == "ollama" and not (config.inference_model or "").strip():
+        raise ValueError("--inference-model is required when --inference-mode is ollama")
+    if config.expected_worker_id is not None and not config.expected_worker_id.strip():
+        raise ValueError("--expected-worker-id cannot be blank")
+    if config.operator_task_name is not None and not config.operator_task_name.strip():
+        raise ValueError("--operator-task-name cannot be blank")
+
+
+def _validate_alpha_ops_pack_config(config: AlphaOpsPackConfig) -> None:
     if config.jobs < 1:
         raise ValueError("--jobs must be at least 1")
     if config.min_live_workers < 0:
@@ -4129,6 +4359,217 @@ def _scan_artifacts_for_secrets(paths: list[Path], secrets_to_redact: tuple[str,
         if any(secret_value and secret_value in contents for secret_value in secrets_to_redact):
             leaks.append(str(path))
     return {"checked": checked, "leaks": leaks}
+
+
+def _alpha_ops_evidence_summary(report: dict[str, Any] | None) -> dict[str, Any]:
+    if not report:
+        return {}
+    remote_proof = report.get("remote_proof") or {}
+    inference_proof = report.get("inference_proof") or {}
+    alpha_status = report.get("alpha_status") or {}
+    artifacts = report.get("artifacts") or {}
+    return {
+        "ok": report.get("ok"),
+        "status": report.get("status"),
+        "counts": report.get("counts", {}),
+        "directory": artifacts.get("directory"),
+        "alpha_status": {
+            "status": alpha_status.get("status"),
+            "live_workers": alpha_status.get("live_workers"),
+            "verified_jobs": alpha_status.get("verified_jobs"),
+            "disputed_jobs": alpha_status.get("disputed_jobs"),
+            "queued_jobs": alpha_status.get("queued_jobs"),
+            "pending_jobs": alpha_status.get("pending_jobs"),
+            "leased_jobs": alpha_status.get("leased_jobs"),
+            "expected_worker": alpha_status.get("expected_worker"),
+        },
+        "remote_proof": {
+            "status": remote_proof.get("status"),
+            "created_jobs": remote_proof.get("created_jobs"),
+            "created_job_status_counts": remote_proof.get("created_job_status_counts", {}),
+            "expected_worker": remote_proof.get("expected_worker"),
+            "duration_seconds": remote_proof.get("duration_seconds"),
+        },
+        "inference_proof": {
+            "status": inference_proof.get("status"),
+            "mode": inference_proof.get("mode"),
+            "accepted_results": inference_proof.get("accepted_results"),
+            "verified_jobs": inference_proof.get("verified_jobs"),
+            "disputed_jobs": inference_proof.get("disputed_jobs"),
+            "expected_worker_contributed": inference_proof.get("expected_worker_contributed"),
+            "result_node_counts": inference_proof.get("result_node_counts", {}),
+            "routing_summary": inference_proof.get("routing_summary", {}),
+        },
+        "token_redaction": _check_by_id(report.get("checks", []), "token_redaction"),
+    }
+
+
+def _check_by_id(checks: list[dict[str, Any]], check_id: str) -> dict[str, Any] | None:
+    return next((check for check in checks if check.get("id") == check_id), None)
+
+
+def _finalize_alpha_ops_report(report: dict[str, Any]) -> dict[str, Any]:
+    counts = _check_counts(report.get("checks", []))
+    status = "fail" if counts["fail"] else ("warn" if counts["warn"] else "pass")
+    report["counts"] = counts
+    report["ok"] = counts["fail"] == 0
+    report["status"] = status
+    return report
+
+
+def _ops_pack_secret_scan_paths(out_dir: Path) -> list[Path]:
+    allowed_suffixes = {".json", ".md", ".txt", ".log", ".cmd", ".ps1", ".vbs"}
+    return [
+        path
+        for path in out_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in allowed_suffixes
+    ]
+
+
+def _zip_directory(directory: Path, zip_path: Path) -> None:
+    directory = directory.expanduser().resolve()
+    zip_path = zip_path.expanduser().resolve()
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    if zip_path.exists():
+        zip_path.unlink()
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(directory.rglob("*")):
+            if not path.is_file():
+                continue
+            resolved = path.resolve()
+            if resolved == zip_path:
+                continue
+            archive.write(resolved, resolved.relative_to(directory.parent))
+
+
+def _alpha_ops_pack_markdown(report: dict[str, Any]) -> str:
+    evidence = report.get("evidence") or {}
+    status = evidence.get("alpha_status") or {}
+    remote = evidence.get("remote_proof") or {}
+    inference = evidence.get("inference_proof") or {}
+    artifacts = report.get("artifacts") or {}
+    zip_artifact = artifacts.get("zip") or {}
+    lines = [
+        "# ChatP2P Alpha Ops Pack",
+        "",
+        f"Generated: {report.get('generated_at')}",
+        f"Status: {str(report.get('status')).upper()}",
+        f"Checks: {report.get('counts')}",
+        "",
+        "## Network",
+        "",
+        f"- Live workers: {status.get('live_workers')}",
+        f"- Verified jobs: {status.get('verified_jobs')}",
+        f"- Disputed jobs: {status.get('disputed_jobs')}",
+        f"- Queued/pending/leased: {status.get('queued_jobs')}/"
+        f"{status.get('pending_jobs')}/{status.get('leased_jobs')}",
+        "",
+        "## Proofs",
+        "",
+        f"- Remote proof: {remote.get('status')} ({remote.get('created_jobs')} jobs)",
+        f"- Inference proof: {inference.get('status')}",
+        f"- Inference result node counts: {inference.get('result_node_counts')}",
+        "",
+        "## Artifacts",
+        "",
+        f"- Evidence directory: {artifacts.get('evidence_directory')}",
+        f"- Operator handoff: {artifacts.get('operator_handoff')}",
+        f"- Partner handoff: {artifacts.get('partner_handoff')}",
+        f"- Zip: {zip_artifact.get('path')}",
+        "",
+        "## Privacy",
+        "",
+        "- The raw admission token is not included in this ops pack.",
+        "- Keep the original invite, operator config, and runtime identity files private.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _alpha_ops_operator_handoff(report: dict[str, Any]) -> str:
+    config = report.get("config") or {}
+    artifacts = report.get("artifacts") or {}
+    evidence = report.get("evidence") or {}
+    inference = evidence.get("inference_proof") or {}
+    lines = [
+        "# ChatP2P Operator Handoff",
+        "",
+        f"Status: {str(report.get('status')).upper()}",
+        f"Home: {config.get('home')}",
+        f"Evidence: {artifacts.get('evidence_directory')}",
+        f"Zip: {(artifacts.get('zip') or {}).get('path')}",
+        "",
+        "## What This Proves",
+        "",
+        f"- Remote proof status: {(evidence.get('remote_proof') or {}).get('status')}",
+        f"- Inference proof status: {inference.get('status')}",
+        f"- Inference result node counts: {inference.get('result_node_counts')}",
+        f"- Routing policy: {(inference.get('routing_summary') or {}).get('policy')}",
+        "",
+        "## Keep Private",
+        "",
+        "- The alpha invite file.",
+        "- The operator config.",
+        "- Runtime homes such as `.mesh`, identity files, SQLite databases, and raw logs.",
+        "- Any raw admission token copied outside these redacted reports.",
+        "",
+        "## Safe To Share",
+        "",
+        "- The ops pack folder or zip after `token_redaction` is passing.",
+        "- The summary markdown and JSON in this folder.",
+        "",
+        "## Repeat Command",
+        "",
+        "```powershell",
+        "python -m chatp2p.cli operator alpha-ops-pack `",
+        f"  --home {config.get('home')} `",
+        f"  --invite {config.get('invite_path')} `",
+        f"  --out {config.get('out_dir')} `",
+        f"  --expected-worker-id {config.get('expected_worker_id')} `",
+        "  --include-routing-evidence",
+        "```",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _alpha_ops_partner_handoff(report: dict[str, Any]) -> str:
+    config = report.get("config") or {}
+    expected_worker_id = config.get("expected_worker_id") or "worker_..."
+    lines = [
+        "# ChatP2P Partner Handoff",
+        "",
+        "This file is safe to share because it does not include the raw admission token.",
+        "",
+        "## Partner Update Flow",
+        "",
+        "```powershell",
+        "Set-Location E:\\ChatP2P-private-version--main\\ChatP2P",
+        "git pull",
+        "python -m pip install -e .",
+        "python -m chatp2p.cli node refresh-capabilities `",
+        "  --home E:\\ChatP2P-private-version--main\\.runtime\\.mesh `",
+        "  --invite E:\\ChatP2P-private-version--main\\alpha-invite.json `",
+        "  --restart-worker `",
+        "  --report E:\\ChatP2P-private-version--main\\.runtime\\capability-refresh-report.json",
+        "python -m chatp2p.cli node status --home E:\\ChatP2P-private-version--main\\.runtime\\.mesh",
+        "```",
+        "",
+        "## Expected Result",
+        "",
+        f"- Partner worker ID: {expected_worker_id}",
+        "- Worker process: alive",
+        "- Coordinator health: ok",
+        "- Supported job types include `inference.echo.v1`",
+        "",
+        "## Do Not Share Publicly",
+        "",
+        "- `alpha-invite.json`",
+        "- `.runtime\\.mesh`",
+        "- Any raw admission token",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def _alpha_evidence_markdown(report: dict[str, Any]) -> str:
