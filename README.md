@@ -215,10 +215,10 @@ chatp2p operator alpha-status --home D:\ChatP2PData\.mesh --invite D:\ChatP2PDat
 To collect a shareable redacted evidence folder after a partner joins, run:
 
 ```bash
-chatp2p operator alpha-evidence --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_... --jobs 25 --out D:\ChatP2PData\alpha-evidence
+chatp2p operator alpha-evidence --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_... --jobs 25 --out D:\ChatP2PData\alpha-evidence --include-inference-proof --inference-mode echo --inference-jobs 20
 ```
 
-The evidence pack writes `alpha-status.json`, `alpha-remote-proof.json`, a copied watchdog report, a Windows task query report, and `alpha-evidence-summary.md`. The raw admission token is redacted before files are written.
+The evidence pack writes `alpha-status.json`, `alpha-remote-proof.json`, optional `alpha-evidence-inference-proof.json`, a copied watchdog report, a Windows task query report, and `alpha-evidence-summary.md`. The status and inference reports show each live node's supported job types and advertised Ollama models when present. The raw admission token is redacted before files are written.
 
 To let the node check and restart managed processes from the invite, run a one-shot watchdog check:
 

@@ -110,10 +110,21 @@ def test_operator_alpha_evidence_command_parses(tmp_path):
             "worker_test",
             "--jobs",
             "1",
+            "--include-inference-proof",
+            "--inference-mode",
+            "auto",
+            "--inference-model",
+            "tiny-test-model",
+            "--inference-jobs",
+            "2",
         ]
     )
 
     assert args.func.__name__ == "alpha_evidence_command"
+    assert args.include_inference_proof is True
+    assert args.inference_mode == "auto"
+    assert args.inference_model == "tiny-test-model"
+    assert args.inference_jobs == 2
 
 
 def test_operator_alpha_inference_proof_command_parses(tmp_path):

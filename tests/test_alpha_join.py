@@ -676,6 +676,19 @@ def test_alpha_status_reports_expected_worker_without_exposing_token(tmp_path):
     assert checks["coordinator_health"] == "pass"
     assert checks["expected_worker_live"] == "pass"
     assert status_report["expected_worker"]["node_id"] == join_report["worker_node_id"]
+    assert status_report["expected_worker"]["supported_job_types"] == [
+        "eval.math.v1",
+        "eval.deterministic.v1",
+        "inference.echo.v1",
+    ]
+    assert status_report["expected_worker"]["ollama_available"] is False
+    assert status_report["expected_worker"]["ollama_models"] == []
+    assert status_report["nodes"][0]["supported_job_types"] == [
+        "eval.math.v1",
+        "eval.deterministic.v1",
+        "inference.echo.v1",
+    ]
+    assert status_report["nodes"][0]["ollama_models"] == []
     assert report_path.exists()
     assert token not in json.dumps(status_report)
 
@@ -748,6 +761,78 @@ def test_alpha_evidence_pack_runs_remote_proof_and_redacts_artifacts(tmp_path):
     assert (out_dir / "alpha-evidence-summary.md").exists()
     assert token not in json.dumps(report)
     assert token not in (out_dir / "node-watchdog-report.json").read_text(encoding="utf-8")
+
+
+def test_alpha_evidence_pack_can_include_inference_proof_sidecar(tmp_path):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    operator_home = tmp_path / ".mesh-operator"
+    partner_home = tmp_path / ".mesh-partner"
+    invite_path = tmp_path / "alpha-invite.json"
+    out_dir = tmp_path / "evidence"
+    watchdog_report = tmp_path / "node-watchdog-report.json"
+    write_alpha_invite(invite_path, AlphaInvite.create(coordinator=coordinator_url, admission_token=token))
+    _save_benchmark(operator_home)
+    _save_benchmark(partner_home)
+    watchdog_report.write_text(json.dumps({"admission_token": token}), encoding="utf-8")
+
+    try:
+        operator_join = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=invite_path,
+                home=operator_home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        partner_join = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=invite_path,
+                home=partner_home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        report = run_alpha_evidence(
+            AlphaEvidenceConfig(
+                home=operator_home,
+                invite_path=invite_path,
+                out_dir=out_dir,
+                jobs=1,
+                min_live_workers=2,
+                timeout_seconds=15.0,
+                poll_interval=0.2,
+                status_timeout_seconds=5.0,
+                watchdog_report_path=watchdog_report,
+                query_operator_task=False,
+                include_inference_proof=True,
+                inference_mode="echo",
+                inference_jobs=2,
+            )
+        )
+    finally:
+        stop_managed_process(home=operator_home, role="worker")
+        stop_managed_process(home=partner_home, role="worker")
+        _stop_server(server, thread)
+
+    sidecar_path = out_dir / "alpha-evidence-inference-proof.json"
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert operator_join["ok"] is True
+    assert partner_join["ok"] is True
+    assert report["schema"] == ALPHA_EVIDENCE_PACK_SCHEMA
+    assert report["ok"] is True
+    assert report["inference_proof"]["status"] == "pass"
+    assert report["inference_proof"]["accepted_results"] == 2
+    assert report["inference_proof"]["verified_jobs"] == 2
+    assert report["inference_proof"]["disputed_jobs"] == 0
+    assert sum(report["inference_proof"]["result_node_counts"].values()) == 2
+    assert report["inference_proof"]["expected_worker_contributed"] is False
+    assert report["artifacts"]["alpha_inference_proof"] == str(sidecar_path)
+    assert sidecar["schema"] == ALPHA_INFERENCE_PROOF_REPORT_SCHEMA
+    assert token not in json.dumps(report)
+    assert token not in sidecar_path.read_text(encoding="utf-8")
 
 
 def test_node_watchdog_starts_missing_worker_from_invite(tmp_path):

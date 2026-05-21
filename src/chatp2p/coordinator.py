@@ -644,6 +644,7 @@ class Coordinator:
                     "expired_leases": self._expired_lease_count_for_node(node_id),
                     "capability_tier": capabilities.get("capability_tier", "light"),
                     "supported_job_types": capabilities.get("supported_job_types", []),
+                    "ollama_models": capabilities.get("ollama_models", []),
                     "hardware": capabilities.get("hardware", {}),
                     "benchmark": capabilities.get("benchmark", {}),
                     "gpu": capabilities.get("gpu", {}),

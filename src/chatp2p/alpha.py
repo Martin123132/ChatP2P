@@ -212,6 +212,10 @@ class AlphaEvidenceConfig:
     watchdog_report_path: Path | None = None
     operator_task_name: str | None = DEFAULT_OPERATOR_TASK_NAME
     query_operator_task: bool = True
+    include_inference_proof: bool = False
+    inference_mode: str = "echo"
+    inference_model: str | None = None
+    inference_jobs: int = 20
 
 
 @dataclass(frozen=True)
@@ -1027,6 +1031,7 @@ def run_alpha_status(config: AlphaStatusConfig) -> dict[str, Any]:
             "coordinator_health": health,
             "managed_processes": processes,
             "snapshot_summary": _snapshot_baseline(snapshot),
+            "nodes": _status_node_summaries(snapshot),
             "expected_worker": _status_expected_worker_summary(snapshot, config.expected_worker_id),
         },
     )
@@ -1046,6 +1051,7 @@ def run_alpha_evidence(config: AlphaEvidenceConfig) -> dict[str, Any]:
     secrets_to_redact = tuple(value for value in (invite.admission_token,) if value)
     status_path = out_dir / "alpha-status.json"
     remote_proof_path = out_dir / "alpha-remote-proof.json"
+    inference_proof_path = out_dir / "alpha-evidence-inference-proof.json"
     task_status_path = out_dir / "operator-watchdog-task.json"
     summary_path = out_dir / "alpha-evidence-summary.json"
     markdown_path = out_dir / "alpha-evidence-summary.md"
@@ -1058,6 +1064,7 @@ def run_alpha_evidence(config: AlphaEvidenceConfig) -> dict[str, Any]:
 
     checks: list[dict[str, Any]] = []
     errors: list[str] = []
+    inference_proof_report = None
 
     try:
         status_report = run_alpha_status(
@@ -1112,6 +1119,46 @@ def run_alpha_evidence(config: AlphaEvidenceConfig) -> dict[str, Any]:
         errors.append(message)
         checks.append(_alpha_check("remote_proof", "fail", "Remote proof could not be collected.", details={"error": message}))
 
+    if config.include_inference_proof:
+        try:
+            inference_proof_report = run_alpha_inference_proof(
+                AlphaInferenceProofConfig(
+                    invite_path=config.invite_path,
+                    report_path=inference_proof_path,
+                    jobs=config.inference_jobs,
+                    mode=config.inference_mode,
+                    model=config.inference_model,
+                    expected_worker_id=config.expected_worker_id,
+                    min_live_workers=config.min_live_workers,
+                    min_accepted_results=config.inference_jobs,
+                    min_verified_jobs=config.inference_jobs,
+                    timeout_seconds=config.timeout_seconds,
+                    poll_interval=config.poll_interval,
+                )
+            )
+            _redact_artifact_file(inference_proof_path, secrets_to_redact)
+            checks.append(
+                _alpha_check(
+                    "inference_proof",
+                    "pass" if inference_proof_report.get("ok") else "fail",
+                    "Inference proof passed."
+                    if inference_proof_report.get("ok")
+                    else "Inference proof failed.",
+                    details=_evidence_inference_proof_summary(inference_proof_report),
+                )
+            )
+        except Exception as exc:
+            message = f"{type(exc).__name__}: {exc}"
+            errors.append(message)
+            checks.append(
+                _alpha_check(
+                    "inference_proof",
+                    "fail",
+                    "Inference proof could not be collected.",
+                    details={"error": message},
+                )
+            )
+
     watchdog_artifact = _copy_redacted_artifact(
         source=watchdog_source,
         destination=watchdog_copy_path,
@@ -1151,8 +1198,13 @@ def run_alpha_evidence(config: AlphaEvidenceConfig) -> dict[str, Any]:
         "watchdog_report": watchdog_artifact,
         "operator_watchdog_task": str(task_status_path),
     }
+    if config.include_inference_proof:
+        artifacts["alpha_inference_proof"] = str(inference_proof_path)
+    secret_scan_paths = [status_path, remote_proof_path, task_status_path, watchdog_copy_path]
+    if config.include_inference_proof:
+        secret_scan_paths.append(inference_proof_path)
     secret_scan = _scan_artifacts_for_secrets(
-        [status_path, remote_proof_path, task_status_path, watchdog_copy_path],
+        secret_scan_paths,
         secrets_to_redact,
     )
     checks.append(
@@ -1189,12 +1241,17 @@ def run_alpha_evidence(config: AlphaEvidenceConfig) -> dict[str, Any]:
             "watchdog_report_path": str(watchdog_source),
             "operator_task_name": config.operator_task_name,
             "query_operator_task": config.query_operator_task,
+            "include_inference_proof": config.include_inference_proof,
+            "inference_mode": config.inference_mode,
+            "inference_model": config.inference_model,
+            "inference_jobs": config.inference_jobs,
         },
         "invite": invite.public_summary(),
         "checks": checks,
         "artifacts": artifacts,
         "alpha_status": _evidence_status_summary(status_report),
         "remote_proof": _evidence_remote_proof_summary(remote_proof_report),
+        "inference_proof": _evidence_inference_proof_summary(inference_proof_report),
         "operator_watchdog_task": task_query,
         "errors": errors,
     }
@@ -1750,6 +1807,12 @@ def _validate_alpha_evidence_config(config: AlphaEvidenceConfig) -> None:
         raise ValueError("--poll-interval must be greater than 0")
     if config.status_timeout_seconds <= 0:
         raise ValueError("--status-timeout-seconds must be greater than 0")
+    if config.inference_mode not in {"echo", "auto", "ollama"}:
+        raise ValueError("--inference-mode must be echo, auto, or ollama")
+    if config.inference_jobs < 1:
+        raise ValueError("--inference-jobs must be at least 1")
+    if config.inference_mode == "ollama" and not (config.inference_model or "").strip():
+        raise ValueError("--inference-model is required when --inference-mode is ollama")
     if config.expected_worker_id is not None and not config.expected_worker_id.strip():
         raise ValueError("--expected-worker-id cannot be blank")
     if config.operator_task_name is not None and not config.operator_task_name.strip():
@@ -1868,7 +1931,34 @@ def _status_expected_worker_summary(
         "liveness_status": node.get("liveness_status") if node else None,
         "credits": node.get("credits") if node else None,
         "last_seen_seconds_ago": node.get("last_seen_seconds_ago") if node else None,
+        "supported_job_types": node.get("supported_job_types", []) if node else [],
+        "ollama_available": _node_ollama_available(node) if node else False,
+        "ollama_models": _node_ollama_models(node) if node else [],
     }
+
+
+def _status_node_summaries(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if snapshot is None:
+        return []
+    summaries = []
+    for node in snapshot.get("nodes", []):
+        summaries.append(
+            {
+                "node_id": node.get("node_id"),
+                "liveness_status": node.get("liveness_status"),
+                "credits": node.get("credits"),
+                "capability_tier": node.get("capability_tier"),
+                "supported_job_types": node.get("supported_job_types", []),
+                "ollama_available": _node_ollama_available(node),
+                "ollama_models": _node_ollama_models(node),
+            }
+        )
+    return summaries
+
+
+def _node_ollama_available(node: dict[str, Any]) -> bool:
+    runtime = node.get("model_runtimes", {}).get("ollama", {})
+    return bool(runtime.get("available")) if isinstance(runtime, dict) else False
 
 
 def _validate_node_watchdog_config(config: NodeWatchdogConfig) -> None:
@@ -3013,6 +3103,7 @@ def _evidence_status_summary(report: dict[str, Any] | None) -> dict[str, Any] | 
         "pending_jobs": snapshot_status.get("pending_jobs"),
         "leased_jobs": snapshot_status.get("leased_jobs"),
         "expected_worker": report.get("expected_worker"),
+        "nodes": report.get("nodes", []),
         "managed_processes": [
             {
                 "role": process.get("role"),
@@ -3047,6 +3138,43 @@ def _evidence_remote_proof_summary(report: dict[str, Any] | None) -> dict[str, A
         "created_job_status_counts": report.get("created_job_status_counts"),
         "criteria": report.get("criteria"),
         "expected_worker": report.get("expected_worker"),
+        "final_status": {
+            "live_nodes": final_status.get("live_nodes"),
+            "verified_jobs": final_status.get("verified_jobs"),
+            "disputed_jobs": final_status.get("disputed_jobs"),
+            "queued_jobs": final_status.get("queued_jobs"),
+            "pending_jobs": final_status.get("pending_jobs"),
+            "leased_jobs": final_status.get("leased_jobs"),
+            "credits": final_status.get("credits"),
+        },
+        "errors": report.get("errors", []),
+    }
+
+
+def _evidence_inference_proof_summary(report: dict[str, Any] | None) -> dict[str, Any] | None:
+    if report is None:
+        return None
+    final_status = ((report.get("final_summary") or {}).get("status")) or {}
+    parameters = report.get("parameters") or {}
+    criteria = report.get("criteria") or {}
+    expected_worker = report.get("expected_worker") or {}
+    expected_worker_results = criteria.get("expected_worker_results") or {}
+    return {
+        "ok": report.get("ok"),
+        "status": report.get("status"),
+        "duration_seconds": report.get("duration_seconds"),
+        "mode": parameters.get("mode"),
+        "selected_job_type": parameters.get("selected_job_type"),
+        "model": parameters.get("model"),
+        "created_jobs": len(report.get("created_jobs", [])),
+        "created_job_status_counts": report.get("created_job_status_counts"),
+        "accepted_results": (criteria.get("accepted_results") or {}).get("actual"),
+        "verified_jobs": (criteria.get("verified_jobs") or {}).get("actual"),
+        "disputed_jobs": (criteria.get("disputed_jobs") or {}).get("actual"),
+        "result_node_counts": report.get("result_node_counts", {}),
+        "expected_worker": expected_worker or None,
+        "expected_worker_contributed": bool(expected_worker_results.get("actual", 0) > 0),
+        "criteria": criteria,
         "final_status": {
             "live_nodes": final_status.get("live_nodes"),
             "verified_jobs": final_status.get("verified_jobs"),
@@ -3216,6 +3344,7 @@ def _scan_artifacts_for_secrets(paths: list[Path], secrets_to_redact: tuple[str,
 def _alpha_evidence_markdown(report: dict[str, Any]) -> str:
     status_summary = report.get("alpha_status") or {}
     proof_summary = report.get("remote_proof") or {}
+    inference_summary = report.get("inference_proof") or {}
     expected_worker = status_summary.get("expected_worker") or proof_summary.get("expected_worker") or {}
     task_parsed = (report.get("operator_watchdog_task") or {}).get("parsed") or {}
     lines = [
@@ -3242,17 +3371,39 @@ def _alpha_evidence_markdown(report: dict[str, Any]) -> str:
         f"- Job status counts: {proof_summary.get('created_job_status_counts')}",
         f"- Duration seconds: {proof_summary.get('duration_seconds')}",
         "",
-        "## Watchdog",
-        "",
-        f"- Operator task status: {task_parsed.get('status')}",
-        f"- Operator task logon mode: {task_parsed.get('logon_mode')}",
-        f"- Watchdog report copied: {(report.get('artifacts') or {}).get('watchdog_report', {}).get('ok')}",
-        "",
-        "## Artifacts",
-        "",
     ]
+    if inference_summary:
+        lines.extend(
+            [
+                "## Inference Proof",
+                "",
+                f"- Proof status: {inference_summary.get('status')}",
+                f"- Mode: {inference_summary.get('mode')}",
+                f"- Selected job type: {inference_summary.get('selected_job_type')}",
+                f"- Accepted results: {inference_summary.get('accepted_results')}",
+                f"- Verified jobs: {inference_summary.get('verified_jobs')}",
+                f"- Disputed jobs: {inference_summary.get('disputed_jobs')}",
+                f"- Result node counts: {inference_summary.get('result_node_counts')}",
+                f"- Expected worker contributed: {inference_summary.get('expected_worker_contributed')}",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Watchdog",
+            "",
+            f"- Operator task status: {task_parsed.get('status')}",
+            f"- Operator task logon mode: {task_parsed.get('logon_mode')}",
+            f"- Watchdog report copied: {(report.get('artifacts') or {}).get('watchdog_report', {}).get('ok')}",
+            "",
+            "## Artifacts",
+            "",
+        ]
+    )
     artifacts = report.get("artifacts") or {}
-    for key in ("alpha_status", "alpha_remote_proof", "operator_watchdog_task", "summary_json"):
+    for key in ("alpha_status", "alpha_remote_proof", "alpha_inference_proof", "operator_watchdog_task", "summary_json"):
+        if key not in artifacts:
+            continue
         lines.append(f"- {key}: {artifacts.get(key)}")
     watchdog = artifacts.get("watchdog_report") or {}
     lines.append(f"- watchdog_report: {watchdog.get('path')}")

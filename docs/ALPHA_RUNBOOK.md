@@ -160,19 +160,20 @@ Pass means the coordinator health endpoint is reachable, the local managed proce
 After a real partner has joined and the remote proof passes, collect a redacted evidence folder:
 
 ```bash
-python -m chatp2p.cli operator alpha-evidence --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_87b5cefe53e67c6c --jobs 25 --out D:\ChatP2PData\alpha-evidence
+python -m chatp2p.cli operator alpha-evidence --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_87b5cefe53e67c6c --jobs 25 --out D:\ChatP2PData\alpha-evidence --include-inference-proof --inference-mode echo --inference-jobs 20
 ```
 
 The command writes:
 
 - `D:\ChatP2PData\alpha-evidence\alpha-status.json`
 - `D:\ChatP2PData\alpha-evidence\alpha-remote-proof.json`
+- `D:\ChatP2PData\alpha-evidence\alpha-evidence-inference-proof.json` when `--include-inference-proof` is used
 - `D:\ChatP2PData\alpha-evidence\node-watchdog-report.json`
 - `D:\ChatP2PData\alpha-evidence\operator-watchdog-task.json`
 - `D:\ChatP2PData\alpha-evidence\alpha-evidence-summary.json`
 - `D:\ChatP2PData\alpha-evidence\alpha-evidence-summary.md`
 
-Pass means the current alpha status passed, the command created fresh deterministic proof jobs, the expected partner worker contributed accepted results, all proof-created jobs verified, and no raw admission token was found in the evidence artifacts. Missing watchdog or Scheduled Task evidence is a warning so the network proof remains usable while you are still setting up background reliability.
+Pass means the current alpha status passed, the command created fresh deterministic proof jobs, the optional inference proof passed, the expected partner worker contributed accepted results, all proof-created jobs verified, and no raw admission token was found in the evidence artifacts. Missing watchdog or Scheduled Task evidence is a warning so the network proof remains usable while you are still setting up background reliability.
 
 ## Node Watchdog
 

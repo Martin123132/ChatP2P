@@ -619,6 +619,10 @@ def alpha_evidence_command(args: argparse.Namespace) -> None:
                 watchdog_report_path=watchdog_report,
                 operator_task_name=args.operator_task_name,
                 query_operator_task=not args.no_task_query,
+                include_inference_proof=args.include_inference_proof,
+                inference_mode=args.inference_mode,
+                inference_model=args.inference_model,
+                inference_jobs=args.inference_jobs,
             )
         )
     except (OSError, ValueError) as exc:
@@ -1685,6 +1689,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-task-query",
         action="store_true",
         help="Skip Windows Scheduled Task query",
+    )
+    alpha_evidence_parser.add_argument(
+        "--include-inference-proof",
+        action="store_true",
+        help="Run an inference proof and include it as a redacted evidence sidecar",
+    )
+    alpha_evidence_parser.add_argument(
+        "--inference-mode",
+        choices=("echo", "auto", "ollama"),
+        default="echo",
+        help="Inference proof mode when --include-inference-proof is set",
+    )
+    alpha_evidence_parser.add_argument(
+        "--inference-model",
+        default=None,
+        help="Ollama model to require for auto/ollama inference evidence",
+    )
+    alpha_evidence_parser.add_argument(
+        "--inference-jobs",
+        default=20,
+        type=int,
+        help="Inference jobs to create when --include-inference-proof is set",
     )
     alpha_evidence_parser.set_defaults(func=alpha_evidence_command)
 
