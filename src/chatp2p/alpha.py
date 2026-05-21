@@ -208,6 +208,7 @@ class AlphaSoakConfig:
     min_accepted_results_per_round: int | None = None
     min_verified_jobs_per_round: int | None = None
     min_expected_worker_results_per_round: int | None = None
+    min_expected_worker_results_total: int | None = None
     poll_interval: float = 0.5
     stop_on_failure: bool = False
 
@@ -861,7 +862,7 @@ def run_alpha_soak(config: AlphaSoakConfig) -> dict[str, Any]:
                 min_live_workers=config.min_live_workers,
                 min_accepted_results=config.min_accepted_results_per_round,
                 min_verified_jobs=config.min_verified_jobs_per_round,
-                min_expected_worker_results=config.min_expected_worker_results_per_round,
+                min_expected_worker_results=_alpha_soak_required_expected_worker_results_per_round(config),
                 timeout_seconds=timeout_seconds,
                 poll_interval=config.poll_interval,
             )
@@ -2871,6 +2872,14 @@ def _validate_alpha_soak_config(config: AlphaSoakConfig) -> None:
         raise ValueError("--min-verified-jobs-per-round cannot be negative")
     if config.min_expected_worker_results_per_round is not None and config.min_expected_worker_results_per_round < 0:
         raise ValueError("--min-expected-worker-results-per-round cannot be negative")
+    if config.min_expected_worker_results_total is not None and config.min_expected_worker_results_total < 0:
+        raise ValueError("--min-expected-worker-results-total cannot be negative")
+    if (
+        config.min_expected_worker_results_total
+        and config.min_expected_worker_results_total > 0
+        and not config.expected_worker_id
+    ):
+        raise ValueError("--expected-worker-id is required when --min-expected-worker-results-total is positive")
     if config.poll_interval <= 0:
         raise ValueError("--poll-interval must be greater than 0")
     if config.expected_worker_id is not None and not config.expected_worker_id.strip():
@@ -3395,7 +3404,11 @@ def _alpha_soak_report(
             "min_live_workers": config.min_live_workers,
             "min_accepted_results_per_round": _alpha_soak_required_accepted_results(config),
             "min_verified_jobs_per_round": _alpha_soak_required_verified_jobs(config),
-            "min_expected_worker_results_per_round": _alpha_soak_required_expected_worker_results(config),
+            "min_expected_worker_results_per_round": _alpha_soak_required_expected_worker_results_per_round(config),
+            "min_expected_worker_results_total": _alpha_soak_required_expected_worker_results_total(
+                config,
+                completed_rounds=len(rounds),
+            ),
             "poll_interval": config.poll_interval,
             "stop_on_failure": config.stop_on_failure,
         },
@@ -3470,10 +3483,22 @@ def _alpha_soak_required_verified_jobs(config: AlphaSoakConfig) -> int:
     return config.jobs_per_round
 
 
-def _alpha_soak_required_expected_worker_results(config: AlphaSoakConfig) -> int:
+def _alpha_soak_required_expected_worker_results_per_round(config: AlphaSoakConfig) -> int:
     if config.min_expected_worker_results_per_round is not None:
         return config.min_expected_worker_results_per_round
+    if config.min_expected_worker_results_total is not None:
+        return 0
     return 1 if config.expected_worker_id else 0
+
+
+def _alpha_soak_required_expected_worker_results_total(
+    config: AlphaSoakConfig,
+    *,
+    completed_rounds: int,
+) -> int:
+    if config.min_expected_worker_results_total is not None:
+        return config.min_expected_worker_results_total
+    return _alpha_soak_required_expected_worker_results_per_round(config) * completed_rounds
 
 
 def _alpha_soak_totals(rounds: list[dict[str, Any]], *, duration_seconds: float) -> dict[str, Any]:
@@ -3524,7 +3549,10 @@ def _alpha_soak_criteria(
     completed_required = 1 if config.duration_seconds is not None else config.rounds
     completed = int(totals["rounds_completed"])
     round_created_requirement = config.jobs_per_round * completed
-    expected_worker_required = _alpha_soak_required_expected_worker_results(config) * completed
+    expected_worker_required = _alpha_soak_required_expected_worker_results_total(
+        config,
+        completed_rounds=completed,
+    )
     return {
         "rounds_completed": {
             "actual": completed,

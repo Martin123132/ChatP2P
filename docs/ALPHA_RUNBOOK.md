@@ -159,15 +159,15 @@ Contributor machines use the same command with their own runtime home and privat
 Use this when the partner worker is online and you want repeated measured proof without asking them to run more commands:
 
 ```bash
-python -m chatp2p.cli operator alpha-soak --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_87b5cefe53e67c6c --min-live-workers 2 --jobs-per-round 10 --rounds 6 --round-interval-seconds 30 --report D:\ChatP2PData\alpha-soak-report.json
+python -m chatp2p.cli operator alpha-soak --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_87b5cefe53e67c6c --min-live-workers 2 --jobs-per-round 10 --rounds 6 --round-interval-seconds 30 --min-expected-worker-results-total 10 --report D:\ChatP2PData\alpha-soak-report.json
 ```
 
-The report schema is `chatp2p.alpha-soak-report.v1`. The command writes the roll-up report plus sidecar files such as `D:\ChatP2PData\alpha-soak-report-round-001.json`. Pass means every completed round passed, the expected worker contributed at least the configured number of results per round, all proof-created jobs verified, and no proof-created jobs disputed, expired, or stayed incomplete.
+The report schema is `chatp2p.alpha-soak-report.v1`. The command writes the roll-up report plus sidecar files such as `D:\ChatP2PData\alpha-soak-report-round-001.json`. Pass means every completed round passed, the expected worker met the configured total result threshold, all proof-created jobs verified, and no proof-created jobs disputed, expired, or stayed incomplete. Use `--min-expected-worker-results-per-round` only when you intentionally need the expected worker to win work in every round; for normal alpha races, prefer the total threshold.
 
 For an unattended run, add a wall-clock cap:
 
 ```bash
-python -m chatp2p.cli operator alpha-soak --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_87b5cefe53e67c6c --min-live-workers 2 --jobs-per-round 10 --rounds 120 --duration-seconds 3600 --round-interval-seconds 20 --report D:\ChatP2PData\alpha-soak-report-hour.json
+python -m chatp2p.cli operator alpha-soak --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_87b5cefe53e67c6c --min-live-workers 2 --jobs-per-round 10 --rounds 120 --duration-seconds 3600 --round-interval-seconds 20 --min-expected-worker-results-total 100 --report D:\ChatP2PData\alpha-soak-report-hour.json
 ```
 
 ## Alpha Status

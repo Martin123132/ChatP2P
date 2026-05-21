@@ -667,6 +667,7 @@ def alpha_soak_command(args: argparse.Namespace) -> None:
                 min_accepted_results_per_round=args.min_accepted_results_per_round,
                 min_verified_jobs_per_round=args.min_verified_jobs_per_round,
                 min_expected_worker_results_per_round=args.min_expected_worker_results_per_round,
+                min_expected_worker_results_total=args.min_expected_worker_results_total,
                 poll_interval=args.poll_interval,
                 stop_on_failure=args.stop_on_failure,
             )
@@ -2163,6 +2164,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         type=int,
         help="Minimum results from the expected worker in each round. Defaults to 1 when expected worker is set",
+    )
+    alpha_soak_parser.add_argument(
+        "--min-expected-worker-results-total",
+        default=None,
+        type=int,
+        help=(
+            "Minimum total results from the expected worker across the whole soak. "
+            "When set, the default per-round expected-worker requirement becomes 0 unless explicitly provided"
+        ),
     )
     alpha_soak_parser.add_argument(
         "--poll-interval",

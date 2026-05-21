@@ -710,6 +710,66 @@ def test_alpha_soak_runs_repeated_echo_rounds_and_redacts_reports(tmp_path):
     assert token not in report_path.read_text(encoding="utf-8")
 
 
+def test_alpha_soak_total_expected_worker_threshold_allows_missed_rounds(tmp_path):
+    config = AlphaSoakConfig(
+        invite_path=tmp_path / "alpha-invite.json",
+        report_path=tmp_path / "alpha-soak-report.json",
+        jobs_per_round=10,
+        rounds=3,
+        expected_worker_id="worker_partner",
+        min_live_workers=2,
+        min_expected_worker_results_total=6,
+    )
+    rounds = [
+        {
+            "ok": True,
+            "jobs_created": 10,
+            "accepted_results": 10,
+            "verified_jobs": 10,
+            "disputed_jobs": 0,
+            "expired_jobs": 0,
+            "incomplete_jobs": 0,
+            "expected_worker_results": 0,
+            "result_node_counts": {"worker_local": 10},
+        },
+        {
+            "ok": True,
+            "jobs_created": 10,
+            "accepted_results": 10,
+            "verified_jobs": 10,
+            "disputed_jobs": 0,
+            "expired_jobs": 0,
+            "incomplete_jobs": 0,
+            "expected_worker_results": 3,
+            "result_node_counts": {"worker_local": 7, "worker_partner": 3},
+        },
+        {
+            "ok": True,
+            "jobs_created": 10,
+            "accepted_results": 10,
+            "verified_jobs": 10,
+            "disputed_jobs": 0,
+            "expired_jobs": 0,
+            "incomplete_jobs": 0,
+            "expected_worker_results": 3,
+            "result_node_counts": {"worker_local": 7, "worker_partner": 3},
+        },
+    ]
+
+    totals = alpha_module._alpha_soak_totals(rounds, duration_seconds=60.0)
+    criteria = alpha_module._alpha_soak_criteria(config, rounds, totals)
+
+    assert alpha_module._alpha_soak_required_expected_worker_results_per_round(config) == 0
+    assert criteria["rounds_passed"]["passed"] is True
+    assert criteria["expected_worker_results"] == {
+        "actual": 6,
+        "required": 6,
+        "passed": True,
+    }
+    assert totals["expected_worker_rounds"] == 2
+    assert totals["result_node_counts"] == {"worker_local": 24, "worker_partner": 6}
+
+
 def test_alpha_status_reports_expected_worker_without_exposing_token(tmp_path):
     token = "alpha-token-123"
     server, thread, coordinator_url = _start_public_alpha(token)

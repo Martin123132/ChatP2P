@@ -214,10 +214,10 @@ Echo mode creates signed `inference.echo.v1` jobs and verifies the result path t
 For a longer two-machine stability run, use the soak harness. It runs repeated inference-proof rounds, writes one sidecar report per round, and rolls everything into a single pass/fail report:
 
 ```bash
-chatp2p operator alpha-soak --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_... --min-live-workers 2 --jobs-per-round 10 --rounds 6 --round-interval-seconds 30 --report D:\ChatP2PData\alpha-soak-report.json
+chatp2p operator alpha-soak --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_... --min-live-workers 2 --jobs-per-round 10 --rounds 6 --round-interval-seconds 30 --min-expected-worker-results-total 10 --report D:\ChatP2PData\alpha-soak-report.json
 ```
 
-Pass means every completed round met its live-worker, accepted-result, verified-job, expected-worker, and zero-dispute/zero-expiry thresholds. Add `--duration-seconds 3600` when you want a wall-clock cap for a longer unattended run.
+Pass means every completed round met its live-worker, accepted-result, verified-job, and zero-dispute/zero-expiry thresholds, and the expected worker met the configured total contribution threshold. Add `--duration-seconds 3600` when you want a wall-clock cap for a longer unattended run. Use `--min-expected-worker-results-per-round` only when you intentionally need that worker to contribute in every round.
 
 For a quick health check, use:
 
