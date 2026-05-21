@@ -152,6 +152,14 @@ chatp2p proof provider-edge --provider-config D:\ChatP2PData\provider-config.jso
 
 The report schema is `chatp2p.provider-edge-proof-report.v1`. A happy-path pass shows local/provider-edge/peer route counts, verified jobs, zero disputes, zero fallback placeholder routes, and a credit summary. See `docs/PROVIDER_EDGE_MODE.md` for the full runbook.
 
+To wrap the provider proof into a handoff folder and zip, run:
+
+```bash
+chatp2p operator provider-ops-pack --provider-config D:\ChatP2PData\provider-config.json --out D:\ChatP2PData\provider-ops-pack --subscribers 3 --edge-workers 1 --jobs 25
+```
+
+The ops pack creates `provider-edge-proof.json`, `provider-ops-pack-summary.json`, `provider-ops-pack-summary.md`, `provider-handoff.md`, and `OUT.zip` by default.
+
 ## Public Alpha Seed Mode
 
 Do not expose a coordinator to the internet without an admission token. Bootstrap an operator config and invite file:

@@ -80,3 +80,26 @@ Pass means:
 - production privacy isolation
 
 The point is to make the broadband-provider architecture measurable before touching any real network deployment work.
+
+## Ops Pack
+
+Use the ops pack command when you want a repeatable folder that can be reviewed or shared without copying runtime homes, identity files, SQLite databases, or private alpha invite files:
+
+```powershell
+python -m chatp2p.cli operator provider-ops-pack `
+  --provider-config D:\ChatP2PData\provider-config.json `
+  --out D:\ChatP2PData\provider-ops-pack `
+  --subscribers 3 `
+  --edge-workers 1 `
+  --jobs 25
+```
+
+The pack writes:
+
+- `provider-edge-proof.json`
+- `provider-ops-pack-summary.json`
+- `provider-ops-pack-summary.md`
+- `provider-handoff.md`
+- `D:\ChatP2PData\provider-ops-pack.zip`
+
+Pass means the underlying provider proof passed, disputes stayed at `0`, no job routed to `fallback_placeholder`, and the zip was created unless `--no-zip` was used.

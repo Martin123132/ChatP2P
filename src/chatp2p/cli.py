@@ -63,10 +63,12 @@ from .packets import JobLeaseRenewal, NodeRegistration
 from .proof import OllamaProofConfig, SwarmProofConfig, proof_summary, run_ollama_proof, run_swarm_proof
 from .provider import (
     ProviderEdgeProofConfig,
+    ProviderOpsPackConfig,
     add_provider_subscriber,
     bootstrap_provider_config,
     join_provider_node,
     run_provider_edge_proof,
+    run_provider_ops_pack,
 )
 from .storage import SQLiteCoordinatorStore
 from .worker import WorkerNode
@@ -586,6 +588,48 @@ def bootstrap_provider_command(args: argparse.Namespace) -> None:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     print(json.dumps(report, indent=2, sort_keys=True))
+
+
+def provider_ops_pack_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_provider_ops_pack(
+            ProviderOpsPackConfig(
+                provider_config_path=Path(args.provider_config),
+                out_dir=Path(args.out),
+                subscribers=args.subscribers,
+                edge_workers=args.edge_workers,
+                peer_workers=args.peer_workers,
+                verifier_workers=args.verifier_workers,
+                jobs=args.jobs,
+                timeout_seconds=args.timeout_seconds,
+                create_zip=not args.no_zip,
+                zip_path=Path(args.zip) if args.zip else None,
+            )
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(
+        json.dumps(
+            {
+                "ok": report["ok"],
+                "status": report["status"],
+                "schema": report["schema"],
+                "provider": report["provider"],
+                "proof": {
+                    "jobs_created": report["proof"]["jobs_created"],
+                    "jobs_verified": report["proof"]["jobs_verified"],
+                    "jobs_disputed": report["proof"]["jobs_disputed"],
+                    "jobs_expired": report["proof"]["jobs_expired"],
+                    "route_counts": report["proof"]["route_counts"],
+                },
+                "artifacts": report["artifacts"],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if not report["ok"]:
+        raise SystemExit(1)
 
 
 def provider_create_subscriber_command(args: argparse.Namespace) -> None:
@@ -1908,6 +1952,31 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap_provider_parser.add_argument("--provider-id", default=None, help="Optional stable provider id")
     bootstrap_provider_parser.add_argument("--force", action="store_true", help="Replace an existing config")
     bootstrap_provider_parser.set_defaults(func=bootstrap_provider_command)
+
+    provider_ops_pack_parser = operator_subcommands.add_parser(
+        "provider-ops-pack",
+        help="Build provider-edge simulation evidence, handoff notes, and an optional zip",
+    )
+    provider_ops_pack_parser.add_argument("--provider-config", required=True, help="Path to provider config JSON")
+    provider_ops_pack_parser.add_argument("--out", required=True, help="Provider ops pack output directory")
+    provider_ops_pack_parser.add_argument("--subscribers", default=3, type=int, help="Subscribers to simulate")
+    provider_ops_pack_parser.add_argument("--edge-workers", default=1, type=int, help="Provider edge workers to simulate")
+    provider_ops_pack_parser.add_argument("--peer-workers", default=1, type=int, help="Trusted peer workers to simulate")
+    provider_ops_pack_parser.add_argument("--verifier-workers", default=1, type=int, help="Verifier workers to simulate")
+    provider_ops_pack_parser.add_argument("--jobs", default=25, type=int, help="Subscriber jobs to create")
+    provider_ops_pack_parser.add_argument(
+        "--timeout-seconds",
+        default=60.0,
+        type=float,
+        help="Maximum provider proof runtime before marking the pack failed",
+    )
+    provider_ops_pack_parser.add_argument("--zip", default=None, help="Optional zip output path. Defaults to OUT.zip")
+    provider_ops_pack_parser.add_argument(
+        "--no-zip",
+        action="store_true",
+        help="Skip zip creation and leave the ops pack as a folder only",
+    )
+    provider_ops_pack_parser.set_defaults(func=provider_ops_pack_command)
 
     bootstrap_alpha_parser = operator_subcommands.add_parser(
         "bootstrap-alpha",

@@ -1,4 +1,5 @@
 import json
+import zipfile
 
 from chatp2p.cli import build_parser
 from chatp2p.coordinator import Coordinator
@@ -7,8 +8,10 @@ from chatp2p.packets import NodeRegistration
 from chatp2p.provider import (
     PROVIDER_CONFIG_SCHEMA,
     PROVIDER_EDGE_PROOF_REPORT_SCHEMA,
+    PROVIDER_OPS_PACK_SCHEMA,
     ProviderConfig,
     ProviderEdgeProofConfig,
+    ProviderOpsPackConfig,
     add_provider_subscriber,
     bootstrap_provider_config,
     join_provider_node,
@@ -16,6 +19,7 @@ from chatp2p.provider import (
     provider_capability_profile,
     provider_snapshot_summary,
     run_provider_edge_proof,
+    run_provider_ops_pack,
     select_provider_route,
     write_provider_config,
 )
@@ -197,6 +201,52 @@ def test_provider_edge_proof_report_passes_and_is_serializable(tmp_path):
     json.dumps(report)
 
 
+def test_provider_ops_pack_builds_summary_handoff_and_zip(tmp_path):
+    config_path = tmp_path / "provider-config.json"
+    config = ProviderConfig.create(
+        provider_name="Demo Fibre AI",
+        region="Hull",
+        provider_id="provider_demo",
+    )
+    write_provider_config(config_path, config)
+    out_dir = tmp_path / "provider-ops-pack"
+    zip_path = tmp_path / "provider-ops-pack.zip"
+
+    report = run_provider_ops_pack(
+        ProviderOpsPackConfig(
+            provider_config_path=config_path,
+            out_dir=out_dir,
+            subscribers=3,
+            edge_workers=1,
+            peer_workers=1,
+            verifier_workers=1,
+            jobs=9,
+            timeout_seconds=30,
+            zip_path=zip_path,
+        )
+    )
+
+    assert report["schema"] == PROVIDER_OPS_PACK_SCHEMA
+    assert report["status"] == "pass"
+    assert report["proof"]["jobs_verified"] == 9
+    assert report["proof"]["route_counts"]["fallback_placeholder"] == 0
+    assert (out_dir / "provider-edge-proof.json").exists()
+    assert (out_dir / "provider-ops-pack-summary.json").exists()
+    assert (out_dir / "provider-ops-pack-summary.md").exists()
+    assert (out_dir / "provider-handoff.md").exists()
+    assert zip_path.exists()
+
+    summary = json.loads((out_dir / "provider-ops-pack-summary.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "pass"
+    assert summary["artifacts"]["zip"]["status"] == "created"
+
+    with zipfile.ZipFile(zip_path) as archive:
+        names = set(archive.namelist())
+    assert "provider-ops-pack/provider-edge-proof.json" in names
+    assert "provider-ops-pack/provider-ops-pack-summary.json" in names
+    assert "provider-ops-pack/provider-handoff.md" in names
+
+
 def test_provider_cli_commands_parse(tmp_path):
     parser = build_parser()
 
@@ -244,8 +294,21 @@ def test_provider_cli_commands_parse(tmp_path):
             "3",
         ]
     )
+    ops_pack = parser.parse_args(
+        [
+            "operator",
+            "provider-ops-pack",
+            "--provider-config",
+            str(tmp_path / "provider-config.json"),
+            "--out",
+            str(tmp_path / "provider-ops-pack"),
+            "--jobs",
+            "3",
+        ]
+    )
 
     assert bootstrap.func.__name__ == "bootstrap_provider_command"
     assert subscriber.func.__name__ == "provider_create_subscriber_command"
     assert join.func.__name__ == "node_join_provider_command"
     assert proof.func.__name__ == "run_proof_provider_edge"
+    assert ops_pack.func.__name__ == "provider_ops_pack_command"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from .worker import WorkerNode
 PROVIDER_CONFIG_SCHEMA = "chatp2p.provider-config.v1"
 PROVIDER_JOIN_REPORT_SCHEMA = "chatp2p.provider-join-report.v1"
 PROVIDER_EDGE_PROOF_REPORT_SCHEMA = "chatp2p.provider-edge-proof-report.v1"
+PROVIDER_OPS_PACK_SCHEMA = "chatp2p.provider-ops-pack.v1"
 
 DEFAULT_ALLOWED_JOB_TYPES = ["eval.deterministic.v1", "inference.echo.v1"]
 DEFAULT_ROUTING_POLICY = ["prefer_local", "prefer_provider_edge", "prefer_trusted_peer", "fallback_placeholder"]
@@ -157,6 +159,20 @@ class ProviderEdgeProofConfig:
     peer_workers: int = 1
     verifier_workers: int = 1
     timeout_seconds: float = 60.0
+
+
+@dataclass(frozen=True)
+class ProviderOpsPackConfig:
+    provider_config_path: Path
+    out_dir: Path
+    subscribers: int = 3
+    edge_workers: int = 1
+    jobs: int = 25
+    peer_workers: int = 1
+    verifier_workers: int = 1
+    timeout_seconds: float = 60.0
+    create_zip: bool = True
+    zip_path: Path | None = None
 
 
 def bootstrap_provider_config(
@@ -440,6 +456,73 @@ def run_provider_edge_proof(config: ProviderEdgeProofConfig) -> dict[str, Any]:
     return report
 
 
+def run_provider_ops_pack(config: ProviderOpsPackConfig) -> dict[str, Any]:
+    _validate_provider_ops_pack_config(config)
+    provider = load_provider_config(config.provider_config_path)
+    out_dir = config.out_dir.expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    proof_path = out_dir / "provider-edge-proof.json"
+    summary_path = out_dir / "provider-ops-pack-summary.json"
+    markdown_path = out_dir / "provider-ops-pack-summary.md"
+    handoff_path = out_dir / "provider-handoff.md"
+    zip_path = config.zip_path.expanduser().resolve() if config.zip_path is not None else out_dir.with_suffix(".zip")
+
+    proof = run_provider_edge_proof(
+        ProviderEdgeProofConfig(
+            provider_config_path=config.provider_config_path,
+            subscribers=config.subscribers,
+            edge_workers=config.edge_workers,
+            peer_workers=config.peer_workers,
+            verifier_workers=config.verifier_workers,
+            jobs=config.jobs,
+            report_path=proof_path,
+            timeout_seconds=config.timeout_seconds,
+        )
+    )
+    artifacts: dict[str, dict[str, Any]] = {
+        "provider_edge_proof": {"path": str(proof_path), "status": "created"},
+        "summary_json": {"path": str(summary_path), "status": "planned"},
+        "summary_markdown": {"path": str(markdown_path), "status": "planned"},
+        "provider_handoff": {"path": str(handoff_path), "status": "planned"},
+    }
+    if config.create_zip:
+        artifacts["zip"] = {"path": str(zip_path), "status": "planned"}
+
+    report = _provider_ops_pack_report(
+        config=config,
+        provider=provider,
+        proof=proof,
+        artifacts=artifacts,
+    )
+    _write_json(summary_path, report)
+    _write_text(markdown_path, _provider_ops_pack_markdown(report))
+    _write_text(handoff_path, _provider_ops_handoff(report))
+    artifacts["summary_json"]["status"] = "created"
+    artifacts["summary_markdown"]["status"] = "created"
+    artifacts["provider_handoff"]["status"] = "created"
+
+    if config.create_zip:
+        try:
+            _zip_directory(out_dir, zip_path)
+            artifacts["zip"] = {"path": str(zip_path), "status": "created"}
+        except OSError as exc:
+            artifacts["zip"] = {"path": str(zip_path), "status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+
+    report = _provider_ops_pack_report(
+        config=config,
+        provider=provider,
+        proof=proof,
+        artifacts=artifacts,
+    )
+    _write_json(summary_path, report)
+    _write_text(markdown_path, _provider_ops_pack_markdown(report))
+    _write_text(handoff_path, _provider_ops_handoff(report))
+    if config.create_zip and artifacts.get("zip", {}).get("status") == "created":
+        _zip_directory(out_dir, zip_path)
+    return report
+
+
 def provider_capability_profile(
     *,
     config: ProviderConfig,
@@ -597,6 +680,21 @@ def _validate_provider_edge_proof_config(config: ProviderEdgeProofConfig) -> Non
         raise ValueError("--timeout-seconds must be greater than 0")
 
 
+def _validate_provider_ops_pack_config(config: ProviderOpsPackConfig) -> None:
+    _validate_provider_edge_proof_config(
+        ProviderEdgeProofConfig(
+            provider_config_path=config.provider_config_path,
+            subscribers=config.subscribers,
+            edge_workers=config.edge_workers,
+            peer_workers=config.peer_workers,
+            verifier_workers=config.verifier_workers,
+            jobs=config.jobs,
+            report_path=config.out_dir / "provider-edge-proof.json",
+            timeout_seconds=config.timeout_seconds,
+        )
+    )
+
+
 def _provider_public_summary(config: ProviderConfig) -> dict[str, Any]:
     return {
         "schema": config.schema,
@@ -607,6 +705,200 @@ def _provider_public_summary(config: ProviderConfig) -> dict[str, Any]:
         "default_routing_policy": list(config.default_routing_policy),
         "subscriber_count": len(config.subscribers),
     }
+
+
+def _provider_ops_pack_report(
+    *,
+    config: ProviderOpsPackConfig,
+    provider: ProviderConfig,
+    proof: dict[str, Any],
+    artifacts: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    checks = [
+        {
+            "name": "provider_edge_proof",
+            "passed": bool(proof.get("ok")),
+            "details": {
+                "status": proof.get("status"),
+                "jobs_verified": proof.get("jobs_verified"),
+                "jobs_created": proof.get("jobs_created"),
+                "failure_reasons": proof.get("failure_reasons", []),
+            },
+        },
+        {
+            "name": "zero_disputes",
+            "passed": proof.get("jobs_disputed") == 0,
+            "details": {"jobs_disputed": proof.get("jobs_disputed")},
+        },
+        {
+            "name": "zero_fallback_placeholder",
+            "passed": proof.get("route_counts", {}).get("fallback_placeholder") == 0,
+            "details": {"route_counts": proof.get("route_counts", {})},
+        },
+    ]
+    if config.create_zip:
+        checks.append(
+            {
+                "name": "zip_pack",
+                "passed": artifacts.get("zip", {}).get("status") == "created",
+                "details": artifacts.get("zip", {}),
+            }
+        )
+    ok = all(check["passed"] for check in checks)
+    return {
+        "ok": ok,
+        "status": "pass" if ok else "fail",
+        "schema": PROVIDER_OPS_PACK_SCHEMA,
+        "generated_at": _iso_now(),
+        "provider": _provider_public_summary(provider),
+        "parameters": {
+            "provider_config": str(config.provider_config_path.expanduser().resolve()),
+            "out": str(config.out_dir.expanduser().resolve()),
+            "subscribers": config.subscribers,
+            "edge_workers": config.edge_workers,
+            "peer_workers": config.peer_workers,
+            "verifier_workers": config.verifier_workers,
+            "jobs": config.jobs,
+            "timeout_seconds": config.timeout_seconds,
+            "create_zip": config.create_zip,
+            "zip_path": str(config.zip_path.expanduser().resolve()) if config.zip_path else None,
+        },
+        "artifacts": artifacts,
+        "checks": checks,
+        "proof": _provider_edge_proof_summary(proof),
+    }
+
+
+def _provider_edge_proof_summary(proof: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": proof.get("schema"),
+        "status": proof.get("status"),
+        "provider_id": proof.get("provider_id"),
+        "subscribers_created": proof.get("subscribers_created"),
+        "subscriber_nodes_live": proof.get("subscriber_nodes_live"),
+        "edge_workers_live": proof.get("edge_workers_live"),
+        "jobs_created": proof.get("jobs_created"),
+        "jobs_verified": proof.get("jobs_verified"),
+        "jobs_disputed": proof.get("jobs_disputed"),
+        "jobs_expired": proof.get("jobs_expired"),
+        "route_counts": proof.get("route_counts", {}),
+        "verification_rate": proof.get("verification_rate"),
+        "credit_summary": proof.get("credit_summary", {}),
+        "average_latency_by_route": proof.get("average_latency_by_route", {}),
+        "failure_reasons": proof.get("failure_reasons", []),
+    }
+
+
+def _provider_ops_pack_markdown(report: dict[str, Any]) -> str:
+    proof = report["proof"]
+    artifacts = report["artifacts"]
+    route_counts = proof.get("route_counts", {})
+    checks = "\n".join(
+        f"- [{'x' if check['passed'] else ' '}] {check['name']}"
+        for check in report["checks"]
+    )
+    return "\n".join(
+        [
+            "# ChatP2P Provider Ops Pack",
+            "",
+            f"Status: **{report['status']}**",
+            f"Generated: `{report['generated_at']}`",
+            f"Provider: `{report['provider']['provider_name']}` (`{report['provider']['provider_id']}`)",
+            f"Region: `{report['provider']['region']}`",
+            "",
+            "## Proof Summary",
+            "",
+            f"- Jobs verified: {proof.get('jobs_verified')}/{proof.get('jobs_created')}",
+            f"- Disputed jobs: {proof.get('jobs_disputed')}",
+            f"- Expired jobs: {proof.get('jobs_expired')}",
+            f"- Verification rate: {proof.get('verification_rate')}",
+            f"- Subscriber nodes live: {proof.get('subscriber_nodes_live')}",
+            f"- Provider edge workers live: {proof.get('edge_workers_live')}",
+            f"- Routes: local={route_counts.get('local', 0)}, provider_edge={route_counts.get('provider_edge', 0)}, peer={route_counts.get('peer', 0)}, fallback_placeholder={route_counts.get('fallback_placeholder', 0)}",
+            "",
+            "## Checks",
+            "",
+            checks,
+            "",
+            "## Artifacts",
+            "",
+            f"- Provider edge proof: `{artifacts['provider_edge_proof']['path']}`",
+            f"- Summary JSON: `{artifacts['summary_json']['path']}`",
+            f"- Provider handoff: `{artifacts['provider_handoff']['path']}`",
+            f"- Zip: `{(artifacts.get('zip') or {}).get('path')}`",
+            "",
+            "This pack is a simulation artifact. It does not claim real ISP deployment, billing, or production privacy isolation.",
+            "",
+        ]
+    )
+
+
+def _provider_ops_handoff(report: dict[str, Any]) -> str:
+    proof = report["proof"]
+    route_counts = proof.get("route_counts", {})
+    return "\n".join(
+        [
+            "# Provider Edge Handoff",
+            "",
+            "This folder is the ChatP2P ISP-edge / broadband-bundle simulation evidence pack.",
+            "",
+            "What this proves:",
+            "",
+            f"- Provider config loaded for `{report['provider']['provider_name']}` in `{report['provider']['region']}`.",
+            f"- {proof.get('subscribers_created')} subscriber nodes were simulated.",
+            f"- {proof.get('edge_workers_live')} provider edge worker(s) were live.",
+            f"- {proof.get('jobs_verified')}/{proof.get('jobs_created')} signed jobs verified.",
+            f"- Route counts were local={route_counts.get('local', 0)}, provider_edge={route_counts.get('provider_edge', 0)}, peer={route_counts.get('peer', 0)}, fallback_placeholder={route_counts.get('fallback_placeholder', 0)}.",
+            f"- Disputes stayed at {proof.get('jobs_disputed')}.",
+            "",
+            "What this does not prove:",
+            "",
+            "- Real ISP deployment.",
+            "- Real billing, tokenisation, or money movement.",
+            "- Router firmware or physical broadband hardware integration.",
+            "- Public internet exposure.",
+            "",
+            "Repeat command:",
+            "",
+            "```powershell",
+            "python -m chatp2p.cli operator provider-ops-pack `",
+            f"  --provider-config {report['parameters']['provider_config']} `",
+            f"  --out {report['parameters']['out']} `",
+            f"  --subscribers {report['parameters']['subscribers']} `",
+            f"  --edge-workers {report['parameters']['edge_workers']} `",
+            f"  --jobs {report['parameters']['jobs']}",
+            "```",
+            "",
+            "Keep runtime homes, identity files, SQLite databases, and private alpha invite/operator files out of the pack.",
+            "",
+        ]
+    )
+
+
+def _write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _zip_directory(directory: Path, zip_path: Path) -> None:
+    directory = directory.expanduser().resolve()
+    zip_path = zip_path.expanduser().resolve()
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
+    if zip_path.exists():
+        zip_path.unlink()
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(directory.rglob("*")):
+            if not path.is_file():
+                continue
+            resolved = path.resolve()
+            if resolved == zip_path:
+                continue
+            archive.write(resolved, resolved.relative_to(directory.parent).as_posix())
 
 
 def _proof_subscribers(config: ProviderConfig, count: int) -> list[dict[str, Any]]:
