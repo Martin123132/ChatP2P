@@ -15,6 +15,7 @@ from typing import Any
 WINDOWS_TASK_INSTALL_REPORT_SCHEMA = "chatp2p.windows-task-install-report.v1"
 WINDOWS_TASK_UNINSTALL_REPORT_SCHEMA = "chatp2p.windows-task-uninstall-report.v1"
 DEFAULT_TASK_NAME = "ChatP2P Watchdog"
+DEFAULT_STARTUP_TIMEOUT_SECONDS = 90.0
 SUPPORTED_SCHEDULES = {"onlogon": "ONLOGON", "onstart": "ONSTART"}
 
 
@@ -37,7 +38,7 @@ class WatchdogTaskConfig:
     lease_timeout_seconds: float = 30.0
     node_stale_seconds: float = 60.0
     worker_interval: float = 0.5
-    startup_timeout_seconds: float = 15.0
+    startup_timeout_seconds: float = DEFAULT_STARTUP_TIMEOUT_SECONDS
     cpu_duration_seconds: float = 0.25
     ollama_base_url: str = "http://127.0.0.1:11434"
     python_executable: Path | None = None

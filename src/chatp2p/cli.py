@@ -76,6 +76,7 @@ from .storage import SQLiteCoordinatorStore
 from .worker import WorkerNode
 from .windows_task import (
     DEFAULT_TASK_NAME,
+    DEFAULT_STARTUP_TIMEOUT_SECONDS,
     WatchdogTaskConfig,
     install_watchdog_task,
     uninstall_watchdog_task,
@@ -1585,7 +1586,7 @@ def build_parser() -> argparse.ArgumentParser:
     up_parser.add_argument("--worker-interval", default=5.0, type=float, help="Seconds between worker polling attempts")
     up_parser.add_argument(
         "--startup-timeout-seconds",
-        default=10.0,
+        default=DEFAULT_STARTUP_TIMEOUT_SECONDS,
         type=float,
         help="Seconds to wait for coordinator health before starting a worker",
     )
@@ -1695,7 +1696,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     watchdog_parser.add_argument(
         "--startup-timeout-seconds",
-        default=15.0,
+        default=DEFAULT_STARTUP_TIMEOUT_SECONDS,
         type=float,
         help="Seconds to wait for restarted roles to become healthy",
     )
@@ -1792,7 +1793,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install_task_parser.add_argument(
         "--startup-timeout-seconds",
-        default=15.0,
+        default=DEFAULT_STARTUP_TIMEOUT_SECONDS,
         type=float,
         help="Seconds to wait for restarted roles to become healthy",
     )

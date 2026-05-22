@@ -132,6 +132,26 @@ def test_provider_config_creation_and_subscriber_round_trip(tmp_path):
     assert reloaded.subscribers["sub_demo_001"]["plan"] == "Broadband AI Plus"
 
 
+def test_provider_config_loader_accepts_bom_and_reports_missing_file(tmp_path):
+    config_path = tmp_path / "provider-config.json"
+    provider = ProviderConfig.create(
+        provider_name="Demo Fibre AI",
+        region="Hull",
+        provider_id="provider_demo",
+    )
+    config_path.write_text(json.dumps(provider.to_dict()), encoding="utf-8-sig")
+
+    loaded = load_provider_config(config_path)
+
+    assert loaded.provider_id == "provider_demo"
+    try:
+        load_provider_config(tmp_path / "missing-provider-config.json")
+    except FileNotFoundError as exc:
+        assert "provider config file not found" in str(exc)
+    else:
+        raise AssertionError("Expected missing provider config to fail")
+
+
 def test_join_provider_writes_role_capability_profile(tmp_path):
     config_path = tmp_path / "provider-config.json"
     config = ProviderConfig.create(

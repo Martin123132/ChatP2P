@@ -289,6 +289,8 @@ On Windows, install that watchdog as a Scheduled Task:
 chatp2p node install-task --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --operator-config D:\ChatP2PData\operator-config.json --role both --task-name "ChatP2P Operator Watchdog" --report D:\ChatP2PData\node-watchdog-report.json
 ```
 
+Managed coordinator startup can take longer as the SQLite evidence database grows, so watchdog and task restarts now wait `90` seconds by default. Keep runtime files and generated launchers on the D drive unless you intentionally use `--allow-startup-folder-fallback`.
+
 Contributor machines can install a worker-only task without the operator config:
 
 ```bash

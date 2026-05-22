@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .jsonio import read_json_file
+
 from .ollama import DEFAULT_OLLAMA_BASE_URL, OllamaError, list_ollama_models
 
 CAPABILITY_PROFILE_NAME = "node-capabilities.json"
@@ -201,7 +203,7 @@ def load_node_capabilities(home: Path) -> dict[str, Any] | None:
     path = home / CAPABILITY_PROFILE_NAME
     if not path.exists():
         return None
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = read_json_file(path, description="node capabilities file")
     if "capabilities" in data and isinstance(data["capabilities"], dict):
         return data["capabilities"]
     return capabilities_from_benchmark(data)

@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .jsonio import read_json_file
+
 
 DEFAULT_ALLOWED_JOB_TYPES = (
     "eval.math.v1",
@@ -33,7 +35,7 @@ class OperatorConfig:
 
     @classmethod
     def from_file(cls, path: Path) -> "OperatorConfig":
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = read_json_file(path, description="operator config file")
         if not isinstance(data, dict):
             raise ValueError("operator config must be a JSON object")
         return cls.from_dict(data)

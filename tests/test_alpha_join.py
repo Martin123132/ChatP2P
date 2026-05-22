@@ -143,6 +143,10 @@ def test_alpha_invite_round_trip_and_validation(tmp_path):
     assert loaded.allowed_job_types == ("eval.deterministic.v1",)
     assert "admission_token" not in loaded.public_summary()
 
+    bom_invite_path = tmp_path / "bom-alpha-invite.json"
+    bom_invite_path.write_text(json.dumps(invite.to_file_dict()), encoding="utf-8-sig")
+    assert load_alpha_invite(bom_invite_path).admission_token == "alpha-token-123"
+
     bad_invite_path = tmp_path / "bad-invite.json"
     bad_invite_path.write_text(json.dumps({"schema": "wrong"}), encoding="utf-8")
     try:

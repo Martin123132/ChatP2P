@@ -12,6 +12,8 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, PublicFormat, NoEncryption
 
+from .jsonio import read_json_file
+
 
 def _b64encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
@@ -45,7 +47,7 @@ class NodeIdentity:
 
     @classmethod
     def load(cls, path: Path) -> "NodeIdentity":
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = read_json_file(path, description="identity file")
         return cls(
             node_id=data["node_id"],
             public_key=data["public_key"],

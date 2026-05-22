@@ -7,6 +7,7 @@ import pytest
 import chatp2p.windows_task as windows_task
 from chatp2p.windows_task import (
     DEFAULT_TASK_NAME,
+    DEFAULT_STARTUP_TIMEOUT_SECONDS,
     WatchdogTaskConfig,
     build_watchdog_task_plan,
     install_watchdog_task,
@@ -40,6 +41,8 @@ def test_watchdog_task_plan_builds_tokenless_launcher(tmp_path):
     assert plan["watchdog_argv"][:4] == [str(python_executable.resolve()), "-m", "chatp2p.cli", "node"]
     assert "--checks" in plan["watchdog_argv"]
     assert "0" in plan["watchdog_argv"]
+    assert "--startup-timeout-seconds" in plan["watchdog_argv"]
+    assert str(DEFAULT_STARTUP_TIMEOUT_SECONDS) in plan["watchdog_argv"]
     assert "alpha-invite.json" in plan["launcher"]
     assert str(source_root.resolve()) in plan["launcher"]
     assert "admission_token" not in json.dumps(plan)

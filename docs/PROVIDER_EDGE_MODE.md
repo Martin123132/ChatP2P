@@ -118,7 +118,7 @@ python -m chatp2p.cli node refresh-capabilities `
   --report D:\ChatP2PData\provider-role-refresh-report.json
 ```
 
-For a trusted outside worker, use `--node-role contributor_worker` on their machine after they pull the latest code and have the same provider config file.
+For a trusted outside worker, use `--node-role contributor_worker` on their machine after they pull the latest code and have the same provider config file. The JSON loader accepts UTF-8 files with or without a BOM, and a missing provider config now fails before restart with a direct `provider config file not found` message.
 
 Then run a live provider-shaped proof against the alpha coordinator:
 

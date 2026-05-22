@@ -21,6 +21,7 @@ from urllib.request import Request, urlopen
 from .benchmark import CAPABILITY_PROFILE_NAME, load_node_capabilities, run_node_benchmark, save_node_benchmark
 from .client import CoordinatorClient
 from .crypto import NodeIdentity
+from .jsonio import read_json_file
 from .node_runtime import managed_process_status, start_managed_process, stop_managed_process
 from .ollama import DEFAULT_OLLAMA_BASE_URL
 from .operator_config import DEFAULT_ALLOWED_JOB_TYPES, OperatorConfig, write_operator_config
@@ -286,7 +287,7 @@ class NodeWatchdogConfig:
     lease_timeout_seconds: float = 30.0
     node_stale_seconds: float = 60.0
     worker_interval: float = 0.5
-    startup_timeout_seconds: float = 15.0
+    startup_timeout_seconds: float = 90.0
     cpu_duration_seconds: float = 0.25
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
 
@@ -346,12 +347,7 @@ def generate_admission_token() -> str:
 
 
 def load_alpha_invite(path: Path) -> AlphaInvite:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise FileNotFoundError(f"invite file not found: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invite file is not valid JSON: {path}") from exc
+    data = read_json_file(path, description="invite file")
     if not isinstance(data, dict):
         raise ValueError("invite file must contain a JSON object")
     return AlphaInvite.from_dict(data)

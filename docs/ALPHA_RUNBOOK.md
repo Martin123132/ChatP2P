@@ -248,6 +248,8 @@ python -m chatp2p.cli node install-task --home D:\ChatP2PData\.mesh --invite D:\
 
 The installer writes a generated `.cmd` launcher under `D:\ChatP2PData\.mesh\run` and creates a Windows Scheduled Task that runs the watchdog with `--checks 0`. The task command references the invite path, not the raw admission token.
 
+Watchdog restarts wait `90` seconds for coordinator health by default. This avoids false failures once the local SQLite evidence database has grown large enough that startup takes more than a few seconds.
+
 If Windows returns `Access is denied` while creating the Scheduled Task, rerun the command from an elevated terminal. A no-admin Startup folder fallback is available with `--allow-startup-folder-fallback`, but it writes a small `.vbs` launcher under `%APPDATA%`; avoid that fallback when you want every ChatP2P file kept on the runtime drive.
 
 On a contributor machine, install only the worker watchdog:

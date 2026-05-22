@@ -14,6 +14,7 @@ from .benchmark import CAPABILITY_PROFILE_NAME
 from .client import CoordinatorClient
 from .coordinator import Coordinator
 from .crypto import NodeIdentity
+from .jsonio import read_json_file
 from .packets import JobLeaseAcknowledgement, JobLeaseGrant, JobLeaseRequest, NodeRegistration
 from .worker import WorkerNode
 
@@ -800,7 +801,13 @@ def write_provider_config(path: Path, config: ProviderConfig) -> None:
 
 
 def load_provider_config(path: Path) -> ProviderConfig:
-    return ProviderConfig.from_dict(json.loads(path.read_text(encoding="utf-8")))
+    data = read_json_file(path, description="provider config file")
+    if not isinstance(data, dict):
+        raise ValueError(f"provider config file must contain a JSON object: {path}")
+    try:
+        return ProviderConfig.from_dict(data)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"provider config file is invalid: {path}: {exc}") from exc
 
 
 def _validate_provider_config(config: ProviderConfig) -> None:
