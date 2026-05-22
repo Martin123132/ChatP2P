@@ -78,6 +78,7 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
     nodes = snapshot["nodes"]
     jobs = snapshot["jobs"]
     results = snapshot["results"]
+    provider = snapshot.get("provider", {})
 
     metric_labels = [
         ("Nodes", "known_nodes"),
@@ -99,6 +100,61 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
         """
         for label, key in metric_labels
     )
+
+    provider_roles = [
+        ("Subscriber Nodes", "subscriber_nodes"),
+        ("Provider Edge", "provider_edge_workers"),
+        ("Peer Workers", "contributor_workers"),
+        ("Verifiers", "verifiers"),
+    ]
+    provider_role_metrics = "\n".join(
+        f"""
+        <section class="metric compact">
+          <span>{html.escape(label)}</span>
+          <strong>{html.escape(str((provider.get(key) or {}).get("live", 0)))}/{html.escape(str((provider.get(key) or {}).get("total", 0)))}</strong>
+        </section>
+        """
+        for label, key in provider_roles
+    )
+    route_counts = provider.get("jobs_routed", {}) or {}
+    result_route_counts = provider.get("results_by_route", {}) or {}
+    provider_route_metrics = "\n".join(
+        f"""
+        <section class="metric compact">
+          <span>{html.escape(label)}</span>
+          <strong>{html.escape(str(route_counts.get(route, 0)))}</strong>
+          <small>{html.escape(str(result_route_counts.get(route, 0)))} result route(s)</small>
+        </section>
+        """
+        for label, route in [
+            ("Local Routes", "local"),
+            ("Edge Routes", "provider_edge"),
+            ("Peer Routes", "peer"),
+            ("Fallback", "fallback_placeholder"),
+        ]
+    )
+    provider_node_rows = "\n".join(
+        f"""
+        <tr>
+          <td><code>{html.escape(_short(node["node_id"], 18))}</code></td>
+          <td>{html.escape(node.get("node_role", "worker"))}</td>
+          <td><span class="live-state {html.escape(node["liveness_status"])}">{html.escape(node["liveness_status"])}</span></td>
+          <td>{html.escape(str(node["credits"]))}</td>
+          <td>{html.escape(node.get("provider_id") or "")}</td>
+          <td>{html.escape(node.get("subscriber_id") or "")}</td>
+          <td>{html.escape(", ".join(node.get("supported_job_types", [])) or "none")}</td>
+          <td>{html.escape(", ".join(node.get("ollama_models", [])) or "none")}</td>
+        </tr>
+        """
+        for node in nodes
+        if node.get("provider_id") or node.get("node_role") in {
+            "subscriber_gateway",
+            "subscriber_device",
+            "provider_edge_worker",
+            "contributor_worker",
+            "verifier",
+        }
+    ) or """<tr><td colspan="8" class="empty">No provider-mode nodes registered yet.</td></tr>"""
 
     node_rows = "\n".join(
         f"""
@@ -236,6 +292,19 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
       font-size: 28px;
       line-height: 1;
     }}
+    .metric.compact {{
+      min-height: 72px;
+    }}
+    .metric small {{
+      display: block;
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .provider-metrics {{
+      margin-top: 12px;
+      margin-bottom: 6px;
+    }}
     section.table-block {{
       margin-top: 16px;
       padding: 16px;
@@ -337,10 +406,19 @@ def _render_dashboard(snapshot: dict[str, Any]) -> str:
       <a href="/api/jobs">jobs</a>
       <a href="/api/results">results</a>
       <a href="/api/reputation">reputation</a>
+      <a href="/api/provider">provider</a>
     </nav>
   </header>
   <main>
     <div class="metrics">{metrics}</div>
+    <section class="table-block">
+      <h2>Provider / ISP Edge</h2>
+      <div class="metrics provider-metrics">{provider_role_metrics}{provider_route_metrics}</div>
+      <table>
+        <thead><tr><th>Node</th><th>Role</th><th>Live</th><th>Credits</th><th>Provider</th><th>Subscriber</th><th>Capabilities</th><th>Ollama Models</th></tr></thead>
+        <tbody>{provider_node_rows}</tbody>
+      </table>
+    </section>
     <section class="table-block">
       <h2>Nodes</h2>
       <table>
@@ -494,6 +572,11 @@ def create_coordinator_http_server(
             if parsed.path == "/api/reputation":
                 with lock:
                     _json_response(self, 200, {"reputation": list(coordinator.reputation_summaries().values())})
+                return
+
+            if parsed.path == "/api/provider":
+                with lock:
+                    _json_response(self, 200, {"provider": coordinator.provider_summary()})
                 return
 
             if parsed.path == "/api/snapshot":

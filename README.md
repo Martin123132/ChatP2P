@@ -165,7 +165,10 @@ To advertise provider roles from a real alpha worker and run provider-shaped wor
 ```bash
 chatp2p node refresh-capabilities --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --provider-config D:\ChatP2PData\provider-config.json --node-role provider_edge_worker --restart-worker
 chatp2p operator provider-remote-proof --invite D:\ChatP2PData\alpha-invite.json --provider-config D:\ChatP2PData\provider-config.json --expected-worker-id worker_... --jobs 10 --report D:\ChatP2PData\provider-remote-proof.json
+chatp2p operator provider-status --invite D:\ChatP2PData\alpha-invite.json --provider-config D:\ChatP2PData\provider-config.json --expected-worker-id worker_... --report D:\ChatP2PData\provider-status.json
 ```
+
+`provider-status` writes `chatp2p.provider-status-report.v1`, a token-redacted summary of live subscriber/provider-edge/contributor roles, route counts, result counts, credits, expected worker status, and coordinator health. The coordinator dashboard also includes a Provider / ISP Edge panel, and the same totals are available at `/api/provider`.
 
 ## Public Alpha Seed Mode
 

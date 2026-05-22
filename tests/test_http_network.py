@@ -72,7 +72,11 @@ def test_http_worker_registers_leases_job_and_submits_result():
         with urlopen(f"http://{host}:{port}/dashboard", timeout=10) as response:
             dashboard = response.read().decode("utf-8")
         assert "ChatP2P Coordinator" in dashboard
+        assert "Provider / ISP Edge" in dashboard
         assert "Recent Results" in dashboard
+        with urlopen(f"http://{host}:{port}/api/provider", timeout=10) as response:
+            provider = json.loads(response.read().decode("utf-8"))["provider"]
+        assert provider["jobs_routed"]["provider_edge"] == 0
     finally:
         server.shutdown()
         server.server_close()

@@ -132,3 +132,15 @@ python -m chatp2p.cli operator provider-remote-proof `
 ```
 
 The report schema is `chatp2p.provider-remote-proof-report.v1`. It records requested provider routes, actual result routes inferred from worker roles, result counts per node, expected-worker contribution, provider snapshot stats, and the final coordinator snapshot. This proves provider-shaped work can run across the existing alpha coordinator-worker network.
+
+For a quick operator readout without creating new jobs, run:
+
+```powershell
+python -m chatp2p.cli operator provider-status `
+  --invite D:\ChatP2PData\alpha-invite.json `
+  --provider-config D:\ChatP2PData\provider-config.json `
+  --expected-worker-id worker_87b5cefe53e67c6c `
+  --report D:\ChatP2PData\provider-status.json
+```
+
+The report schema is `chatp2p.provider-status-report.v1`. It redacts the admission token and shows coordinator health, live provider roles, job/result route counts, credits by node and role, expected-worker liveness, supported job types, and advertised Ollama models. The browser dashboard at `http://127.0.0.1:8765/dashboard` also shows the same Provider / ISP Edge panel, with raw JSON available at `/api/provider`.

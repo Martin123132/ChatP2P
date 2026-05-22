@@ -16,10 +16,12 @@ from chatp2p.provider import (
     PROVIDER_EDGE_PROOF_REPORT_SCHEMA,
     PROVIDER_OPS_PACK_SCHEMA,
     PROVIDER_REMOTE_PROOF_REPORT_SCHEMA,
+    PROVIDER_STATUS_REPORT_SCHEMA,
     ProviderConfig,
     ProviderEdgeProofConfig,
     ProviderOpsPackConfig,
     ProviderRemoteProofConfig,
+    ProviderStatusConfig,
     add_provider_subscriber,
     apply_provider_metadata,
     bootstrap_provider_config,
@@ -30,6 +32,7 @@ from chatp2p.provider import (
     run_provider_edge_proof,
     run_provider_ops_pack,
     run_provider_remote_proof,
+    run_provider_status,
     select_provider_route,
     write_provider_config,
 )
@@ -254,6 +257,68 @@ def test_provider_snapshot_includes_role_counts():
     assert snapshot["nodes"][0]["node_role"] == "subscriber_gateway"
     assert snapshot["provider"]["subscriber_nodes"]["live"] == 1
     assert provider_snapshot_summary(snapshot)["subscriber_nodes"]["live"] == 1
+
+
+def test_provider_status_report_summarizes_live_roles_without_token(tmp_path):
+    token = "alpha-token-123"
+    server, thread, coordinator_url = _start_public_alpha(token)
+    provider_config_path = tmp_path / "provider-config.json"
+    provider = ProviderConfig.create(
+        provider_name="Demo Fibre AI",
+        region="Hull",
+        provider_id="provider_demo",
+    ).with_subscriber("sub_demo_001", "Broadband AI Plus")
+    write_provider_config(provider_config_path, provider)
+    report_path = tmp_path / "provider-status.json"
+
+    edge = WorkerNode(
+        identity=NodeIdentity.generate(prefix="provider_edge_worker"),
+        capability_profile=provider_capability_profile(config=provider, node_role="provider_edge_worker"),
+    )
+    peer = WorkerNode(
+        identity=NodeIdentity.generate(prefix="contributor_worker"),
+        capability_profile=provider_capability_profile(config=provider, node_role="contributor_worker"),
+    )
+    client = CoordinatorClient(coordinator_url, admission_token=token)
+
+    try:
+        assert client.register(NodeRegistration.create(node=edge.identity, capabilities=edge.capabilities()))["accepted"]
+        assert client.register(NodeRegistration.create(node=peer.identity, capabilities=peer.capabilities()))["accepted"]
+        client.create_job(
+            job_type="eval.deterministic.v1",
+            payload={
+                "task": "arithmetic",
+                "operation": "add",
+                "operands": [1, 2],
+                "expected": 3,
+            },
+            resource_requirements={
+                "provider_mode": True,
+                "provider_id": provider.provider_id,
+                "provider_route": "provider_edge",
+                "subscriber_id": "sub_demo_001",
+            },
+        )
+        report = run_provider_status(
+            ProviderStatusConfig(
+                provider_config_path=provider_config_path,
+                coordinator_url=coordinator_url,
+                admission_token=token,
+                expected_worker_id=peer.identity.node_id,
+                report_path=report_path,
+            )
+        )
+    finally:
+        _stop_server(server, thread)
+
+    assert report["schema"] == PROVIDER_STATUS_REPORT_SCHEMA
+    assert report["status"] == "pass"
+    assert report["summary"]["provider_edge_workers"]["live"] == 1
+    assert report["summary"]["contributor_workers"]["live"] == 1
+    assert report["summary"]["jobs_routed"]["provider_edge"] == 1
+    assert report["expected_worker"]["node_role"] == "contributor_worker"
+    assert report_path.exists()
+    assert token not in json.dumps(report)
 
 
 def test_provider_edge_proof_report_passes_and_is_serializable(tmp_path):
@@ -491,6 +556,20 @@ def test_provider_cli_commands_parse(tmp_path):
             str(tmp_path / "provider-remote-proof.json"),
         ]
     )
+    provider_status = parser.parse_args(
+        [
+            "operator",
+            "provider-status",
+            "--invite",
+            str(tmp_path / "alpha-invite.json"),
+            "--provider-config",
+            str(tmp_path / "provider-config.json"),
+            "--expected-worker-id",
+            "worker_test",
+            "--report",
+            str(tmp_path / "provider-status.json"),
+        ]
+    )
 
     assert bootstrap.func.__name__ == "bootstrap_provider_command"
     assert subscriber.func.__name__ == "provider_create_subscriber_command"
@@ -498,3 +577,4 @@ def test_provider_cli_commands_parse(tmp_path):
     assert proof.func.__name__ == "run_proof_provider_edge"
     assert ops_pack.func.__name__ == "provider_ops_pack_command"
     assert remote_proof.func.__name__ == "provider_remote_proof_command"
+    assert provider_status.func.__name__ == "provider_status_command"

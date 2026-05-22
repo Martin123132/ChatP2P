@@ -65,12 +65,14 @@ from .provider import (
     ProviderEdgeProofConfig,
     ProviderOpsPackConfig,
     ProviderRemoteProofConfig,
+    ProviderStatusConfig,
     add_provider_subscriber,
     bootstrap_provider_config,
     join_provider_node,
     run_provider_edge_proof,
     run_provider_ops_pack,
     run_provider_remote_proof,
+    run_provider_status,
 )
 from .storage import SQLiteCoordinatorStore
 from .worker import WorkerNode
@@ -675,6 +677,47 @@ def provider_remote_proof_command(args: argparse.Namespace) -> None:
                 "criteria": report["criteria"],
                 "errors": report["errors"],
                 "report": str(Path(args.report).expanduser().resolve()),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def provider_status_command(args: argparse.Namespace) -> None:
+    try:
+        invite = load_alpha_invite(Path(args.invite))
+        report = run_provider_status(
+            ProviderStatusConfig(
+                provider_config_path=Path(args.provider_config),
+                coordinator_url=invite.coordinator,
+                admission_token=invite.admission_token,
+                expected_worker_id=args.expected_worker_id,
+                timeout_seconds=args.timeout_seconds,
+                report_path=Path(args.report) if args.report else None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(
+        json.dumps(
+            {
+                "ok": report["ok"],
+                "status": report["status"],
+                "schema": report["schema"],
+                "provider": report["provider"],
+                "coordinator": report["coordinator"],
+                "summary": report["summary"],
+                "expected_worker": report["expected_worker"],
+                "nodes": report["nodes"],
+                "job_status_counts": report["job_status_counts"],
+                "result_node_counts": report["result_node_counts"],
+                "result_route_counts": report["result_route_counts"],
+                "criteria": report["criteria"],
+                "errors": report["errors"],
+                "report": str(Path(args.report).expanduser().resolve()) if args.report else None,
             },
             indent=2,
             sort_keys=True,
@@ -2102,6 +2145,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     provider_remote_proof_parser.add_argument("--report", required=True, help="Path for provider remote proof report")
     provider_remote_proof_parser.set_defaults(func=provider_remote_proof_command)
+
+    provider_status_parser = operator_subcommands.add_parser(
+        "provider-status",
+        help="Show live ISP-edge / broadband-bundle status from a coordinator snapshot",
+    )
+    provider_status_parser.add_argument("--invite", required=True, help="Path to alpha invite JSON")
+    provider_status_parser.add_argument("--provider-config", required=True, help="Path to provider config JSON")
+    provider_status_parser.add_argument("--expected-worker-id", default=None, help="Worker that should be live")
+    provider_status_parser.add_argument(
+        "--timeout-seconds",
+        default=10.0,
+        type=float,
+        help="HTTP timeout for health and snapshot checks",
+    )
+    provider_status_parser.add_argument("--report", default=None, help="Optional path for provider status JSON report")
+    provider_status_parser.set_defaults(func=provider_status_command)
 
     bootstrap_alpha_parser = operator_subcommands.add_parser(
         "bootstrap-alpha",

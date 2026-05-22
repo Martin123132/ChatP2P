@@ -23,6 +23,7 @@ PROVIDER_JOIN_REPORT_SCHEMA = "chatp2p.provider-join-report.v1"
 PROVIDER_EDGE_PROOF_REPORT_SCHEMA = "chatp2p.provider-edge-proof-report.v1"
 PROVIDER_OPS_PACK_SCHEMA = "chatp2p.provider-ops-pack.v1"
 PROVIDER_REMOTE_PROOF_REPORT_SCHEMA = "chatp2p.provider-remote-proof-report.v1"
+PROVIDER_STATUS_REPORT_SCHEMA = "chatp2p.provider-status-report.v1"
 
 DEFAULT_ALLOWED_JOB_TYPES = ["eval.deterministic.v1", "inference.echo.v1"]
 DEFAULT_ROUTING_POLICY = ["prefer_local", "prefer_provider_edge", "prefer_trusted_peer", "fallback_placeholder"]
@@ -193,6 +194,16 @@ class ProviderRemoteProofConfig:
     min_expected_worker_results: int | None = None
     timeout_seconds: float = 120.0
     poll_interval: float = 0.5
+
+
+@dataclass(frozen=True)
+class ProviderStatusConfig:
+    provider_config_path: Path
+    coordinator_url: str
+    admission_token: str | None = None
+    report_path: Path | None = None
+    expected_worker_id: str | None = None
+    timeout_seconds: float = 10.0
 
 
 def bootstrap_provider_config(
@@ -680,6 +691,81 @@ def run_provider_remote_proof(config: ProviderRemoteProofConfig) -> dict[str, An
     return report
 
 
+def run_provider_status(config: ProviderStatusConfig) -> dict[str, Any]:
+    if not config.coordinator_url.strip():
+        raise ValueError("coordinator_url must be non-empty")
+    if config.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0")
+    if config.expected_worker_id is not None and not config.expected_worker_id.strip():
+        raise ValueError("--expected-worker-id cannot be blank")
+
+    provider = load_provider_config(config.provider_config_path)
+    client = CoordinatorClient(
+        config.coordinator_url,
+        admission_token=config.admission_token,
+        timeout_seconds=config.timeout_seconds,
+    )
+    errors: list[str] = []
+    health: dict[str, Any] | None = None
+    snapshot: dict[str, Any] | None = None
+
+    try:
+        health = client.health()
+    except Exception as exc:
+        errors.append(f"health check failed: {type(exc).__name__}: {exc}")
+
+    try:
+        snapshot = client.snapshot()
+    except Exception as exc:
+        errors.append(f"snapshot failed: {type(exc).__name__}: {exc}")
+
+    expected_worker = _provider_status_expected_worker(snapshot, config.expected_worker_id)
+    summary = provider_snapshot_summary(snapshot or {})
+    summary["configured_subscribers"] = len(provider.subscribers)
+    expected_worker_ok = (
+        config.expected_worker_id is None
+        or bool(expected_worker and expected_worker.get("live") and expected_worker.get("present"))
+    )
+    ok = not errors and snapshot is not None and expected_worker_ok
+    report = {
+        "ok": ok,
+        "status": "pass" if ok else "fail",
+        "schema": PROVIDER_STATUS_REPORT_SCHEMA,
+        "generated_at": _iso_now(),
+        "provider": _provider_public_summary(provider),
+        "coordinator": config.coordinator_url,
+        "criteria": {
+            "coordinator_health": {
+                "actual": bool(health),
+                "required": True,
+                "passed": bool(health) and not any(error.startswith("health check failed") for error in errors),
+            },
+            "snapshot": {
+                "actual": snapshot is not None,
+                "required": True,
+                "passed": snapshot is not None,
+            },
+            "expected_worker_live": {
+                "actual": int(bool(expected_worker and expected_worker.get("live"))),
+                "required": 1 if config.expected_worker_id else 0,
+                "passed": expected_worker_ok,
+            },
+        },
+        "expected_worker": expected_worker,
+        "health": health,
+        "summary": summary,
+        "nodes": _provider_status_node_summaries(snapshot or {}, provider.provider_id),
+        "job_status_counts": _job_status_counts((snapshot or {}).get("jobs", [])),
+        "result_node_counts": _result_node_counts((snapshot or {}).get("results", [])),
+        "result_route_counts": _actual_result_route_counts(snapshot or {}, (snapshot or {}).get("results", [])),
+        "coordinator_status": (snapshot or {}).get("status"),
+        "errors": errors,
+    }
+    if config.report_path is not None:
+        _write_json(config.report_path, report)
+    return report
+
+
 def provider_capability_profile(
     *,
     config: ProviderConfig,
@@ -758,8 +844,17 @@ def provider_snapshot_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
         "verifiers": [node for node in nodes if node.get("node_role") == "verifier"],
     }
     route_counts = {route: 0 for route in ROUTE_NAMES}
+    result_route_counts = {route: 0 for route in [*ROUTE_NAMES, "unknown"]}
     route_latencies: dict[str, list[float]] = {route: [] for route in ROUTE_NAMES}
     subscriber_spend: dict[str, int] = {}
+    credits_by_role = {
+        "subscriber_nodes": 0,
+        "provider_edge_workers": 0,
+        "contributor_workers": 0,
+        "verifiers": 0,
+        "legacy_workers": 0,
+    }
+    nodes_by_id = {node.get("node_id"): node for node in nodes}
     for job in jobs:
         requirements = job.get("resource_requirements", {})
         route = requirements.get("provider_route")
@@ -776,6 +871,21 @@ def provider_snapshot_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
         route = job_routes.get(result.get("job_id"))
         if route in route_latencies:
             route_latencies[route].append(float(result.get("runtime_seconds") or 0.0))
+        role_route = _route_for_node_role((nodes_by_id.get(result.get("node_id")) or {}).get("node_role"))
+        result_route_counts[role_route] += 1
+    for node in nodes:
+        credits = int(node.get("credits") or 0)
+        role = str(node.get("node_role") or "worker")
+        if role.startswith("subscriber_"):
+            credits_by_role["subscriber_nodes"] += credits
+        elif role == "provider_edge_worker":
+            credits_by_role["provider_edge_workers"] += credits
+        elif role == "contributor_worker":
+            credits_by_role["contributor_workers"] += credits
+        elif role == "verifier":
+            credits_by_role["verifiers"] += credits
+        else:
+            credits_by_role["legacy_workers"] += credits
     return {
         "subscribers": len({node.get("subscriber_id") for node in nodes if node.get("subscriber_id")}),
         "subscriber_nodes": _liveness_counts(role_groups["subscriber_nodes"]),
@@ -783,8 +893,10 @@ def provider_snapshot_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
         "contributor_workers": _liveness_counts(role_groups["contributor_workers"]),
         "verifiers": _liveness_counts(role_groups["verifiers"]),
         "jobs_routed": route_counts,
+        "results_by_route": result_route_counts,
         "credits_spent_by_subscriber": subscriber_spend,
         "credits_earned_by_workers": dict(snapshot.get("status", {}).get("credits", {})),
+        "credits_by_role": credits_by_role,
         "verification_rate": (
             round(snapshot["status"]["verified_jobs"] / len(jobs), 3) if jobs else 0.0
         ),
@@ -1095,6 +1207,53 @@ def _provider_remote_expected_worker_summary(
         "supported_job_types": (node or {}).get("supported_job_types", []),
         "result_count": len(results),
     }
+
+
+def _provider_status_expected_worker(
+    snapshot: dict[str, Any] | None,
+    expected_worker_id: str | None,
+) -> dict[str, Any] | None:
+    if expected_worker_id is None:
+        return None
+    node = _snapshot_node(snapshot or {}, expected_worker_id)
+    return {
+        "node_id": expected_worker_id,
+        "present": node is not None,
+        "live": bool(node and node.get("liveness_status") == "live"),
+        "liveness_status": (node or {}).get("liveness_status"),
+        "node_role": (node or {}).get("node_role"),
+        "provider_id": (node or {}).get("provider_id"),
+        "subscriber_id": (node or {}).get("subscriber_id"),
+        "credits": (node or {}).get("credits"),
+        "supported_job_types": (node or {}).get("supported_job_types", []),
+        "ollama_models": (node or {}).get("ollama_models", []),
+    }
+
+
+def _provider_status_node_summaries(snapshot: dict[str, Any], provider_id: str) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for node in snapshot.get("nodes", []):
+        role = node.get("node_role") or "worker"
+        if node.get("provider_id") != provider_id and role not in PROVIDER_NODE_ROLES:
+            continue
+        summaries.append(
+            {
+                "node_id": node.get("node_id"),
+                "node_role": role,
+                "provider_id": node.get("provider_id"),
+                "subscriber_id": node.get("subscriber_id"),
+                "subscriber_plan": node.get("subscriber_plan"),
+                "region": node.get("region"),
+                "liveness_status": node.get("liveness_status"),
+                "last_seen_seconds_ago": node.get("last_seen_seconds_ago"),
+                "credits": node.get("credits"),
+                "reputation_status": (node.get("reputation") or {}).get("status"),
+                "supported_job_types": node.get("supported_job_types", []),
+                "ollama_available": bool((node.get("model_runtimes") or {}).get("ollama", {}).get("available")),
+                "ollama_models": node.get("ollama_models", []),
+            }
+        )
+    return sorted(summaries, key=lambda item: (str(item.get("node_role")), str(item.get("node_id"))))
 
 
 def _remote_requested_route(index: int) -> str:

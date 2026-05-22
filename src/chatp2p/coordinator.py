@@ -802,21 +802,58 @@ class Coordinator:
         self.reap_expired_leases()
         nodes = self.node_summaries()
         jobs = self.job_summaries()
+        results = self.result_summaries()
         route_counts = {
             "local": 0,
             "provider_edge": 0,
             "peer": 0,
             "fallback_placeholder": 0,
         }
+        result_route_counts = {
+            "local": 0,
+            "provider_edge": 0,
+            "peer": 0,
+            "fallback_placeholder": 0,
+            "unknown": 0,
+        }
+        route_latencies = {route: [] for route in route_counts}
+        credits_by_role = {
+            "subscriber_nodes": 0,
+            "provider_edge_workers": 0,
+            "contributor_workers": 0,
+            "verifiers": 0,
+            "legacy_workers": 0,
+        }
+        credits_spent_by_subscriber: dict[str, int] = {}
         subscriber_ids = set()
+        nodes_by_id = {node.get("node_id"): node for node in nodes}
+        job_routes: dict[str, str | None] = {}
         for node in nodes:
             subscriber_id = node.get("subscriber_id")
             if subscriber_id:
                 subscriber_ids.add(subscriber_id)
+            credits = int(node.get("credits") or 0)
+            role_bucket = self._provider_role_bucket(node)
+            credits_by_role[role_bucket] += credits
         for job in jobs:
-            route = job.get("resource_requirements", {}).get("provider_route")
+            requirements = job.get("resource_requirements", {})
+            route = requirements.get("provider_route")
+            job_routes[job["job_id"]] = route
             if route in route_counts:
                 route_counts[route] += 1
+            subscriber_id = requirements.get("subscriber_id")
+            if subscriber_id:
+                credits_spent_by_subscriber[subscriber_id] = (
+                    credits_spent_by_subscriber.get(subscriber_id, 0) + int(job.get("reward", 1))
+                )
+        for result in results:
+            route = job_routes.get(result.get("job_id"))
+            if route in route_latencies:
+                route_latencies[route].append(float(result.get("runtime_seconds") or 0.0))
+            node = nodes_by_id.get(result.get("node_id")) or {}
+            result_route = self._provider_route_for_role(node.get("node_role"))
+            result_route_counts[result_route] += 1
+        status = self.status()
         return {
             "subscribers": len(subscriber_ids),
             "subscriber_nodes": self._role_liveness_counts(nodes, lambda node: str(node.get("node_role", "")).startswith("subscriber_")),
@@ -824,9 +861,17 @@ class Coordinator:
             "contributor_workers": self._role_liveness_counts(nodes, lambda node: node.get("node_role") == "contributor_worker"),
             "verifiers": self._role_liveness_counts(nodes, lambda node: node.get("node_role") == "verifier"),
             "jobs_routed": route_counts,
-            "verification_rate": round(self.status()["verified_jobs"] / len(jobs), 3) if jobs else 0.0,
-            "disputed_jobs": self.status()["disputed_jobs"],
-            "expired_jobs": self.status()["expired_jobs"],
+            "results_by_route": result_route_counts,
+            "credits_spent_by_subscriber": credits_spent_by_subscriber,
+            "credits_earned_by_workers": dict(status["credits"]),
+            "credits_by_role": credits_by_role,
+            "verification_rate": round(status["verified_jobs"] / len(jobs), 3) if jobs else 0.0,
+            "disputed_jobs": status["disputed_jobs"],
+            "expired_jobs": status["expired_jobs"],
+            "average_latency_by_route": {
+                route: round(sum(values) / len(values), 6) if values else None
+                for route, values in route_latencies.items()
+            },
         }
 
     def _role_liveness_counts(self, nodes: list[dict[str, Any]], predicate: Any) -> dict[str, int]:
@@ -837,6 +882,27 @@ class Coordinator:
             "stale": sum(1 for node in matching if node["liveness_status"] == "stale"),
             "offline": sum(1 for node in matching if node["liveness_status"] == "offline"),
         }
+
+    def _provider_role_bucket(self, node: dict[str, Any]) -> str:
+        role = str(node.get("node_role") or "worker")
+        if role.startswith("subscriber_"):
+            return "subscriber_nodes"
+        if role == "provider_edge_worker":
+            return "provider_edge_workers"
+        if role == "contributor_worker":
+            return "contributor_workers"
+        if role == "verifier":
+            return "verifiers"
+        return "legacy_workers"
+
+    def _provider_route_for_role(self, role: str | None) -> str:
+        if role in {"subscriber_gateway", "subscriber_device"}:
+            return "local"
+        if role == "provider_edge_worker":
+            return "provider_edge"
+        if role == "contributor_worker":
+            return "peer"
+        return "unknown"
 
     def leasing_policy(self) -> dict[str, Any]:
         return {
