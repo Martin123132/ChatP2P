@@ -19,6 +19,7 @@ dev = [
 
 [project.scripts]
 chatp2p = "chatp2p.cli:main"
+gremlinchat = "chatp2p.gremlinchat_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
