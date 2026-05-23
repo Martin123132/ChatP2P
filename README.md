@@ -61,7 +61,7 @@ python -m chatp2p.cli operator console `
   --out D:\ChatP2PData\operator-console
 ```
 
-The console writes `operator-console.json`, `operator-console.md`, and `operator-console.html`. It summarizes primary and backup lane health, local managed processes, privacy-scan status, latest reliability-pack evidence, and whether the operator can continue without partner action.
+The console writes `operator-console.json`, `operator-console.md`, `operator-console.html`, `operator-console-history.json`, and a review-only cleanup plan. It summarizes primary and backup lane health, local managed processes, privacy-scan status, latest reliability-pack evidence, what changed since the previous console run, stale report candidates, and whether the operator can continue without partner action.
 
 ## Network Smoke Test
 
@@ -335,7 +335,7 @@ chatp2p operator reliability-pack `
 
 The reliability pack writes network status, primary/backup verified echo inference proofs, token-redaction checks, and a `reliability-summary.md`. Deterministic failover smoke is skipped by default to avoid leaving single-worker proof jobs pending; use `--include-deterministic-smoke` when you deliberately want that older proof. Install a local recurring Windows check with `chatp2p operator install-reliability-task ... --interval-minutes 30`. Full details live in [docs/OPERATOR_RELIABILITY.md](docs/OPERATOR_RELIABILITY.md).
 
-For a read-only snapshot of what to do next, run `chatp2p operator console ...`. It does not create proof jobs or restart processes; it turns existing health, reliability, privacy, and autopilot reports into one static operator page.
+For a read-only snapshot of what to do next, run `chatp2p operator console ...`. It does not create proof jobs, restart processes, or delete old artifacts; it turns existing health, reliability, privacy, autopilot, history, and stale-report evidence into one static operator page.
 
 To let the node check and restart managed processes from the invite, run a one-shot watchdog check:
 

@@ -76,8 +76,10 @@ The console is read-only. It does not create jobs, restart workers, or require p
 - `D:\ChatP2PData\operator-console\operator-console.json`
 - `D:\ChatP2PData\operator-console\operator-console.md`
 - `D:\ChatP2PData\operator-console\operator-console.html`
+- `D:\ChatP2PData\operator-console\operator-console-history.json`
+- `D:\ChatP2PData\operator-console\operator-console-cleanup-plan.ps1`
 
-Use `summary.can_continue_without_partner` and `summary.recommended_next_action` as the quick decision fields.
+Use `summary.can_continue_without_partner` and `summary.recommended_next_action` as the quick decision fields. The history file records previous console summaries so the report can show what changed since the last run. The cleanup plan lists stale report/proof artifacts for review only; it never deletes files automatically.
 
 ## Recurring Local Check
 

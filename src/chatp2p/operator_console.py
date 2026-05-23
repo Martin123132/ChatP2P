@@ -19,7 +19,24 @@ from .privacy import PrivacyScanConfig, run_public_privacy_scan
 
 
 OPERATOR_CONSOLE_REPORT_SCHEMA = "chatp2p.operator-console-report.v1"
+OPERATOR_CONSOLE_HISTORY_SCHEMA = "chatp2p.operator-console-history.v1"
 DEFAULT_OPERATOR_CONSOLE_FRESHNESS_SECONDS = 3600.0
+DEFAULT_OPERATOR_CONSOLE_HISTORY_LIMIT = 20
+DEFAULT_STALE_REPORT_DAYS = 2.0
+DEFAULT_STALE_REPORT_MAX_ITEMS = 50
+_REPORT_SUFFIXES = {".json", ".md", ".zip", ".log", ".txt"}
+_REPORT_NAME_HINTS = (
+    "report",
+    "proof",
+    "smoke",
+    "soak",
+    "evidence",
+    "ops-pack",
+    "status",
+    "reliability",
+    "autopilot",
+    "route",
+)
 
 _PATH_PRIVACY_PATTERNS = (
     (re.compile(r"ChatP2P-[^\\/\\s]*(?:private|partner)[^\\/\\s]*", re.IGNORECASE), "ChatP2P-<redacted>"),
@@ -41,6 +58,10 @@ class OperatorConsoleConfig:
     skip_network_checks: bool = False
     timeout_seconds: float = 5.0
     freshness_seconds: float = DEFAULT_OPERATOR_CONSOLE_FRESHNESS_SECONDS
+    history_limit: int = DEFAULT_OPERATOR_CONSOLE_HISTORY_LIMIT
+    stale_report_root: Path | None = None
+    stale_report_days: float = DEFAULT_STALE_REPORT_DAYS
+    stale_report_max_items: int = DEFAULT_STALE_REPORT_MAX_ITEMS
 
 
 def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
@@ -104,6 +125,16 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
     json_path = out_dir / "operator-console.json"
     markdown_path = out_dir / "operator-console.md"
     html_path = out_dir / "operator-console.html"
+    history_path = out_dir / "operator-console-history.json"
+    cleanup_plan_path = out_dir / "operator-console-cleanup-plan.ps1"
+    stale_reports = _stale_report_inventory(
+        root=config.stale_report_root or config.home.expanduser().resolve().parent,
+        out_dir=out_dir,
+        now=now,
+        stale_days=config.stale_report_days,
+        max_items=config.stale_report_max_items,
+    )
+    _write_cleanup_plan(cleanup_plan_path, stale_reports)
     report = {
         "schema": OPERATOR_CONSOLE_REPORT_SCHEMA,
         "ok": summary["status"] != "fail",
@@ -122,6 +153,10 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
             "skip_network_checks": config.skip_network_checks,
             "timeout_seconds": config.timeout_seconds,
             "freshness_seconds": config.freshness_seconds,
+            "history_limit": config.history_limit,
+            "stale_report_root": str(config.stale_report_root) if config.stale_report_root else None,
+            "stale_report_days": config.stale_report_days,
+            "stale_report_max_items": config.stale_report_max_items,
         },
         "summary": summary,
         "local": local,
@@ -132,13 +167,18 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
         "reliability": reliability,
         "privacy_scan": _privacy_summary(privacy_scan),
         "partner_autopilot": partner_autopilot,
+        "stale_reports": stale_reports,
         "artifacts": {
             "json": str(json_path),
             "markdown": str(markdown_path),
             "html": str(html_path),
+            "history": str(history_path),
+            "cleanup_plan": str(cleanup_plan_path),
         },
     }
     report = _redact_sensitive_report(report, secrets_to_redact)
+    history_summary = _update_console_history(history_path, report, limit=config.history_limit)
+    report["history"] = _redact_sensitive_report(history_summary, secrets_to_redact)
 
     markdown = format_operator_console_markdown(report)
     html_report = format_operator_console_html(report, markdown)
@@ -151,6 +191,8 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
 def format_operator_console_summary(report: dict[str, Any]) -> str:
     summary = report.get("summary", {})
     artifacts = report.get("artifacts", {})
+    stale_reports = report.get("stale_reports", {})
+    history = report.get("history", {})
     lines = [
         f"ChatP2P operator console: {str(report.get('status', 'unknown')).upper()}",
         f"Can continue without partner: {_yes_no(summary.get('can_continue_without_partner'))}",
@@ -158,6 +200,8 @@ def format_operator_console_summary(report: dict[str, Any]) -> str:
         f"Primary lane: {_lane_brief((report.get('lanes') or {}).get('primary', {}))}",
         f"Backup lane: {_lane_brief((report.get('lanes') or {}).get('backup', {}))}",
         f"Privacy scan: {str((report.get('privacy_scan') or {}).get('status', 'unknown')).upper()}",
+        f"History changes: {len(history.get('changes', []))}",
+        f"Stale report candidates: {stale_reports.get('candidate_count', 0)}",
     ]
     html_path = artifacts.get("html")
     if html_path:
@@ -172,6 +216,8 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
     privacy = report.get("privacy_scan", {})
     partner_reports = report.get("partner_autopilot", {}).get("reports", [])
     local_processes = report.get("local", {}).get("managed_processes", [])
+    history = report.get("history", {})
+    stale_reports = report.get("stale_reports", {})
 
     lines = [
         "# ChatP2P Operator Console",
@@ -244,8 +290,44 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
             "",
             f"- Status: `{privacy.get('status', 'unknown')}`",
             f"- Findings: `{privacy.get('finding_count', 0)}`",
+            "",
+            "## Action History",
+            "",
+            f"- History file: `{history.get('path')}`",
+            f"- Entries kept: `{history.get('entries_kept')}`",
+            f"- Previous generated at: `{(history.get('previous_entry') or {}).get('generated_at')}`",
         ]
     )
+    if history.get("changes"):
+        lines.extend(["", "Changes since previous run:", ""])
+        lines.extend(f"- {change}" for change in history["changes"])
+    else:
+        lines.extend(["", "Changes since previous run: none"])
+    lines.extend(
+        [
+            "",
+            "## Stale Report Cleanup",
+            "",
+            f"- Candidate count: `{stale_reports.get('candidate_count', 0)}`",
+            f"- Cleanup plan: `{stale_reports.get('cleanup_plan_path')}`",
+            f"- Automatic deletion: `false`",
+        ]
+    )
+    candidates = stale_reports.get("candidates", [])
+    if candidates:
+        lines.extend(["", "| Path | Age days | Size bytes |", "| --- | --- | --- |"])
+        for candidate in candidates[:10]:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(candidate.get("path")),
+                        str(candidate.get("age_days")),
+                        str(candidate.get("size_bytes")),
+                    ]
+                )
+                + " |"
+            )
     if partner_reports:
         lines.extend(["", "## Partner Autopilot", "", "| Report | Status | Fresh | Finished |", "| --- | --- | --- | --- |"])
         for partner in partner_reports:
@@ -694,6 +776,184 @@ def _partner_autopilot_summary(path: Path, *, now: datetime, freshness_seconds: 
     }
 
 
+def _update_console_history(history_path: Path, report: dict[str, Any], *, limit: int) -> dict[str, Any]:
+    previous_entries = _read_history_entries(history_path)
+    previous_entry = previous_entries[0] if previous_entries else None
+    current_entry = _history_entry(report)
+    entries = [current_entry, *previous_entries]
+    entries = entries[:limit]
+    history_document = {
+        "schema": OPERATOR_CONSOLE_HISTORY_SCHEMA,
+        "updated_at": report.get("generated_at"),
+        "entries": entries,
+    }
+    history_path.write_text(json.dumps(history_document, indent=2, sort_keys=True), encoding="utf-8")
+    return {
+        "schema": OPERATOR_CONSOLE_HISTORY_SCHEMA,
+        "path": str(history_path),
+        "entries_kept": len(entries),
+        "current_entry": current_entry,
+        "previous_entry": previous_entry,
+        "changes": _history_changes(previous_entry, current_entry),
+    }
+
+
+def _read_history_entries(history_path: Path) -> list[dict[str, Any]]:
+    if not history_path.exists():
+        return []
+    try:
+        data = read_json_file(history_path, description="operator console history")
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    entries = data.get("entries", [])
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _history_entry(report: dict[str, Any]) -> dict[str, Any]:
+    summary = report.get("summary") or {}
+    lanes = report.get("lanes") or {}
+    privacy = report.get("privacy_scan") or {}
+    stale_reports = report.get("stale_reports") or {}
+    return {
+        "generated_at": report.get("generated_at"),
+        "status": report.get("status"),
+        "can_continue_without_partner": summary.get("can_continue_without_partner"),
+        "recommended_next_action": summary.get("recommended_next_action"),
+        "primary_ready": (lanes.get("primary") or {}).get("ready"),
+        "backup_ready": (lanes.get("backup") or {}).get("ready"),
+        "privacy_status": privacy.get("status"),
+        "privacy_findings": privacy.get("finding_count"),
+        "stale_report_candidates": stale_reports.get("candidate_count"),
+    }
+
+
+def _history_changes(previous: dict[str, Any] | None, current: dict[str, Any]) -> list[str]:
+    if previous is None:
+        return ["first_console_run"]
+    labels = {
+        "status": "status",
+        "can_continue_without_partner": "can_continue_without_partner",
+        "recommended_next_action": "recommended_next_action",
+        "primary_ready": "primary_ready",
+        "backup_ready": "backup_ready",
+        "privacy_status": "privacy_status",
+        "privacy_findings": "privacy_findings",
+        "stale_report_candidates": "stale_report_candidates",
+    }
+    changes = []
+    for key, label in labels.items():
+        old = previous.get(key)
+        new = current.get(key)
+        if old != new:
+            changes.append(f"{label}: {old} -> {new}")
+    return changes
+
+
+def _stale_report_inventory(
+    *,
+    root: Path,
+    out_dir: Path,
+    now: datetime,
+    stale_days: float,
+    max_items: int,
+) -> dict[str, Any]:
+    resolved_root = root.expanduser().resolve()
+    cleanup_plan_path = out_dir / "operator-console-cleanup-plan.ps1"
+    if not resolved_root.exists():
+        return {
+            "configured": True,
+            "root": str(resolved_root),
+            "exists": False,
+            "status": "missing",
+            "candidate_count": 0,
+            "candidates": [],
+            "cleanup_plan_path": str(cleanup_plan_path),
+            "automatic_deletion": False,
+        }
+    stale_seconds = stale_days * 24 * 60 * 60
+    candidates: list[dict[str, Any]] = []
+    for path in resolved_root.rglob("*"):
+        if len(candidates) >= max_items:
+            break
+        if not path.is_file():
+            continue
+        if _is_path_inside(path, out_dir):
+            continue
+        if any(part.startswith(".mesh") for part in path.relative_to(resolved_root).parts):
+            continue
+        if not _looks_like_report_artifact(path):
+            continue
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        age_seconds = max(0.0, now.timestamp() - stat.st_mtime)
+        if age_seconds < stale_seconds:
+            continue
+        candidates.append(
+            {
+                "path": str(path),
+                "relative_path": str(path.relative_to(resolved_root)),
+                "age_days": round(age_seconds / 86400, 2),
+                "size_bytes": stat.st_size,
+                "last_write_time": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                "suggested_action": "review_then_archive_or_delete",
+            }
+        )
+    return {
+        "configured": True,
+        "root": str(resolved_root),
+        "exists": True,
+        "status": "pass",
+        "stale_after_days": stale_days,
+        "candidate_count": len(candidates),
+        "max_items": max_items,
+        "truncated": len(candidates) >= max_items,
+        "candidates": candidates,
+        "cleanup_plan_path": str(cleanup_plan_path),
+        "automatic_deletion": False,
+    }
+
+
+def _write_cleanup_plan(path: Path, stale_reports: dict[str, Any]) -> None:
+    candidates = stale_reports.get("candidates", [])
+    lines = [
+        "# ChatP2P operator console cleanup plan",
+        "# This file is generated for review only. It does not run automatically.",
+        "# Uncomment individual commands only after checking the paths.",
+        "",
+    ]
+    if not candidates:
+        lines.append("# No stale report artifacts were found.")
+    else:
+        archive_root = path.parent / "archive"
+        lines.append(f"# New-Item -ItemType Directory -Force -Path {json.dumps(str(archive_root))} | Out-Null")
+        for candidate in candidates:
+            source = str(candidate.get("path", ""))
+            target = str(archive_root / Path(source).name)
+            lines.append(f"# Move-Item -LiteralPath {json.dumps(source)} -Destination {json.dumps(target)}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _looks_like_report_artifact(path: Path) -> bool:
+    name = path.name.lower()
+    if path.suffix.lower() not in _REPORT_SUFFIXES:
+        return False
+    return any(hint in name for hint in _REPORT_NAME_HINTS)
+
+
+def _is_path_inside(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 def _operator_summary(
     *,
     primary: dict[str, Any],
@@ -880,5 +1140,11 @@ def _validate_operator_console_config(config: OperatorConsoleConfig) -> None:
         raise ValueError("--timeout-seconds must be greater than 0")
     if config.freshness_seconds <= 0:
         raise ValueError("--freshness-seconds must be greater than 0")
+    if config.history_limit < 1:
+        raise ValueError("--history-limit must be at least 1")
+    if config.stale_report_days <= 0:
+        raise ValueError("--stale-report-days must be greater than 0")
+    if config.stale_report_max_items < 0:
+        raise ValueError("--stale-report-max-items cannot be negative")
     if not str(config.primary_invite_path).strip():
         raise ValueError("--primary-invite is required")

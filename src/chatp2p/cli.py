@@ -370,6 +370,10 @@ def operator_console_command(args: argparse.Namespace) -> None:
                 skip_network_checks=args.skip_network_checks,
                 timeout_seconds=args.timeout_seconds,
                 freshness_seconds=args.freshness_seconds,
+                history_limit=args.history_limit,
+                stale_report_root=Path(args.stale_report_root) if args.stale_report_root else None,
+                stale_report_days=args.stale_report_days,
+                stale_report_max_items=args.stale_report_max_items,
             )
         )
     except (OSError, ValueError) as exc:
@@ -2353,6 +2357,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=3600.0,
         type=float,
         help="Maximum age for reliability/autopilot reports before marking them stale",
+    )
+    operator_console_parser.add_argument(
+        "--history-limit",
+        default=20,
+        type=int,
+        help="Number of operator-console history entries to keep",
+    )
+    operator_console_parser.add_argument(
+        "--stale-report-root",
+        default=None,
+        help="Root directory to scan for old report/proof artifacts. Defaults to HOME parent",
+    )
+    operator_console_parser.add_argument(
+        "--stale-report-days",
+        default=2.0,
+        type=float,
+        help="Report artifacts older than this many days are listed as cleanup candidates",
+    )
+    operator_console_parser.add_argument(
+        "--stale-report-max-items",
+        default=50,
+        type=int,
+        help="Maximum stale report candidates to include",
     )
     operator_console_parser.add_argument("--json", action="store_true", help="Print the full JSON report")
     operator_console_parser.set_defaults(func=operator_console_command)

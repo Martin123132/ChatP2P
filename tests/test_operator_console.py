@@ -1,4 +1,6 @@
 import json
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -84,11 +86,11 @@ def test_operator_console_can_continue_on_backup_lane(monkeypatch, tmp_path):
     backup_invite = private_dir / "backup-alpha-invite.json"
     write_alpha_invite(
         primary_invite,
-        AlphaInvite.create(coordinator="http://127.0.0.1:8765", admission_token="secret-token-primary"),
+        AlphaInvite.create(coordinator="http://127.0.0.1:8765", admission_token="token-primary-1"),
     )
     write_alpha_invite(
         backup_invite,
-        AlphaInvite.create(coordinator="http://127.0.0.1:8766", admission_token="secret-token-backup"),
+        AlphaInvite.create(coordinator="http://127.0.0.1:8766", admission_token="token-backup-1"),
     )
 
     def fake_lane_status(**kwargs):
@@ -161,6 +163,99 @@ def test_operator_console_without_reliability_pack_still_gives_next_step(monkeyp
     assert report["summary"]["recommended_next_action"] == "run_reliability_pack_when_ready"
 
 
+def test_operator_console_keeps_history_and_reports_changes(monkeypatch, tmp_path):
+    repo = _clean_repo(tmp_path)
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    invite_path = private_dir / "primary-alpha-invite.json"
+    write_alpha_invite(
+        invite_path,
+        AlphaInvite.create(coordinator="http://127.0.0.1:8765", admission_token="secret-token-123456"),
+    )
+    out_dir = tmp_path / "operator-console"
+
+    monkeypatch.setattr(
+        "chatp2p.operator_console._lane_status",
+        lambda **kwargs: {
+            "label": kwargs["label"],
+            "configured": True,
+            "network_checked": True,
+            "ready": True,
+            "status": "pass",
+            "snapshot_summary": {"live_nodes": 1, "disputed_jobs": 0},
+            "errors": [],
+            "warnings": [],
+        },
+    )
+
+    first = run_operator_console(
+        OperatorConsoleConfig(
+            repo=repo,
+            home=tmp_path / ".mesh",
+            primary_invite_path=invite_path,
+            out_dir=out_dir,
+        )
+    )
+    reliability_dir = tmp_path / "reliability-pack"
+    reliability_dir.mkdir()
+    _write_reliability_summary(reliability_dir, can_continue=True)
+    second = run_operator_console(
+        OperatorConsoleConfig(
+            repo=repo,
+            home=tmp_path / ".mesh",
+            primary_invite_path=invite_path,
+            reliability_dir=reliability_dir,
+            out_dir=out_dir,
+        )
+    )
+
+    history_path = Path(second["artifacts"]["history"])
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    assert first["history"]["changes"] == ["first_console_run"]
+    assert history["schema"] == "chatp2p.operator-console-history.v1"
+    assert len(history["entries"]) == 2
+    assert any("recommended_next_action" in change for change in second["history"]["changes"])
+
+
+def test_operator_console_lists_stale_reports_without_deleting_them(tmp_path):
+    repo = _clean_repo(tmp_path)
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    stale_report = data_root / "alpha-soak-report-old.json"
+    stale_report.write_text("{}", encoding="utf-8")
+    old_time = time.time() - (5 * 24 * 60 * 60)
+    os.utime(stale_report, (old_time, old_time))
+    fresh_report = data_root / "alpha-smoke-report-fresh.json"
+    fresh_report.write_text("{}", encoding="utf-8")
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    invite_path = private_dir / "primary-alpha-invite.json"
+    write_alpha_invite(
+        invite_path,
+        AlphaInvite.create(coordinator="http://127.0.0.1:8765", admission_token="secret-token-123456"),
+    )
+
+    report = run_operator_console(
+        OperatorConsoleConfig(
+            repo=repo,
+            home=data_root / ".mesh",
+            primary_invite_path=invite_path,
+            out_dir=tmp_path / "operator-console",
+            skip_network_checks=True,
+            stale_report_root=data_root,
+            stale_report_days=2.0,
+        )
+    )
+
+    assert report["stale_reports"]["candidate_count"] == 1
+    assert report["stale_reports"]["candidates"][0]["relative_path"] == stale_report.name
+    assert stale_report.exists()
+    assert fresh_report.exists()
+    cleanup_plan = Path(report["artifacts"]["cleanup_plan"])
+    assert cleanup_plan.exists()
+    assert "Move-Item" in cleanup_plan.read_text(encoding="utf-8")
+
+
 def test_operator_console_cli_parses(tmp_path):
     parser = build_parser()
     args = parser.parse_args(
@@ -184,6 +279,14 @@ def test_operator_console_cli_parses(tmp_path):
             "--expected-backup-worker-id",
             "worker_BACKUP",
             "--skip-network-checks",
+            "--history-limit",
+            "5",
+            "--stale-report-root",
+            str(tmp_path / "reports"),
+            "--stale-report-days",
+            "7",
+            "--stale-report-max-items",
+            "12",
             "--json",
         ]
     )
@@ -191,6 +294,9 @@ def test_operator_console_cli_parses(tmp_path):
     assert args.func.__name__ == "operator_console_command"
     assert args.skip_network_checks is True
     assert args.expected_primary_worker_id == "worker_PRIMARY"
+    assert args.history_limit == 5
+    assert args.stale_report_days == 7
+    assert args.stale_report_max_items == 12
 
 
 def _clean_repo(tmp_path):
