@@ -67,6 +67,7 @@ from .ollama import DEFAULT_OLLAMA_BASE_URL
 from .operator_config import OperatorConfig, write_operator_config
 from .packets import JobLeaseRenewal, NodeRegistration
 from .proof import OllamaProofConfig, SwarmProofConfig, proof_summary, run_ollama_proof, run_swarm_proof
+from .privacy import PrivacyScanConfig, run_public_privacy_scan
 from .quickstart import QuickstartConfig, format_quickstart_report, run_quickstart
 from .provider import (
     ProviderEdgeProofConfig,
@@ -335,6 +336,19 @@ def run_quickstart_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_quickstart_report(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def operator_privacy_scan_command(args: argparse.Namespace) -> None:
+    report = run_public_privacy_scan(
+        PrivacyScanConfig(
+            root=Path(args.root),
+            report_path=Path(args.report) if args.report else None,
+            include_provider_config_filenames=args.include_provider_config_filenames,
+        )
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -2249,6 +2263,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     operator_config_parser.add_argument("--force", action="store_true", help="Replace an existing config")
     operator_config_parser.set_defaults(func=write_operator_config_command)
+
+    privacy_scan_parser = operator_subcommands.add_parser(
+        "privacy-scan",
+        help="Scan a public repo tree for committed secrets and private alpha identifiers",
+    )
+    privacy_scan_parser.add_argument("--root", default=".", help="Repository root to scan")
+    privacy_scan_parser.add_argument("--report", default=None, help="Optional JSON report path")
+    privacy_scan_parser.add_argument(
+        "--include-provider-config-filenames",
+        action="store_true",
+        help="Also fail on tracked provider-config JSON filenames",
+    )
+    privacy_scan_parser.set_defaults(func=operator_privacy_scan_command)
 
     bootstrap_provider_parser = operator_subcommands.add_parser(
         "bootstrap-provider",

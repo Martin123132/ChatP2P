@@ -41,6 +41,14 @@ Repeat: run the same command again to create another job.
 
 That is the sanity bar: start, connect worker, run job, see result, repeat without a second machine or Tailscale.
 
+Before pushing public repo changes, run the privacy gate:
+
+```powershell
+python -m chatp2p.cli operator privacy-scan --root D:\Projects\ChatP2P --report D:\ChatP2PData\privacy-scan-report.json
+```
+
+The scan fails on committed invite/operator files, real-looking credentials, exact worker IDs, live tailnet IPs, hostnames, and private partner paths in public docs. Matches for credential-shaped values are redacted in the report.
+
 ## Network Smoke Test
 
 Terminal 1:
