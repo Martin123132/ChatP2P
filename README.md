@@ -63,6 +63,21 @@ python -m chatp2p.cli operator console `
 
 The console writes `operator-console.json`, `operator-console.md`, `operator-console.html`, `operator-console-history.json`, and a review-only cleanup plan. It summarizes primary and backup lane health, local managed processes, privacy-scan status, latest reliability-pack evidence, what changed since the previous console run, stale report candidates, and whether the operator can continue without partner action.
 
+For the daily operator gate, run:
+
+```powershell
+python -m chatp2p.cli operator daily-check `
+  --repo D:\Projects\ChatP2P `
+  --home D:\ChatP2PData\.mesh `
+  --primary-invite D:\ChatP2PData\alpha-invite.json `
+  --backup-invite D:\ChatP2PData\backup-alpha-invite-partner.json `
+  --reliability-dir D:\ChatP2PData\reliability-pack-live `
+  --out D:\ChatP2PData\daily-check `
+  --console-out D:\ChatP2PData\operator-console
+```
+
+Daily check writes `daily-check.json` and `daily-check.md`, runs the privacy gate, updates the Operator Console, and prints one pass/warn/fail answer. It does not refresh reliability proof jobs unless `--refresh-reliability-pack` is passed.
+
 ## Network Smoke Test
 
 Terminal 1:

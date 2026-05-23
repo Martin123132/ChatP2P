@@ -81,6 +81,23 @@ The console is read-only. It does not create jobs, restart workers, or require p
 
 Use `summary.can_continue_without_partner` and `summary.recommended_next_action` as the quick decision fields. The history file records previous console summaries so the report can show what changed since the last run. The cleanup plan lists stale report/proof artifacts for review only; it never deletes files automatically.
 
+## Daily Check
+
+Use daily check when you want one lightweight pass/warn/fail answer:
+
+```powershell
+python -m chatp2p.cli operator daily-check `
+  --repo D:\Projects\ChatP2P `
+  --home D:\ChatP2PData\.mesh `
+  --primary-invite D:\ChatP2PData\alpha-invite.json `
+  --backup-invite D:\ChatP2PData\backup-alpha-invite-partner.json `
+  --reliability-dir D:\ChatP2PData\reliability-pack-live `
+  --out D:\ChatP2PData\daily-check `
+  --console-out D:\ChatP2PData\operator-console
+```
+
+Daily check writes `daily-check.json` and `daily-check.md`, runs the public privacy scan, updates Operator Console, and exits with a clear status. It does not create proof jobs by default. Add `--refresh-reliability-pack` only when you deliberately want to run fresh reliability proof work.
+
 ## Recurring Local Check
 
 Install a local Windows Scheduled Task from the operator machine:

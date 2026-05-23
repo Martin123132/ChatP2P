@@ -66,6 +66,7 @@ from .node_runtime import (
 from .ollama import DEFAULT_OLLAMA_BASE_URL
 from .operator_config import OperatorConfig, write_operator_config
 from .operator_console import OperatorConsoleConfig, format_operator_console_summary, run_operator_console
+from .operator_daily import OperatorDailyCheckConfig, format_operator_daily_check_summary, run_operator_daily_check
 from .packets import JobLeaseRenewal, NodeRegistration
 from .proof import OllamaProofConfig, SwarmProofConfig, proof_summary, run_ollama_proof, run_swarm_proof
 from .privacy import PrivacyScanConfig, run_public_privacy_scan
@@ -383,6 +384,47 @@ def operator_console_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_operator_console_summary(report))
+    if report["status"] == "fail":
+        raise SystemExit(1)
+
+
+def operator_daily_check_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_operator_daily_check(
+            OperatorDailyCheckConfig(
+                repo=Path(args.repo),
+                home=Path(args.home),
+                primary_invite_path=Path(args.primary_invite),
+                backup_invite_path=Path(args.backup_invite) if args.backup_invite else None,
+                reliability_dir=Path(args.reliability_dir) if args.reliability_dir else None,
+                out_dir=Path(args.out),
+                console_out_dir=Path(args.console_out) if args.console_out else None,
+                partner_report_paths=tuple(Path(path) for path in (args.partner_report or [])),
+                expected_primary_worker_id=args.expected_primary_worker_id,
+                expected_backup_worker_id=args.expected_backup_worker_id,
+                skip_network_checks=args.skip_network_checks,
+                refresh_reliability_pack=args.refresh_reliability_pack,
+                include_deterministic_smoke=args.include_deterministic_smoke,
+                timeout_seconds=args.timeout_seconds,
+                status_timeout_seconds=args.status_timeout_seconds,
+                poll_interval=args.poll_interval,
+                inference_jobs=args.inference_jobs,
+                smoke_jobs=args.jobs,
+                min_live_workers=args.min_live_workers,
+                freshness_seconds=args.freshness_seconds,
+                history_limit=args.history_limit,
+                stale_report_root=Path(args.stale_report_root) if args.stale_report_root else None,
+                stale_report_days=args.stale_report_days,
+                stale_report_max_items=args.stale_report_max_items,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_operator_daily_check_summary(report))
     if report["status"] == "fail":
         raise SystemExit(1)
 
@@ -2383,6 +2425,124 @@ def build_parser() -> argparse.ArgumentParser:
     )
     operator_console_parser.add_argument("--json", action="store_true", help="Print the full JSON report")
     operator_console_parser.set_defaults(func=operator_console_command)
+
+    operator_daily_check_parser = operator_subcommands.add_parser(
+        "daily-check",
+        help="Run the lightweight daily operator gate and write one status summary",
+    )
+    operator_daily_check_parser.add_argument("--repo", default=".", help="Public repository root to privacy-scan")
+    operator_daily_check_parser.add_argument("--home", default=".mesh", help="Local runtime home to inspect")
+    operator_daily_check_parser.add_argument("--primary-invite", required=True, help="Path to primary alpha invite JSON")
+    operator_daily_check_parser.add_argument("--backup-invite", default=None, help="Optional backup alpha invite JSON")
+    operator_daily_check_parser.add_argument(
+        "--reliability-dir",
+        default=None,
+        help="Optional reliability-pack directory containing reliability-summary.json",
+    )
+    operator_daily_check_parser.add_argument("--out", required=True, help="Output directory for daily-check artifacts")
+    operator_daily_check_parser.add_argument(
+        "--console-out",
+        default=None,
+        help="Operator Console output directory. Defaults to OUT/operator-console",
+    )
+    operator_daily_check_parser.add_argument(
+        "--partner-report",
+        action="append",
+        default=None,
+        help="Optional partner/autopilot report JSON. Can be passed more than once",
+    )
+    operator_daily_check_parser.add_argument(
+        "--expected-primary-worker-id",
+        default=None,
+        help="Primary-lane worker ID expected to be live",
+    )
+    operator_daily_check_parser.add_argument(
+        "--expected-backup-worker-id",
+        default=None,
+        help="Backup-lane worker ID expected to be live",
+    )
+    operator_daily_check_parser.add_argument(
+        "--skip-network-checks",
+        action="store_true",
+        help="Skip coordinator health/snapshot HTTP checks and build an offline report",
+    )
+    operator_daily_check_parser.add_argument(
+        "--refresh-reliability-pack",
+        action="store_true",
+        help="Also run reliability-pack before writing the daily summary",
+    )
+    operator_daily_check_parser.add_argument(
+        "--include-deterministic-smoke",
+        action="store_true",
+        help="When refreshing reliability, also run deterministic smoke. Disabled by default.",
+    )
+    operator_daily_check_parser.add_argument(
+        "--jobs",
+        default=4,
+        type=int,
+        help="Deterministic smoke jobs per lane when --include-deterministic-smoke is used",
+    )
+    operator_daily_check_parser.add_argument(
+        "--inference-jobs",
+        default=4,
+        type=int,
+        help="Verified echo inference jobs per lane when refreshing reliability",
+    )
+    operator_daily_check_parser.add_argument(
+        "--min-live-workers",
+        default=1,
+        type=int,
+        help="Minimum live workers required when refreshing reliability",
+    )
+    operator_daily_check_parser.add_argument(
+        "--status-timeout-seconds",
+        default=5.0,
+        type=float,
+        help="Timeout for coordinator health and snapshot checks",
+    )
+    operator_daily_check_parser.add_argument(
+        "--timeout-seconds",
+        default=90.0,
+        type=float,
+        help="Maximum time to wait for optional reliability refresh work",
+    )
+    operator_daily_check_parser.add_argument(
+        "--poll-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between optional reliability refresh polls",
+    )
+    operator_daily_check_parser.add_argument(
+        "--freshness-seconds",
+        default=3600.0,
+        type=float,
+        help="Maximum age for reliability/autopilot reports before marking them stale",
+    )
+    operator_daily_check_parser.add_argument(
+        "--history-limit",
+        default=20,
+        type=int,
+        help="Number of operator-console history entries to keep",
+    )
+    operator_daily_check_parser.add_argument(
+        "--stale-report-root",
+        default=None,
+        help="Root directory to scan for old report/proof artifacts. Defaults to HOME parent",
+    )
+    operator_daily_check_parser.add_argument(
+        "--stale-report-days",
+        default=2.0,
+        type=float,
+        help="Report artifacts older than this many days are listed as cleanup candidates",
+    )
+    operator_daily_check_parser.add_argument(
+        "--stale-report-max-items",
+        default=50,
+        type=int,
+        help="Maximum stale report candidates to include",
+    )
+    operator_daily_check_parser.add_argument("--json", action="store_true", help="Print the full JSON report")
+    operator_daily_check_parser.set_defaults(func=operator_daily_check_command)
 
     bootstrap_provider_parser = operator_subcommands.add_parser(
         "bootstrap-provider",
