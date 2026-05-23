@@ -7,10 +7,13 @@ import chatp2p.alpha as alpha_module
 from chatp2p.alpha import (
     ALPHA_DRILL_REPORT_SCHEMA,
     ALPHA_EVIDENCE_PACK_SCHEMA,
+    ALPHA_FAILOVER_SMOKE_REPORT_SCHEMA,
     ALPHA_INFERENCE_PROOF_REPORT_SCHEMA,
     ALPHA_INVITE_SCHEMA,
+    ALPHA_NETWORK_STATUS_REPORT_SCHEMA,
     ALPHA_OPS_PACK_SCHEMA,
     ALPHA_PREFLIGHT_REPORT_SCHEMA,
+    ALPHA_RELIABILITY_PACK_SCHEMA,
     ALPHA_REMOTE_PROOF_REPORT_SCHEMA,
     ALPHA_ROUTE_REPORT_SCHEMA,
     ALPHA_SMOKE_REPORT_SCHEMA,
@@ -18,10 +21,13 @@ from chatp2p.alpha import (
     ALPHA_STATUS_REPORT_SCHEMA,
     AlphaDrillConfig,
     AlphaEvidenceConfig,
+    AlphaFailoverSmokeConfig,
     AlphaInferenceProofConfig,
     AlphaInvite,
     AlphaJoinConfig,
+    AlphaNetworkStatusConfig,
     AlphaOpsPackConfig,
+    AlphaReliabilityPackConfig,
     NodeCapabilityRefreshConfig,
     AlphaPreflightConfig,
     AlphaRemoteProofConfig,
@@ -35,10 +41,13 @@ from chatp2p.alpha import (
     load_alpha_invite,
     run_alpha_drill,
     run_alpha_evidence,
+    run_alpha_failover_smoke,
     run_alpha_inference_proof,
     run_alpha_join,
+    run_alpha_network_status,
     run_alpha_ops_pack,
     run_alpha_preflight,
+    run_alpha_reliability_pack,
     run_alpha_remote_proof,
     run_alpha_route,
     run_alpha_smoke,
@@ -549,6 +558,181 @@ def test_alpha_smoke_creates_jobs_and_observes_accepted_results(tmp_path):
     assert smoke_report["criteria"]["disputed_jobs"]["actual"] == 0
     assert report_path.exists()
     assert token not in json.dumps(smoke_report)
+
+
+def test_alpha_network_status_and_failover_smoke_cover_primary_and_backup_lanes(tmp_path):
+    primary_token = "primary-alpha-token-123"
+    backup_token = "backup-alpha-token-456"
+    primary_server, primary_thread, primary_url = _start_public_alpha(primary_token)
+    backup_server, backup_thread, backup_url = _start_public_alpha(backup_token)
+    primary_home = tmp_path / ".mesh-primary"
+    backup_home = tmp_path / ".mesh-backup"
+    primary_invite_path = tmp_path / "primary-invite.json"
+    backup_invite_path = tmp_path / "backup-invite.json"
+    network_report_path = tmp_path / "alpha-network-status.json"
+    failover_report_path = tmp_path / "alpha-failover-smoke.json"
+    write_alpha_invite(
+        primary_invite_path,
+        AlphaInvite.create(coordinator=primary_url, admission_token=primary_token),
+    )
+    write_alpha_invite(
+        backup_invite_path,
+        AlphaInvite.create(coordinator=backup_url, admission_token=backup_token),
+    )
+    _save_benchmark(primary_home)
+    _save_benchmark(backup_home)
+
+    try:
+        primary_join = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=primary_invite_path,
+                home=primary_home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        backup_join = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=backup_invite_path,
+                home=backup_home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        network_report = run_alpha_network_status(
+            AlphaNetworkStatusConfig(
+                primary_invite_path=primary_invite_path,
+                backup_invite_path=backup_invite_path,
+                report_path=network_report_path,
+                expected_primary_worker_id=primary_join["worker_node_id"],
+                expected_backup_worker_id=backup_join["worker_node_id"],
+                timeout_seconds=5.0,
+            )
+        )
+        failover_report = run_alpha_failover_smoke(
+            AlphaFailoverSmokeConfig(
+                primary_invite_path=primary_invite_path,
+                backup_invite_path=backup_invite_path,
+                report_path=failover_report_path,
+                jobs=1,
+                min_live_workers=1,
+                min_accepted_results=1,
+                min_verified_jobs=0,
+                expected_primary_worker_id=primary_join["worker_node_id"],
+                expected_backup_worker_id=backup_join["worker_node_id"],
+                min_expected_primary_results=1,
+                min_expected_backup_results=1,
+                timeout_seconds=10.0,
+                poll_interval=0.2,
+            )
+        )
+    finally:
+        stop_managed_process(home=primary_home, role="worker")
+        stop_managed_process(home=backup_home, role="worker")
+        _stop_server(primary_server, primary_thread)
+        _stop_server(backup_server, backup_thread)
+
+    assert network_report["schema"] == ALPHA_NETWORK_STATUS_REPORT_SCHEMA
+    assert network_report["ok"] is True
+    assert network_report["lanes"]["primary"]["expected_worker"]["live"] is True
+    assert network_report["lanes"]["backup"]["expected_worker"]["live"] is True
+    assert network_report_path.exists()
+
+    assert failover_report["schema"] == ALPHA_FAILOVER_SMOKE_REPORT_SCHEMA
+    assert failover_report["ok"] is True
+    assert failover_report["lanes"]["primary"]["result_node_counts"][primary_join["worker_node_id"]] == 1
+    assert failover_report["lanes"]["backup"]["result_node_counts"][backup_join["worker_node_id"]] == 1
+    assert (tmp_path / "alpha-failover-smoke-primary.json").exists()
+    assert (tmp_path / "alpha-failover-smoke-backup.json").exists()
+    assert primary_token not in json.dumps(network_report)
+    assert backup_token not in json.dumps(network_report)
+    assert primary_token not in json.dumps(failover_report)
+    assert backup_token not in json.dumps(failover_report)
+
+
+def test_alpha_reliability_pack_writes_summary_markdown_and_redacted_artifacts(tmp_path):
+    primary_token = "primary-alpha-token-123"
+    backup_token = "backup-alpha-token-456"
+    primary_server, primary_thread, primary_url = _start_public_alpha(primary_token)
+    backup_server, backup_thread, backup_url = _start_public_alpha(backup_token)
+    primary_home = tmp_path / ".mesh-primary"
+    backup_home = tmp_path / ".mesh-backup"
+    primary_invite_path = tmp_path / "primary-invite.json"
+    backup_invite_path = tmp_path / "backup-invite.json"
+    out_dir = tmp_path / "reliability-pack"
+    write_alpha_invite(
+        primary_invite_path,
+        AlphaInvite.create(coordinator=primary_url, admission_token=primary_token),
+    )
+    write_alpha_invite(
+        backup_invite_path,
+        AlphaInvite.create(coordinator=backup_url, admission_token=backup_token),
+    )
+    _save_benchmark(primary_home)
+    _save_benchmark(backup_home)
+
+    try:
+        primary_join = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=primary_invite_path,
+                home=primary_home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        backup_join = run_alpha_join(
+            AlphaJoinConfig(
+                invite_path=backup_invite_path,
+                home=backup_home,
+                worker_interval=0.2,
+                startup_timeout_seconds=10.0,
+                force=True,
+            )
+        )
+        report = run_alpha_reliability_pack(
+            AlphaReliabilityPackConfig(
+                primary_invite_path=primary_invite_path,
+                backup_invite_path=backup_invite_path,
+                out_dir=out_dir,
+                expected_primary_worker_id=primary_join["worker_node_id"],
+                expected_backup_worker_id=backup_join["worker_node_id"],
+                smoke_jobs=1,
+                inference_jobs=1,
+                timeout_seconds=10.0,
+                poll_interval=0.2,
+            )
+        )
+    finally:
+        stop_managed_process(home=primary_home, role="worker")
+        stop_managed_process(home=backup_home, role="worker")
+        _stop_server(primary_server, primary_thread)
+        _stop_server(backup_server, backup_thread)
+
+    assert report["schema"] == ALPHA_RELIABILITY_PACK_SCHEMA
+    assert report["ok"] is True
+    assert report["summary"]["can_continue_without_partner"] is True
+    assert report["summary"]["recommended_mode"] == "primary_and_backup_ready"
+    assert report["summary"]["include_deterministic_smoke"] is False
+    assert report["reports"]["failover_smoke"]["status"] == "skipped"
+    assert report["reports"]["primary_inference"]["criteria"]["verified_jobs"]["actual"] == 1
+    assert report["reports"]["backup_inference"]["criteria"]["verified_jobs"]["actual"] == 1
+    assert report["token_redaction"]["ok"] is True
+    assert (out_dir / "reliability-summary.json").exists()
+    assert (out_dir / "reliability-summary.md").exists()
+    assert (out_dir / "network-status.json").exists()
+    assert (out_dir / "failover-smoke.json").exists()
+    assert not (out_dir / "failover-smoke-primary.json").exists()
+    assert not (out_dir / "failover-smoke-backup.json").exists()
+    assert (out_dir / "primary-inference-proof.json").exists()
+    assert (out_dir / "backup-inference-proof.json").exists()
+    for path in out_dir.glob("*"):
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            assert primary_token not in text
+            assert backup_token not in text
 
 
 def test_alpha_remote_proof_waits_for_verified_jobs_and_expected_worker(tmp_path):

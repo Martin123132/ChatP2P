@@ -92,6 +92,31 @@ def test_node_managed_commands_parse(tmp_path):
     assert down_args.func.__name__ == "run_node_down_command"
 
 
+def test_operator_reliability_task_command_parse(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "install-reliability-task",
+            "--primary-invite",
+            str(tmp_path / "primary-invite.json"),
+            "--backup-invite",
+            str(tmp_path / "backup-invite.json"),
+            "--out",
+            str(tmp_path / "reliability-pack"),
+            "--interval-minutes",
+            "15",
+            "--include-deterministic-smoke",
+            "--dry-run",
+        ]
+    )
+
+    assert args.func.__name__ == "alpha_install_reliability_task_command"
+    assert args.interval_minutes == 15
+    assert args.include_deterministic_smoke is True
+    assert args.dry_run is True
+
+
 def test_node_status_can_derive_coordinator_from_invite(tmp_path):
     parser = build_parser()
     invite_path = tmp_path / "alpha-invite.json"

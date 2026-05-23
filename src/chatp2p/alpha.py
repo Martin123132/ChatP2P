@@ -14,7 +14,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
@@ -33,6 +33,9 @@ ALPHA_PREFLIGHT_REPORT_SCHEMA = "chatp2p.alpha-preflight-report.v1"
 ALPHA_SMOKE_REPORT_SCHEMA = "chatp2p.alpha-smoke-report.v1"
 ALPHA_DRILL_REPORT_SCHEMA = "chatp2p.alpha-drill-report.v1"
 ALPHA_ROUTE_REPORT_SCHEMA = "chatp2p.alpha-route-report.v1"
+ALPHA_NETWORK_STATUS_REPORT_SCHEMA = "chatp2p.alpha-network-status-report.v1"
+ALPHA_FAILOVER_SMOKE_REPORT_SCHEMA = "chatp2p.alpha-failover-smoke-report.v1"
+ALPHA_RELIABILITY_PACK_SCHEMA = "chatp2p.alpha-reliability-pack.v1"
 ALPHA_REMOTE_PROOF_REPORT_SCHEMA = "chatp2p.alpha-remote-proof-report.v1"
 ALPHA_STATUS_REPORT_SCHEMA = "chatp2p.alpha-status-report.v1"
 ALPHA_EVIDENCE_PACK_SCHEMA = "chatp2p.alpha-evidence-pack.v1"
@@ -160,6 +163,51 @@ class AlphaSmokeConfig:
     min_live_workers: int = 1
     min_accepted_results: int = 1
     min_verified_jobs: int = 0
+    timeout_seconds: float = 90.0
+    poll_interval: float = 0.5
+
+
+@dataclass(frozen=True)
+class AlphaNetworkStatusConfig:
+    primary_invite_path: Path
+    backup_invite_path: Path
+    report_path: Path
+    expected_primary_worker_id: str | None = None
+    expected_backup_worker_id: str | None = None
+    min_primary_live_workers: int = 1
+    min_backup_live_workers: int = 1
+    timeout_seconds: float = 5.0
+
+
+@dataclass(frozen=True)
+class AlphaFailoverSmokeConfig:
+    primary_invite_path: Path
+    backup_invite_path: Path
+    report_path: Path
+    jobs: int = 4
+    min_live_workers: int = 1
+    min_accepted_results: int | None = None
+    min_verified_jobs: int = 0
+    expected_primary_worker_id: str | None = None
+    expected_backup_worker_id: str | None = None
+    min_expected_primary_results: int = 0
+    min_expected_backup_results: int = 0
+    timeout_seconds: float = 90.0
+    poll_interval: float = 0.5
+
+
+@dataclass(frozen=True)
+class AlphaReliabilityPackConfig:
+    primary_invite_path: Path
+    backup_invite_path: Path
+    out_dir: Path
+    expected_primary_worker_id: str | None = None
+    expected_backup_worker_id: str | None = None
+    include_deterministic_smoke: bool = False
+    smoke_jobs: int = 4
+    inference_jobs: int = 4
+    min_live_workers: int = 1
+    status_timeout_seconds: float = 5.0
     timeout_seconds: float = 90.0
     poll_interval: float = 0.5
 
@@ -1196,6 +1244,329 @@ def run_alpha_route(config: AlphaRouteConfig) -> dict[str, Any]:
         "errors": errors,
     }
     _write_json_report(config.report_path, report)
+    return report
+
+
+def run_alpha_network_status(config: AlphaNetworkStatusConfig) -> dict[str, Any]:
+    _validate_alpha_network_status_config(config)
+    started_at = time.time()
+    primary_invite = load_alpha_invite(config.primary_invite_path)
+    backup_invite = load_alpha_invite(config.backup_invite_path)
+    secrets_to_redact = tuple(
+        value for value in (primary_invite.admission_token, backup_invite.admission_token) if value
+    )
+
+    primary = _alpha_network_status_lane(
+        label="primary",
+        invite=primary_invite,
+        invite_path=config.primary_invite_path,
+        expected_worker_id=config.expected_primary_worker_id,
+        min_live_workers=config.min_primary_live_workers,
+        timeout_seconds=config.timeout_seconds,
+    )
+    backup = _alpha_network_status_lane(
+        label="backup",
+        invite=backup_invite,
+        invite_path=config.backup_invite_path,
+        expected_worker_id=config.expected_backup_worker_id,
+        min_live_workers=config.min_backup_live_workers,
+        timeout_seconds=config.timeout_seconds,
+    )
+    lanes = {"primary": primary, "backup": backup}
+    errors = [
+        f"{label}: {error}"
+        for label, lane in lanes.items()
+        for error in lane.get("errors", [])
+    ]
+    ok = not errors and all(lane.get("ok") for lane in lanes.values())
+    report = {
+        "schema": ALPHA_NETWORK_STATUS_REPORT_SCHEMA,
+        "ok": ok,
+        "status": "pass" if ok else "fail",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(time.time() - started_at, 3),
+        "config": {
+            "primary_invite_path": str(config.primary_invite_path),
+            "backup_invite_path": str(config.backup_invite_path),
+            "report_path": str(config.report_path),
+            "expected_primary_worker_id": config.expected_primary_worker_id,
+            "expected_backup_worker_id": config.expected_backup_worker_id,
+            "min_primary_live_workers": config.min_primary_live_workers,
+            "min_backup_live_workers": config.min_backup_live_workers,
+            "timeout_seconds": config.timeout_seconds,
+        },
+        "lanes": lanes,
+        "errors": errors,
+    }
+    report = _redact_evidence_value(report, secrets_to_redact)
+    _write_json_report(config.report_path, report)
+    return report
+
+
+def run_alpha_failover_smoke(config: AlphaFailoverSmokeConfig) -> dict[str, Any]:
+    _validate_alpha_failover_smoke_config(config)
+    started_at = time.time()
+    primary_invite = load_alpha_invite(config.primary_invite_path)
+    backup_invite = load_alpha_invite(config.backup_invite_path)
+    secrets_to_redact = tuple(
+        value for value in (primary_invite.admission_token, backup_invite.admission_token) if value
+    )
+    min_accepted_results = config.min_accepted_results if config.min_accepted_results is not None else config.jobs
+    primary_report_path = _sidecar_report_path(config.report_path, "primary")
+    backup_report_path = _sidecar_report_path(config.report_path, "backup")
+
+    primary_report = _run_failover_smoke_lane(
+        invite_path=config.primary_invite_path,
+        report_path=primary_report_path,
+        jobs=config.jobs,
+        min_live_workers=config.min_live_workers,
+        min_accepted_results=min_accepted_results,
+        min_verified_jobs=config.min_verified_jobs,
+        timeout_seconds=config.timeout_seconds,
+        poll_interval=config.poll_interval,
+    )
+    backup_report = _run_failover_smoke_lane(
+        invite_path=config.backup_invite_path,
+        report_path=backup_report_path,
+        jobs=config.jobs,
+        min_live_workers=config.min_live_workers,
+        min_accepted_results=min_accepted_results,
+        min_verified_jobs=config.min_verified_jobs,
+        timeout_seconds=config.timeout_seconds,
+        poll_interval=config.poll_interval,
+    )
+    _redact_artifact_file(primary_report_path, secrets_to_redact)
+    _redact_artifact_file(backup_report_path, secrets_to_redact)
+
+    primary = _alpha_failover_smoke_lane_summary(
+        label="primary",
+        report=primary_report,
+        report_path=primary_report_path,
+        expected_worker_id=config.expected_primary_worker_id,
+        min_expected_results=config.min_expected_primary_results,
+    )
+    backup = _alpha_failover_smoke_lane_summary(
+        label="backup",
+        report=backup_report,
+        report_path=backup_report_path,
+        expected_worker_id=config.expected_backup_worker_id,
+        min_expected_results=config.min_expected_backup_results,
+    )
+    lanes = {"primary": primary, "backup": backup}
+    errors = [
+        f"{label}: {error}"
+        for label, lane in lanes.items()
+        for error in lane.get("errors", [])
+    ]
+    ok = not errors and all(lane.get("ok") for lane in lanes.values())
+    report = {
+        "schema": ALPHA_FAILOVER_SMOKE_REPORT_SCHEMA,
+        "ok": ok,
+        "status": "pass" if ok else "fail",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(time.time() - started_at, 3),
+        "config": {
+            "primary_invite_path": str(config.primary_invite_path),
+            "backup_invite_path": str(config.backup_invite_path),
+            "report_path": str(config.report_path),
+            "jobs": config.jobs,
+            "min_live_workers": config.min_live_workers,
+            "min_accepted_results": min_accepted_results,
+            "min_verified_jobs": config.min_verified_jobs,
+            "expected_primary_worker_id": config.expected_primary_worker_id,
+            "expected_backup_worker_id": config.expected_backup_worker_id,
+            "min_expected_primary_results": config.min_expected_primary_results,
+            "min_expected_backup_results": config.min_expected_backup_results,
+            "timeout_seconds": config.timeout_seconds,
+            "poll_interval": config.poll_interval,
+        },
+        "reports": {
+            "primary": str(primary_report_path),
+            "backup": str(backup_report_path),
+        },
+        "lanes": lanes,
+        "errors": errors,
+    }
+    report = _redact_evidence_value(report, secrets_to_redact)
+    _write_json_report(config.report_path, report)
+    return report
+
+
+def run_alpha_reliability_pack(config: AlphaReliabilityPackConfig) -> dict[str, Any]:
+    _validate_alpha_reliability_pack_config(config)
+    started_at = time.time()
+    out_dir = config.out_dir.expanduser().resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    primary_invite = load_alpha_invite(config.primary_invite_path)
+    backup_invite = load_alpha_invite(config.backup_invite_path)
+    secrets_to_redact = tuple(
+        value for value in (primary_invite.admission_token, backup_invite.admission_token) if value
+    )
+
+    network_status_path = out_dir / "network-status.json"
+    failover_smoke_path = out_dir / "failover-smoke.json"
+    primary_inference_path = out_dir / "primary-inference-proof.json"
+    backup_inference_path = out_dir / "backup-inference-proof.json"
+    summary_path = out_dir / "reliability-summary.json"
+    markdown_path = out_dir / "reliability-summary.md"
+
+    reports: dict[str, dict[str, Any]] = {}
+    step_errors: dict[str, list[str]] = {}
+
+    reports["network_status"] = _run_reliability_step(
+        step_name="network_status",
+        step_errors=step_errors,
+        fallback_report_path=network_status_path,
+        runner=lambda: run_alpha_network_status(
+            AlphaNetworkStatusConfig(
+                primary_invite_path=config.primary_invite_path,
+                backup_invite_path=config.backup_invite_path,
+                report_path=network_status_path,
+                expected_primary_worker_id=config.expected_primary_worker_id,
+                expected_backup_worker_id=config.expected_backup_worker_id,
+                min_primary_live_workers=config.min_live_workers,
+                min_backup_live_workers=config.min_live_workers,
+                timeout_seconds=config.status_timeout_seconds,
+            )
+        ),
+    )
+    reports["failover_smoke"] = (
+        _run_reliability_step(
+            step_name="failover_smoke",
+            step_errors=step_errors,
+            fallback_report_path=failover_smoke_path,
+            runner=lambda: run_alpha_failover_smoke(
+                AlphaFailoverSmokeConfig(
+                    primary_invite_path=config.primary_invite_path,
+                    backup_invite_path=config.backup_invite_path,
+                    report_path=failover_smoke_path,
+                    jobs=config.smoke_jobs,
+                    min_live_workers=config.min_live_workers,
+                    min_accepted_results=config.smoke_jobs,
+                    min_verified_jobs=0,
+                    expected_primary_worker_id=config.expected_primary_worker_id,
+                    expected_backup_worker_id=config.expected_backup_worker_id,
+                    min_expected_primary_results=1 if config.expected_primary_worker_id else 0,
+                    min_expected_backup_results=1 if config.expected_backup_worker_id else 0,
+                    timeout_seconds=config.timeout_seconds,
+                    poll_interval=config.poll_interval,
+                )
+            ),
+        )
+        if config.include_deterministic_smoke
+        else _alpha_reliability_skipped_smoke_report(failover_smoke_path)
+    )
+    reports["primary_inference"] = _run_reliability_step(
+        step_name="primary_inference",
+        step_errors=step_errors,
+        fallback_report_path=primary_inference_path,
+        runner=lambda: run_alpha_inference_proof(
+            AlphaInferenceProofConfig(
+                invite_path=config.primary_invite_path,
+                report_path=primary_inference_path,
+                jobs=config.inference_jobs,
+                mode="echo",
+                expected_worker_id=config.expected_primary_worker_id,
+                min_live_workers=config.min_live_workers,
+                min_accepted_results=config.inference_jobs,
+                min_verified_jobs=config.inference_jobs,
+                min_expected_worker_results=(
+                    config.inference_jobs if config.expected_primary_worker_id else None
+                ),
+                timeout_seconds=config.timeout_seconds,
+                poll_interval=config.poll_interval,
+            )
+        ),
+    )
+    reports["backup_inference"] = _run_reliability_step(
+        step_name="backup_inference",
+        step_errors=step_errors,
+        fallback_report_path=backup_inference_path,
+        runner=lambda: run_alpha_inference_proof(
+            AlphaInferenceProofConfig(
+                invite_path=config.backup_invite_path,
+                report_path=backup_inference_path,
+                jobs=config.inference_jobs,
+                mode="echo",
+                expected_worker_id=config.expected_backup_worker_id,
+                min_live_workers=config.min_live_workers,
+                min_accepted_results=config.inference_jobs,
+                min_verified_jobs=config.inference_jobs,
+                min_expected_worker_results=(
+                    config.inference_jobs if config.expected_backup_worker_id else None
+                ),
+                timeout_seconds=config.timeout_seconds,
+                poll_interval=config.poll_interval,
+            )
+        ),
+    )
+
+    artifact_paths = [
+        network_status_path,
+        failover_smoke_path,
+        primary_inference_path,
+        backup_inference_path,
+        summary_path,
+        markdown_path,
+    ]
+    if config.include_deterministic_smoke:
+        artifact_paths.extend(
+            [
+                _sidecar_report_path(failover_smoke_path, "primary"),
+                _sidecar_report_path(failover_smoke_path, "backup"),
+            ]
+        )
+    for artifact_path in artifact_paths:
+        _redact_artifact_file(artifact_path, secrets_to_redact)
+
+    report = _alpha_reliability_report(
+        config=config,
+        out_dir=out_dir,
+        duration_seconds=time.time() - started_at,
+        network_status=reports["network_status"],
+        failover_smoke=reports["failover_smoke"],
+        primary_inference=reports["primary_inference"],
+        backup_inference=reports["backup_inference"],
+        step_errors=step_errors,
+        artifacts={
+            "directory": str(out_dir),
+            "summary_json": str(summary_path),
+            "summary_markdown": str(markdown_path),
+            "network_status": str(network_status_path),
+            "failover_smoke": str(failover_smoke_path),
+            "failover_smoke_primary": (
+                str(_sidecar_report_path(failover_smoke_path, "primary"))
+                if config.include_deterministic_smoke
+                else None
+            ),
+            "failover_smoke_backup": (
+                str(_sidecar_report_path(failover_smoke_path, "backup"))
+                if config.include_deterministic_smoke
+                else None
+            ),
+            "primary_inference_proof": str(primary_inference_path),
+            "backup_inference_proof": str(backup_inference_path),
+        },
+        token_redaction=None,
+    )
+    report = _redact_evidence_value(report, secrets_to_redact)
+    _write_json_report(summary_path, report)
+    _write_text_report(markdown_path, _alpha_reliability_markdown(report))
+
+    token_redaction = _token_redaction_report(artifact_paths, secrets_to_redact)
+    report["token_redaction"] = token_redaction
+    report["criteria"]["token_redaction"]["actual"] = token_redaction["ok"]
+    report["criteria"]["token_redaction"]["passed"] = token_redaction["ok"]
+    report["ok"] = all(item["passed"] for item in report["criteria"].values())
+    report["status"] = "pass" if report["ok"] else "fail"
+    report["summary"]["all_required_checks_passed"] = report["ok"]
+    report["summary"]["can_continue_without_partner"] = (
+        report["summary"]["recommended_mode"] != "blocked"
+        and token_redaction["ok"]
+    )
+    _write_json_report(summary_path, report)
+    _write_text_report(markdown_path, _alpha_reliability_markdown(report))
     return report
 
 
@@ -2951,6 +3322,553 @@ def _sidecar_report_path(path: Path, label: str) -> Path:
     suffix = path.suffix or ".json"
     stem = path.stem if path.suffix else path.name
     return path.with_name(f"{stem}-{label}{suffix}")
+
+
+def _alpha_network_status_lane(
+    *,
+    label: str,
+    invite: AlphaInvite,
+    invite_path: Path,
+    expected_worker_id: str | None,
+    min_live_workers: int,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    health = _coordinator_health(invite, timeout_seconds=timeout_seconds)
+    snapshot = _snapshot_for_status(invite, timeout_seconds=timeout_seconds) if health.get("ok") else None
+    status = (snapshot or {}).get("status", {})
+    live_workers = int(status.get("live_nodes") or 0)
+    expected_worker = _status_expected_worker_summary(snapshot, expected_worker_id)
+    criteria = {
+        "coordinator_reachable": {
+            "actual": bool(health.get("ok")),
+            "required": True,
+            "passed": bool(health.get("ok")),
+        },
+        "snapshot_available": {
+            "actual": snapshot is not None,
+            "required": True,
+            "passed": snapshot is not None,
+        },
+        "live_workers": {
+            "actual": live_workers,
+            "required": min_live_workers,
+            "passed": live_workers >= min_live_workers,
+        },
+    }
+    if expected_worker_id is not None:
+        criteria["expected_worker_live"] = {
+            "actual": bool(expected_worker and expected_worker.get("live")),
+            "required": True,
+            "passed": bool(expected_worker and expected_worker.get("live")),
+        }
+
+    errors = [
+        name for name, item in criteria.items()
+        if not item.get("passed")
+    ]
+    ok = not errors
+    return {
+        "label": label,
+        "ok": ok,
+        "status": "pass" if ok else "fail",
+        "invite_path": str(invite_path),
+        "invite": invite.public_summary(),
+        "coordinator_health": health,
+        "snapshot_summary": _snapshot_baseline(snapshot),
+        "nodes": _status_node_summaries(snapshot),
+        "expected_worker": expected_worker,
+        "criteria": criteria,
+        "errors": errors,
+    }
+
+
+def _run_failover_smoke_lane(
+    *,
+    invite_path: Path,
+    report_path: Path,
+    jobs: int,
+    min_live_workers: int,
+    min_accepted_results: int,
+    min_verified_jobs: int,
+    timeout_seconds: float,
+    poll_interval: float,
+) -> dict[str, Any]:
+    try:
+        return run_alpha_smoke(
+            AlphaSmokeConfig(
+                invite_path=invite_path,
+                report_path=report_path,
+                jobs=jobs,
+                min_live_workers=min_live_workers,
+                min_accepted_results=min_accepted_results,
+                min_verified_jobs=min_verified_jobs,
+                timeout_seconds=timeout_seconds,
+                poll_interval=poll_interval,
+            )
+        )
+    except Exception as exc:
+        report = {
+            "schema": ALPHA_SMOKE_REPORT_SCHEMA,
+            "ok": False,
+            "status": "fail",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "invite_path": str(invite_path),
+            "created_jobs": [],
+            "created_job_statuses": [],
+            "criteria": {},
+            "errors": [f"{type(exc).__name__}: {exc}"],
+            "final_snapshot": None,
+        }
+        _write_json_report(report_path, report)
+        return report
+
+
+def _alpha_failover_smoke_lane_summary(
+    *,
+    label: str,
+    report: dict[str, Any],
+    report_path: Path,
+    expected_worker_id: str | None,
+    min_expected_results: int,
+) -> dict[str, Any]:
+    result_node_counts = _smoke_result_node_counts_from_report(report)
+    expected_result_count = result_node_counts.get(expected_worker_id or "", 0)
+    criteria = {
+        "smoke_passed": {
+            "actual": bool(report.get("ok")),
+            "required": True,
+            "passed": bool(report.get("ok")),
+        },
+        "expected_worker_results": {
+            "actual": expected_result_count,
+            "required": min_expected_results,
+            "passed": expected_result_count >= min_expected_results,
+        },
+    }
+    if expected_worker_id is None and min_expected_results == 0:
+        criteria.pop("expected_worker_results")
+
+    errors = list(report.get("errors") or [])
+    errors.extend(name for name, item in criteria.items() if not item.get("passed"))
+    ok = not errors and all(item.get("passed") for item in criteria.values())
+    return {
+        "label": label,
+        "ok": ok,
+        "status": "pass" if ok else "fail",
+        "report_path": str(report_path),
+        "smoke_status": report.get("status"),
+        "created_jobs": len(report.get("created_jobs") or []),
+        "job_status_counts": _smoke_job_status_counts_from_report(report),
+        "result_node_counts": result_node_counts,
+        "criteria": criteria,
+        "expected_worker": (
+            {
+                "node_id": expected_worker_id,
+                "result_count": expected_result_count,
+                "contributed": expected_result_count > 0,
+            }
+            if expected_worker_id is not None
+            else None
+        ),
+        "errors": errors,
+    }
+
+
+def _smoke_result_node_counts_from_report(report: dict[str, Any]) -> dict[str, int]:
+    created_job_ids = {
+        str(job.get("job_id"))
+        for job in report.get("created_jobs", [])
+        if job.get("job_id")
+    }
+    snapshot = report.get("final_snapshot") or {}
+    results = [
+        result for result in snapshot.get("results", [])
+        if str(result.get("job_id")) in created_job_ids
+    ]
+    return _result_node_counts(results)
+
+
+def _smoke_job_status_counts_from_report(report: dict[str, Any]) -> dict[str, int]:
+    return _job_status_counts(list(report.get("created_job_statuses") or []))
+
+
+def _validate_alpha_network_status_config(config: AlphaNetworkStatusConfig) -> None:
+    if config.min_primary_live_workers < 0:
+        raise ValueError("--min-primary-live-workers cannot be negative")
+    if config.min_backup_live_workers < 0:
+        raise ValueError("--min-backup-live-workers cannot be negative")
+    if config.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0")
+    if config.expected_primary_worker_id is not None and not config.expected_primary_worker_id.strip():
+        raise ValueError("--expected-primary-worker-id cannot be blank")
+    if config.expected_backup_worker_id is not None and not config.expected_backup_worker_id.strip():
+        raise ValueError("--expected-backup-worker-id cannot be blank")
+
+
+def _validate_alpha_failover_smoke_config(config: AlphaFailoverSmokeConfig) -> None:
+    if config.jobs < 1:
+        raise ValueError("--jobs must be at least 1")
+    if config.min_live_workers < 0:
+        raise ValueError("--min-live-workers cannot be negative")
+    if config.min_accepted_results is not None and config.min_accepted_results < 0:
+        raise ValueError("--min-accepted-results cannot be negative")
+    if config.min_verified_jobs < 0:
+        raise ValueError("--min-verified-jobs cannot be negative")
+    if config.min_expected_primary_results < 0:
+        raise ValueError("--min-expected-primary-results cannot be negative")
+    if config.min_expected_backup_results < 0:
+        raise ValueError("--min-expected-backup-results cannot be negative")
+    if config.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0")
+    if config.poll_interval <= 0:
+        raise ValueError("--poll-interval must be greater than 0")
+    if config.expected_primary_worker_id is not None and not config.expected_primary_worker_id.strip():
+        raise ValueError("--expected-primary-worker-id cannot be blank")
+    if config.expected_backup_worker_id is not None and not config.expected_backup_worker_id.strip():
+        raise ValueError("--expected-backup-worker-id cannot be blank")
+    if config.expected_primary_worker_id is None and config.min_expected_primary_results:
+        raise ValueError("--expected-primary-worker-id is required when --min-expected-primary-results is greater than 0")
+    if config.expected_backup_worker_id is None and config.min_expected_backup_results:
+        raise ValueError("--expected-backup-worker-id is required when --min-expected-backup-results is greater than 0")
+
+
+def _run_reliability_step(
+    *,
+    step_name: str,
+    step_errors: dict[str, list[str]],
+    fallback_report_path: Path,
+    runner: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    try:
+        return runner()
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        step_errors[step_name] = [error]
+        report = {
+            "schema": "chatp2p.alpha-reliability-step-error.v1",
+            "ok": False,
+            "status": "fail",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "step": step_name,
+            "errors": [error],
+        }
+        _write_json_report(fallback_report_path, report)
+        return report
+
+
+def _alpha_reliability_skipped_smoke_report(report_path: Path) -> dict[str, Any]:
+    report = {
+        "schema": "chatp2p.alpha-reliability-skipped-step.v1",
+        "ok": True,
+        "status": "skipped",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "step": "failover_smoke",
+        "reason": "Deterministic smoke is optional for reliability packs because single-worker lanes can leave deterministic jobs pending.",
+        "created_jobs": 0,
+        "errors": [],
+    }
+    _write_json_report(report_path, report)
+    return report
+
+
+def _alpha_reliability_report(
+    *,
+    config: AlphaReliabilityPackConfig,
+    out_dir: Path,
+    duration_seconds: float,
+    network_status: dict[str, Any],
+    failover_smoke: dict[str, Any],
+    primary_inference: dict[str, Any],
+    backup_inference: dict[str, Any],
+    step_errors: dict[str, list[str]],
+    artifacts: dict[str, str],
+    token_redaction: dict[str, Any] | None,
+) -> dict[str, Any]:
+    network_lanes = network_status.get("lanes", {}) if isinstance(network_status, dict) else {}
+    primary_network = network_lanes.get("primary", {}) if isinstance(network_lanes, dict) else {}
+    backup_network = network_lanes.get("backup", {}) if isinstance(network_lanes, dict) else {}
+    primary_ready = bool(primary_network.get("ok")) and bool(primary_inference.get("ok"))
+    backup_ready = bool(backup_network.get("ok")) and bool(backup_inference.get("ok"))
+    recommended_mode = _reliability_recommended_mode(primary_ready=primary_ready, backup_ready=backup_ready)
+    disputed_jobs = _reliability_disputed_count(failover_smoke, primary_inference, backup_inference)
+    step_error_count = sum(len(errors) for errors in step_errors.values())
+    redaction_ok = bool(token_redaction.get("ok")) if token_redaction else False
+    criteria = {
+        "primary_lane_ready": {
+            "actual": primary_ready,
+            "required": True,
+            "passed": primary_ready,
+        },
+        "backup_lane_ready": {
+            "actual": backup_ready,
+            "required": True,
+            "passed": backup_ready,
+        },
+        "failover_smoke": {
+            "actual": bool(failover_smoke.get("ok")),
+            "required": True,
+            "passed": bool(failover_smoke.get("ok")),
+        },
+        "no_disputes": {
+            "actual": disputed_jobs,
+            "required": 0,
+            "passed": disputed_jobs == 0,
+        },
+        "no_step_errors": {
+            "actual": step_error_count,
+            "required": 0,
+            "passed": step_error_count == 0,
+        },
+        "token_redaction": {
+            "actual": redaction_ok,
+            "required": True,
+            "passed": redaction_ok,
+        },
+    }
+    ok = all(item["passed"] for item in criteria.values())
+    summary = {
+        "all_required_checks_passed": ok,
+        "can_continue_without_partner": recommended_mode != "blocked" and redaction_ok,
+        "recommended_mode": recommended_mode,
+        "primary_lane_ready": primary_ready,
+        "backup_lane_ready": backup_ready,
+        "expected_primary_worker_id": config.expected_primary_worker_id,
+        "expected_backup_worker_id": config.expected_backup_worker_id,
+        "disputed_jobs": disputed_jobs,
+        "step_error_count": step_error_count,
+        "include_deterministic_smoke": config.include_deterministic_smoke,
+    }
+    return {
+        "schema": ALPHA_RELIABILITY_PACK_SCHEMA,
+        "ok": ok,
+        "status": "pass" if ok else "fail",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(duration_seconds, 3),
+        "config": {
+            "primary_invite_path": str(config.primary_invite_path),
+            "backup_invite_path": str(config.backup_invite_path),
+            "out_dir": str(out_dir),
+            "expected_primary_worker_id": config.expected_primary_worker_id,
+            "expected_backup_worker_id": config.expected_backup_worker_id,
+            "include_deterministic_smoke": config.include_deterministic_smoke,
+            "smoke_jobs": config.smoke_jobs,
+            "inference_jobs": config.inference_jobs,
+            "min_live_workers": config.min_live_workers,
+            "status_timeout_seconds": config.status_timeout_seconds,
+            "timeout_seconds": config.timeout_seconds,
+            "poll_interval": config.poll_interval,
+        },
+        "summary": summary,
+        "criteria": criteria,
+        "artifacts": artifacts,
+        "reports": {
+            "network_status": _reliability_network_summary(network_status),
+            "failover_smoke": _reliability_failover_summary(failover_smoke),
+            "primary_inference": _reliability_inference_summary(primary_inference),
+            "backup_inference": _reliability_inference_summary(backup_inference),
+        },
+        "token_redaction": token_redaction,
+        "step_errors": step_errors,
+    }
+
+
+def _reliability_recommended_mode(*, primary_ready: bool, backup_ready: bool) -> str:
+    if primary_ready and backup_ready:
+        return "primary_and_backup_ready"
+    if primary_ready:
+        return "primary_only"
+    if backup_ready:
+        return "backup_only"
+    return "blocked"
+
+
+def _reliability_network_summary(report: dict[str, Any]) -> dict[str, Any]:
+    lanes = report.get("lanes", {}) if isinstance(report, dict) else {}
+    return {
+        "schema": report.get("schema"),
+        "ok": bool(report.get("ok")),
+        "status": report.get("status"),
+        "lanes": {
+            label: _reliability_network_lane_summary(lane)
+            for label, lane in lanes.items()
+        } if isinstance(lanes, dict) else {},
+        "errors": report.get("errors", []),
+    }
+
+
+def _reliability_network_lane_summary(lane: dict[str, Any]) -> dict[str, Any]:
+    live_workers = ((lane.get("criteria") or {}).get("live_workers") or {}).get("actual")
+    invite = lane.get("invite") or {}
+    snapshot_summary = lane.get("snapshot_summary") or {}
+    return {
+        "ok": bool(lane.get("ok")),
+        "status": lane.get("status"),
+        "coordinator": invite.get("coordinator"),
+        "live_workers": live_workers,
+        "node_count": snapshot_summary.get("node_count"),
+        "expected_worker": lane.get("expected_worker"),
+        "errors": lane.get("errors", []),
+    }
+
+
+def _reliability_failover_summary(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": report.get("schema"),
+        "ok": bool(report.get("ok")),
+        "status": report.get("status"),
+        "reports": report.get("reports", {}),
+        "lanes": report.get("lanes", {}),
+        "errors": report.get("errors", []),
+    }
+
+
+def _reliability_inference_summary(report: dict[str, Any]) -> dict[str, Any]:
+    criteria = report.get("criteria", {}) if isinstance(report, dict) else {}
+    return {
+        "schema": report.get("schema"),
+        "ok": bool(report.get("ok")),
+        "status": report.get("status"),
+        "criteria": {
+            name: {
+                "actual": item.get("actual"),
+                "required": item.get("required"),
+                "passed": item.get("passed"),
+            }
+            for name, item in criteria.items()
+            if isinstance(item, dict)
+            and name in {
+                "accepted_results",
+                "verified_jobs",
+                "expected_worker_results",
+                "disputed_jobs",
+                "expired_jobs",
+                "live_workers",
+            }
+        },
+        "expected_worker": report.get("expected_worker"),
+        "result_node_counts": report.get("result_node_counts", {}),
+        "created_job_status_counts": report.get("created_job_status_counts", {}),
+        "errors": report.get("errors", []),
+    }
+
+
+def _reliability_disputed_count(*reports: dict[str, Any]) -> int:
+    total = 0
+    for report in reports:
+        if not isinstance(report, dict):
+            continue
+        criteria = report.get("criteria") or {}
+        disputed = criteria.get("disputed_jobs") if isinstance(criteria, dict) else None
+        if isinstance(disputed, dict):
+            total += int(disputed.get("actual") or 0)
+        counts = report.get("created_job_status_counts")
+        if isinstance(counts, dict):
+            total += int(counts.get("disputed") or 0)
+        lanes = report.get("lanes")
+        if isinstance(lanes, dict):
+            for lane in lanes.values():
+                lane_counts = (lane or {}).get("job_status_counts")
+                if isinstance(lane_counts, dict):
+                    total += int(lane_counts.get("disputed") or 0)
+    return total
+
+
+def _token_redaction_report(paths: list[Path], secrets_to_redact: tuple[str, ...]) -> dict[str, Any]:
+    scanned = []
+    leaked_paths = []
+    for path in paths:
+        exists = path.exists()
+        leaked = False
+        if exists and path.is_file() and secrets_to_redact:
+            raw = path.read_text(encoding="utf-8", errors="replace")
+            leaked = any(secret_value in raw for secret_value in secrets_to_redact if secret_value)
+        if leaked:
+            leaked_paths.append(str(path))
+        scanned.append({"path": str(path), "exists": exists, "leaked": leaked})
+    return {
+        "ok": not leaked_paths,
+        "scanned_files": scanned,
+        "leaked_paths": leaked_paths,
+    }
+
+
+def _alpha_reliability_markdown(report: dict[str, Any]) -> str:
+    summary = report.get("summary", {})
+    artifacts = report.get("artifacts", {})
+    criteria = report.get("criteria", {})
+    reports = report.get("reports", {})
+    network = reports.get("network_status", {})
+    failover = reports.get("failover_smoke", {})
+    primary_inference = reports.get("primary_inference", {})
+    backup_inference = reports.get("backup_inference", {})
+    lines = [
+        "# ChatP2P Reliability Pack",
+        "",
+        f"Generated: {report.get('generated_at')}",
+        f"Status: {str(report.get('status')).upper()}",
+        f"Can continue without partner action: {_yes_no(summary.get('can_continue_without_partner'))}",
+        f"Recommended mode: {summary.get('recommended_mode')}",
+        "",
+        "## Lanes",
+        "",
+        f"- Primary ready: {_yes_no(summary.get('primary_lane_ready'))}",
+        f"- Backup ready: {_yes_no(summary.get('backup_lane_ready'))}",
+        f"- Primary worker: {summary.get('expected_primary_worker_id')}",
+        f"- Backup worker: {summary.get('expected_backup_worker_id')}",
+        "",
+        "## Proofs",
+        "",
+        f"- Network status: {network.get('status')}",
+        f"- Failover smoke: {failover.get('status')}",
+        f"- Primary inference proof: {primary_inference.get('status')}",
+        f"- Backup inference proof: {backup_inference.get('status')}",
+        f"- Disputed jobs observed: {summary.get('disputed_jobs')}",
+        "",
+        "## Criteria",
+        "",
+    ]
+    for name, item in criteria.items():
+        lines.append(
+            f"- {name}: {'pass' if item.get('passed') else 'fail'} "
+            f"(actual: {item.get('actual')}, required: {item.get('required')})"
+        )
+    lines.extend(
+        [
+            "",
+            "## Artifacts",
+            "",
+            f"- Summary JSON: {artifacts.get('summary_json')}",
+            f"- Network status: {artifacts.get('network_status')}",
+            f"- Failover smoke: {artifacts.get('failover_smoke')}",
+            f"- Primary inference proof: {artifacts.get('primary_inference_proof')}",
+            f"- Backup inference proof: {artifacts.get('backup_inference_proof')}",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _yes_no(value: Any) -> str:
+    return "yes" if bool(value) else "no"
+
+
+def _validate_alpha_reliability_pack_config(config: AlphaReliabilityPackConfig) -> None:
+    if config.include_deterministic_smoke and config.smoke_jobs < 1:
+        raise ValueError("--jobs must be at least 1 when --include-deterministic-smoke is used")
+    if config.inference_jobs < 1:
+        raise ValueError("--inference-jobs must be at least 1")
+    if config.min_live_workers < 0:
+        raise ValueError("--min-live-workers cannot be negative")
+    if config.status_timeout_seconds <= 0:
+        raise ValueError("--status-timeout-seconds must be greater than 0")
+    if config.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0")
+    if config.poll_interval <= 0:
+        raise ValueError("--poll-interval must be greater than 0")
+    if config.expected_primary_worker_id is not None and not config.expected_primary_worker_id.strip():
+        raise ValueError("--expected-primary-worker-id cannot be blank")
+    if config.expected_backup_worker_id is not None and not config.expected_backup_worker_id.strip():
+        raise ValueError("--expected-backup-worker-id cannot be blank")
 
 
 def _validate_smoke_config(config: AlphaSmokeConfig) -> None:

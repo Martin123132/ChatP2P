@@ -15,9 +15,31 @@ Peer-contributed AI compute, starting with the boring pieces that have to be tru
 
 ```bash
 python -m pip install -e ".[dev]"
-chatp2p demo
+chatp2p quickstart
 python -m pytest tests
 ```
+
+For the smallest product loop on this Windows setup, run one command. It starts a local coordinator and worker, creates one signed echo job, waits for verification, prints the result, and leaves the local loop running so the same command can be repeated:
+
+```powershell
+Set-Location D:\Projects\ChatP2P
+$env:PYTHONPATH='D:\Projects\ChatP2P\src'
+
+python -m chatp2p.cli quickstart --home D:\ChatP2PData\quickstart
+```
+
+Expected shape:
+
+```text
+ChatP2P quickstart: pass
+Dashboard: http://127.0.0.1:8766/dashboard
+Job: job_... (verified)
+Worker: worker_...
+Result: ChatP2P quickstart: echo this signed job.
+Repeat: run the same command again to create another job.
+```
+
+That is the sanity bar: start, connect worker, run job, see result, repeat without a second machine or Tailscale.
 
 ## Network Smoke Test
 
@@ -61,7 +83,7 @@ Managed node state is written under `HOME\run`, and stdout/stderr logs are writt
 When a worker joined from an alpha invite, pass that invite to `node status` so the health check uses the real coordinator URL and redacted admission token instead of the local default:
 
 ```bash
-chatp2p node status --home E:\ChatP2P-private-version--main\.runtime\.mesh --invite E:\ChatP2P-private-version--main\alpha-invite.json
+chatp2p node status --home E:\ChatP2P-partner\.runtime\.mesh --invite E:\ChatP2P-partner\alpha-invite.json
 ```
 
 The coordinator stores state in `.mesh/coordinator.sqlite3` by default, so registered nodes, jobs, leases, results, and credits survive restarts.
@@ -278,6 +300,19 @@ chatp2p operator alpha-ops-pack --home D:\ChatP2PData\.mesh --invite D:\ChatP2PD
 
 The ops pack creates a nested evidence folder, `alpha-ops-pack-summary.json`, `alpha-ops-pack-summary.md`, `operator-handoff.md`, `partner-handoff.md`, and `OUT.zip` by default. It is meant to be the repeatable "show the measurements" artifact for an alpha operator. The original invite, operator config, runtime homes, identities, and SQLite databases remain private.
 
+For a two-lane operator check that does not require the partner to run anything manually, use the reliability pack:
+
+```powershell
+chatp2p operator reliability-pack `
+  --primary-invite D:\ChatP2PData\alpha-invite.json `
+  --backup-invite D:\ChatP2PData\backup-alpha-invite-partner.json `
+  --expected-primary-worker-id worker_... `
+  --expected-backup-worker-id worker_... `
+  --out D:\ChatP2PData\reliability-pack-live
+```
+
+The reliability pack writes network status, primary/backup verified echo inference proofs, token-redaction checks, and a `reliability-summary.md`. Deterministic failover smoke is skipped by default to avoid leaving single-worker proof jobs pending; use `--include-deterministic-smoke` when you deliberately want that older proof. Install a local recurring Windows check with `chatp2p operator install-reliability-task ... --interval-minutes 30`. Full details live in [docs/OPERATOR_RELIABILITY.md](docs/OPERATOR_RELIABILITY.md).
+
 To let the node check and restart managed processes from the invite, run a one-shot watchdog check:
 
 ```bash
@@ -297,16 +332,16 @@ Managed coordinator startup can take longer as the SQLite evidence database grow
 Contributor machines can install a worker-only task without the operator config:
 
 ```bash
-chatp2p node install-task --home E:\ChatP2P-private-version--main\.runtime\.mesh --invite E:\ChatP2P-private-version--main\alpha-invite.json --role worker --task-name "ChatP2P Worker Watchdog" --report E:\ChatP2P-private-version--main\.runtime\node-watchdog-report.json
+chatp2p node install-task --home E:\ChatP2P-partner\.runtime\.mesh --invite E:\ChatP2P-partner\alpha-invite.json --role worker --task-name "ChatP2P Worker Watchdog" --report E:\ChatP2P-partner\.runtime\node-watchdog-report.json
 ```
 
 After a worker-only node is running, check it with the invite-backed status command:
 
 ```bash
-chatp2p node status --home E:\ChatP2P-private-version--main\.runtime\.mesh --invite E:\ChatP2P-private-version--main\alpha-invite.json
+chatp2p node status --home E:\ChatP2P-partner\.runtime\.mesh --invite E:\ChatP2P-partner\alpha-invite.json
 ```
 
-Remove a task with `chatp2p node uninstall-task --task-name "ChatP2P Worker Watchdog" --home E:\ChatP2P-private-version--main\.runtime\.mesh`.
+Remove a task with `chatp2p node uninstall-task --task-name "ChatP2P Worker Watchdog" --home E:\ChatP2P-partner\.runtime\.mesh`.
 
 If Windows denies Scheduled Task creation from a non-elevated terminal, rerun from an elevated terminal. A per-user Startup folder fallback is available with `--allow-startup-folder-fallback`, but that writes a small launcher under `%APPDATA%`, so avoid it when you want every ChatP2P file kept on the runtime drive.
 

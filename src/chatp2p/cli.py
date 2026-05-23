@@ -14,9 +14,12 @@ from urllib.error import HTTPError, URLError
 from .alpha import (
     AlphaDrillConfig,
     AlphaEvidenceConfig,
+    AlphaFailoverSmokeConfig,
     AlphaInferenceProofConfig,
     AlphaJoinConfig,
+    AlphaNetworkStatusConfig,
     AlphaOpsPackConfig,
+    AlphaReliabilityPackConfig,
     NodeCapabilityRefreshConfig,
     AlphaPreflightConfig,
     AlphaRemoteProofConfig,
@@ -31,10 +34,13 @@ from .alpha import (
     bootstrap_alpha,
     run_alpha_drill,
     run_alpha_evidence,
+    run_alpha_failover_smoke,
     run_alpha_inference_proof,
     run_alpha_join,
+    run_alpha_network_status,
     run_alpha_ops_pack,
     run_alpha_preflight,
+    run_alpha_reliability_pack,
     run_alpha_remote_proof,
     run_alpha_route,
     run_alpha_smoke,
@@ -61,6 +67,7 @@ from .ollama import DEFAULT_OLLAMA_BASE_URL
 from .operator_config import OperatorConfig, write_operator_config
 from .packets import JobLeaseRenewal, NodeRegistration
 from .proof import OllamaProofConfig, SwarmProofConfig, proof_summary, run_ollama_proof, run_swarm_proof
+from .quickstart import QuickstartConfig, format_quickstart_report, run_quickstart
 from .provider import (
     ProviderEdgeProofConfig,
     ProviderOpsPackConfig,
@@ -78,8 +85,11 @@ from .storage import SQLiteCoordinatorStore
 from .worker import WorkerNode
 from .windows_task import (
     DEFAULT_TASK_NAME,
+    DEFAULT_RELIABILITY_TASK_NAME,
     DEFAULT_STARTUP_TIMEOUT_SECONDS,
+    ReliabilityTaskConfig,
     WatchdogTaskConfig,
+    install_reliability_task,
     install_watchdog_task,
     uninstall_watchdog_task,
 )
@@ -300,6 +310,33 @@ def run_demo(args: argparse.Namespace) -> None:
     }
 
     print(json.dumps(report, indent=2, sort_keys=True))
+
+
+def run_quickstart_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_quickstart(
+            QuickstartConfig(
+                home=Path(args.home),
+                host=args.host,
+                port=args.port,
+                prompt=args.prompt,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval=args.poll_interval,
+                worker_interval=args.worker_interval,
+                force=args.force,
+                stop_after_job=args.stop_after_job,
+                ollama_base_url=args.ollama_base_url,
+            )
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_quickstart_report(report))
+    if not report["ok"]:
+        raise SystemExit(1)
 
 
 def serve_coordinator(args: argparse.Namespace) -> None:
@@ -801,6 +838,109 @@ def alpha_smoke_command(args: argparse.Namespace) -> None:
                 timeout_seconds=args.timeout_seconds,
                 poll_interval=args.poll_interval,
             )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def alpha_network_status_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_alpha_network_status(
+            AlphaNetworkStatusConfig(
+                primary_invite_path=Path(args.primary_invite),
+                backup_invite_path=Path(args.backup_invite),
+                report_path=Path(args.report),
+                expected_primary_worker_id=args.expected_primary_worker_id,
+                expected_backup_worker_id=args.expected_backup_worker_id,
+                min_primary_live_workers=args.min_primary_live_workers,
+                min_backup_live_workers=args.min_backup_live_workers,
+                timeout_seconds=args.timeout_seconds,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def alpha_failover_smoke_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_alpha_failover_smoke(
+            AlphaFailoverSmokeConfig(
+                primary_invite_path=Path(args.primary_invite),
+                backup_invite_path=Path(args.backup_invite),
+                report_path=Path(args.report),
+                jobs=args.jobs,
+                min_live_workers=args.min_live_workers,
+                min_accepted_results=args.min_accepted_results,
+                min_verified_jobs=args.min_verified_jobs,
+                expected_primary_worker_id=args.expected_primary_worker_id,
+                expected_backup_worker_id=args.expected_backup_worker_id,
+                min_expected_primary_results=args.min_expected_primary_results,
+                min_expected_backup_results=args.min_expected_backup_results,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval=args.poll_interval,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def alpha_reliability_pack_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_alpha_reliability_pack(
+            AlphaReliabilityPackConfig(
+                primary_invite_path=Path(args.primary_invite),
+                backup_invite_path=Path(args.backup_invite),
+                out_dir=Path(args.out),
+                expected_primary_worker_id=args.expected_primary_worker_id,
+                expected_backup_worker_id=args.expected_backup_worker_id,
+                include_deterministic_smoke=args.include_deterministic_smoke,
+                smoke_jobs=args.jobs,
+                inference_jobs=args.inference_jobs,
+                min_live_workers=args.min_live_workers,
+                status_timeout_seconds=args.status_timeout_seconds,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval=args.poll_interval,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def alpha_install_reliability_task_command(args: argparse.Namespace) -> None:
+    try:
+        report = install_reliability_task(
+            ReliabilityTaskConfig(
+                primary_invite_path=Path(args.primary_invite),
+                backup_invite_path=Path(args.backup_invite),
+                out_dir=Path(args.out),
+                task_name=args.task_name,
+                interval_minutes=args.interval_minutes,
+                force=not args.no_force,
+                expected_primary_worker_id=args.expected_primary_worker_id,
+                expected_backup_worker_id=args.expected_backup_worker_id,
+                include_deterministic_smoke=args.include_deterministic_smoke,
+                jobs=args.jobs,
+                inference_jobs=args.inference_jobs,
+                min_live_workers=args.min_live_workers,
+                status_timeout_seconds=args.status_timeout_seconds,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval=args.poll_interval,
+                work_dir=Path(args.work_dir) if args.work_dir else None,
+                launcher_path=Path(args.launcher) if args.launcher else None,
+            ),
+            dry_run=args.dry_run,
         )
     except (OSError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
@@ -1502,6 +1642,54 @@ def build_parser() -> argparse.ArgumentParser:
 
     demo_parser = subcommands.add_parser("demo", help="Run a local signed job demo")
     demo_parser.set_defaults(func=run_demo)
+
+    quickstart_parser = subcommands.add_parser(
+        "quickstart",
+        help="Start a local coordinator and worker, run one job, and print the result",
+    )
+    quickstart_parser.add_argument(
+        "--home",
+        default=".mesh/quickstart",
+        help="Directory for the local quickstart coordinator, worker, database, and logs",
+    )
+    quickstart_parser.add_argument("--host", default="127.0.0.1", help="Coordinator host to bind")
+    quickstart_parser.add_argument("--port", default=8766, type=int, help="Coordinator port to bind")
+    quickstart_parser.add_argument(
+        "--prompt",
+        default="ChatP2P quickstart: echo this signed job.",
+        help="Prompt for the echo job",
+    )
+    quickstart_parser.add_argument(
+        "--timeout-seconds",
+        default=45.0,
+        type=float,
+        help="Maximum time to wait for coordinator, worker, and result",
+    )
+    quickstart_parser.add_argument(
+        "--poll-interval",
+        default=0.25,
+        type=float,
+        help="Seconds between quickstart health/result checks",
+    )
+    quickstart_parser.add_argument(
+        "--worker-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between worker polling attempts",
+    )
+    quickstart_parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="Local Ollama base URL advertised by the worker",
+    )
+    quickstart_parser.add_argument("--force", action="store_true", help="Restart managed quickstart processes")
+    quickstart_parser.add_argument(
+        "--stop-after-job",
+        action="store_true",
+        help="Stop quickstart coordinator and worker after the result is printed",
+    )
+    quickstart_parser.add_argument("--json", action="store_true", help="Print the full JSON quickstart report")
+    quickstart_parser.set_defaults(func=run_quickstart_command)
 
     node_parser = subcommands.add_parser("node", help="Local node commands")
     node_subcommands = node_parser.add_subparsers(dest="node_command", required=True)
@@ -2517,6 +2705,256 @@ def build_parser() -> argparse.ArgumentParser:
     )
     alpha_smoke_parser.add_argument("--report", required=True, help="Path for smoke JSON report")
     alpha_smoke_parser.set_defaults(func=alpha_smoke_command)
+
+    alpha_network_status_parser = operator_subcommands.add_parser(
+        "network-status",
+        help="Check primary and backup alpha coordinator lanes from the operator machine",
+    )
+    alpha_network_status_parser.add_argument("--primary-invite", required=True, help="Path to primary alpha invite JSON")
+    alpha_network_status_parser.add_argument("--backup-invite", required=True, help="Path to backup alpha invite JSON")
+    alpha_network_status_parser.add_argument(
+        "--expected-primary-worker-id",
+        default=None,
+        help="Primary-lane worker ID that should be live",
+    )
+    alpha_network_status_parser.add_argument(
+        "--expected-backup-worker-id",
+        default=None,
+        help="Backup-lane worker ID that should be live",
+    )
+    alpha_network_status_parser.add_argument(
+        "--min-primary-live-workers",
+        default=1,
+        type=int,
+        help="Minimum live workers required on the primary lane",
+    )
+    alpha_network_status_parser.add_argument(
+        "--min-backup-live-workers",
+        default=1,
+        type=int,
+        help="Minimum live workers required on the backup lane",
+    )
+    alpha_network_status_parser.add_argument(
+        "--timeout-seconds",
+        default=5.0,
+        type=float,
+        help="Timeout for each coordinator snapshot check",
+    )
+    alpha_network_status_parser.add_argument("--report", required=True, help="Path for network status JSON report")
+    alpha_network_status_parser.set_defaults(func=alpha_network_status_command)
+
+    alpha_failover_smoke_parser = operator_subcommands.add_parser(
+        "failover-smoke",
+        help="Run deterministic smoke jobs on both primary and backup alpha lanes",
+    )
+    alpha_failover_smoke_parser.add_argument("--primary-invite", required=True, help="Path to primary alpha invite JSON")
+    alpha_failover_smoke_parser.add_argument("--backup-invite", required=True, help="Path to backup alpha invite JSON")
+    alpha_failover_smoke_parser.add_argument("--jobs", default=4, type=int, help="Deterministic eval jobs per lane")
+    alpha_failover_smoke_parser.add_argument(
+        "--min-live-workers",
+        default=1,
+        type=int,
+        help="Minimum live workers required on each lane",
+    )
+    alpha_failover_smoke_parser.add_argument(
+        "--min-accepted-results",
+        default=None,
+        type=int,
+        help="Minimum accepted results required on each lane. Defaults to --jobs",
+    )
+    alpha_failover_smoke_parser.add_argument(
+        "--min-verified-jobs",
+        default=0,
+        type=int,
+        help="Minimum verified jobs required on each lane",
+    )
+    alpha_failover_smoke_parser.add_argument(
+        "--expected-primary-worker-id",
+        default=None,
+        help="Primary-lane worker ID that should return results",
+    )
+    alpha_failover_smoke_parser.add_argument(
+        "--expected-backup-worker-id",
+        default=None,
+        help="Backup-lane worker ID that should return results",
+    )
+    alpha_failover_smoke_parser.add_argument(
+        "--min-expected-primary-results",
+        default=0,
+        type=int,
+        help="Minimum primary-lane results required from the expected primary worker",
+    )
+    alpha_failover_smoke_parser.add_argument(
+        "--min-expected-backup-results",
+        default=0,
+        type=int,
+        help="Minimum backup-lane results required from the expected backup worker",
+    )
+    alpha_failover_smoke_parser.add_argument(
+        "--timeout-seconds",
+        default=90.0,
+        type=float,
+        help="Maximum time to wait for each lane's smoke thresholds",
+    )
+    alpha_failover_smoke_parser.add_argument(
+        "--poll-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between coordinator snapshot polls",
+    )
+    alpha_failover_smoke_parser.add_argument("--report", required=True, help="Path for combined failover smoke report")
+    alpha_failover_smoke_parser.set_defaults(func=alpha_failover_smoke_command)
+
+    alpha_reliability_pack_parser = operator_subcommands.add_parser(
+        "reliability-pack",
+        help="Run primary/backup network, smoke, inference, and redaction checks into one folder",
+    )
+    alpha_reliability_pack_parser.add_argument("--primary-invite", required=True, help="Path to primary alpha invite JSON")
+    alpha_reliability_pack_parser.add_argument("--backup-invite", required=True, help="Path to backup alpha invite JSON")
+    alpha_reliability_pack_parser.add_argument("--out", required=True, help="Output directory for reliability artifacts")
+    alpha_reliability_pack_parser.add_argument(
+        "--expected-primary-worker-id",
+        default=None,
+        help="Primary-lane worker ID that should be live and return verified echo results",
+    )
+    alpha_reliability_pack_parser.add_argument(
+        "--expected-backup-worker-id",
+        default=None,
+        help="Backup-lane worker ID that should be live and return verified echo results",
+    )
+    alpha_reliability_pack_parser.add_argument(
+        "--include-deterministic-smoke",
+        action="store_true",
+        help="Also run deterministic failover smoke. Default reliability packs use verified echo proof only.",
+    )
+    alpha_reliability_pack_parser.add_argument(
+        "--jobs",
+        default=4,
+        type=int,
+        help="Deterministic smoke jobs per lane when --include-deterministic-smoke is used",
+    )
+    alpha_reliability_pack_parser.add_argument(
+        "--inference-jobs",
+        default=4,
+        type=int,
+        help="Verified echo inference jobs per lane",
+    )
+    alpha_reliability_pack_parser.add_argument(
+        "--min-live-workers",
+        default=1,
+        type=int,
+        help="Minimum live workers required on each lane",
+    )
+    alpha_reliability_pack_parser.add_argument(
+        "--status-timeout-seconds",
+        default=5.0,
+        type=float,
+        help="Timeout for network status snapshots",
+    )
+    alpha_reliability_pack_parser.add_argument(
+        "--timeout-seconds",
+        default=90.0,
+        type=float,
+        help="Maximum time to wait for smoke and inference thresholds",
+    )
+    alpha_reliability_pack_parser.add_argument(
+        "--poll-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between coordinator snapshot polls",
+    )
+    alpha_reliability_pack_parser.set_defaults(func=alpha_reliability_pack_command)
+
+    alpha_install_reliability_task_parser = operator_subcommands.add_parser(
+        "install-reliability-task",
+        help="Install a Windows Scheduled Task that periodically writes a reliability pack",
+    )
+    alpha_install_reliability_task_parser.add_argument("--primary-invite", required=True, help="Path to primary alpha invite JSON")
+    alpha_install_reliability_task_parser.add_argument("--backup-invite", required=True, help="Path to backup alpha invite JSON")
+    alpha_install_reliability_task_parser.add_argument("--out", required=True, help="Output directory for reliability artifacts")
+    alpha_install_reliability_task_parser.add_argument(
+        "--task-name",
+        default=DEFAULT_RELIABILITY_TASK_NAME,
+        help="Windows Scheduled Task name",
+    )
+    alpha_install_reliability_task_parser.add_argument(
+        "--interval-minutes",
+        default=30,
+        type=int,
+        help="Minutes between reliability-pack runs",
+    )
+    alpha_install_reliability_task_parser.add_argument(
+        "--expected-primary-worker-id",
+        default=None,
+        help="Primary-lane worker ID that should be live and return verified echo results",
+    )
+    alpha_install_reliability_task_parser.add_argument(
+        "--expected-backup-worker-id",
+        default=None,
+        help="Backup-lane worker ID that should be live and return verified echo results",
+    )
+    alpha_install_reliability_task_parser.add_argument(
+        "--include-deterministic-smoke",
+        action="store_true",
+        help="Also run deterministic failover smoke in each scheduled pack. Disabled by default.",
+    )
+    alpha_install_reliability_task_parser.add_argument(
+        "--jobs",
+        default=4,
+        type=int,
+        help="Deterministic smoke jobs per lane when --include-deterministic-smoke is used",
+    )
+    alpha_install_reliability_task_parser.add_argument(
+        "--inference-jobs",
+        default=4,
+        type=int,
+        help="Verified echo inference jobs per lane",
+    )
+    alpha_install_reliability_task_parser.add_argument(
+        "--min-live-workers",
+        default=1,
+        type=int,
+        help="Minimum live workers required on each lane",
+    )
+    alpha_install_reliability_task_parser.add_argument(
+        "--status-timeout-seconds",
+        default=5.0,
+        type=float,
+        help="Timeout for network status snapshots",
+    )
+    alpha_install_reliability_task_parser.add_argument(
+        "--timeout-seconds",
+        default=90.0,
+        type=float,
+        help="Maximum time to wait for smoke and inference thresholds",
+    )
+    alpha_install_reliability_task_parser.add_argument(
+        "--poll-interval",
+        default=0.5,
+        type=float,
+        help="Seconds between coordinator snapshot polls",
+    )
+    alpha_install_reliability_task_parser.add_argument(
+        "--work-dir",
+        default=None,
+        help="Working directory for the generated launcher. Defaults to the repo root",
+    )
+    alpha_install_reliability_task_parser.add_argument(
+        "--launcher",
+        default=None,
+        help="Path for generated .cmd launcher. Defaults to OUT/run/<task-name>.cmd",
+    )
+    alpha_install_reliability_task_parser.add_argument(
+        "--no-force",
+        action="store_true",
+        help="Do not replace an existing Scheduled Task of the same name",
+    )
+    alpha_install_reliability_task_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the task plan without writing the launcher or creating a Scheduled Task",
+    )
+    alpha_install_reliability_task_parser.set_defaults(func=alpha_install_reliability_task_command)
 
     alpha_remote_proof_parser = operator_subcommands.add_parser(
         "alpha-remote-proof",

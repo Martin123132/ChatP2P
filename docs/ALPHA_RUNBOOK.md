@@ -115,7 +115,7 @@ Pass means at least one live worker was observed, at least one smoke-created det
 When a real partner has joined, copy the `worker_node_id` from their `node join` output or from your coordinator dashboard, then run:
 
 ```bash
-python -m chatp2p.cli operator alpha-remote-proof --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_87b5cefe53e67c6c --jobs 4 --timeout-seconds 180 --report D:\ChatP2PData\alpha-remote-proof-report.json
+python -m chatp2p.cli operator alpha-remote-proof --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_... --jobs 4 --timeout-seconds 180 --report D:\ChatP2PData\alpha-remote-proof-report.json
 ```
 
 Pass means:
@@ -134,7 +134,7 @@ The report schema is `chatp2p.alpha-remote-proof-report.v1`. It includes pre-exi
 After deterministic remote proof is passing, run an inference-style packet proof:
 
 ```bash
-python -m chatp2p.cli operator alpha-inference-proof --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_87b5cefe53e67c6c --jobs 10 --min-live-workers 2 --report D:\ChatP2PData\alpha-inference-proof-report.json
+python -m chatp2p.cli operator alpha-inference-proof --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_... --jobs 10 --min-live-workers 2 --report D:\ChatP2PData\alpha-inference-proof-report.json
 ```
 
 The default mode is `echo`, which creates `inference.echo.v1` jobs. These jobs do not call a model, but they use the inference job schema, signed lease/result flow, worker dispatch path, and one-result verification strategy that model jobs use.
@@ -162,7 +162,7 @@ Contributor machines use the same command with their own runtime home and privat
 Use this when the partner worker is online and you want repeated measured proof without asking them to run more commands:
 
 ```bash
-python -m chatp2p.cli operator alpha-soak --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_87b5cefe53e67c6c --min-live-workers 2 --jobs-per-round 10 --rounds 6 --round-interval-seconds 30 --min-expected-worker-results-total 10 --report D:\ChatP2PData\alpha-soak-report.json
+python -m chatp2p.cli operator alpha-soak --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_... --min-live-workers 2 --jobs-per-round 10 --rounds 6 --round-interval-seconds 30 --min-expected-worker-results-total 10 --report D:\ChatP2PData\alpha-soak-report.json
 ```
 
 The report schema is `chatp2p.alpha-soak-report.v1`. The command writes the roll-up report plus sidecar files such as `D:\ChatP2PData\alpha-soak-report-round-001.json`. Pass means every completed round passed, the expected worker met the configured total result threshold, all proof-created jobs verified, and no proof-created jobs disputed, expired, or stayed incomplete. Use `--min-expected-worker-results-per-round` only when you intentionally need the expected worker to win work in every round; for normal alpha races, prefer the total threshold.
@@ -170,7 +170,7 @@ The report schema is `chatp2p.alpha-soak-report.v1`. The command writes the roll
 For an unattended run, add a wall-clock cap:
 
 ```bash
-python -m chatp2p.cli operator alpha-soak --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_87b5cefe53e67c6c --min-live-workers 2 --jobs-per-round 10 --rounds 120 --duration-seconds 3600 --round-interval-seconds 20 --min-expected-worker-results-total 100 --report D:\ChatP2PData\alpha-soak-report-hour.json
+python -m chatp2p.cli operator alpha-soak --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_... --min-live-workers 2 --jobs-per-round 10 --rounds 120 --duration-seconds 3600 --round-interval-seconds 20 --min-expected-worker-results-total 100 --report D:\ChatP2PData\alpha-soak-report-hour.json
 ```
 
 ## Alpha Status
@@ -178,7 +178,7 @@ python -m chatp2p.cli operator alpha-soak --invite D:\ChatP2PData\alpha-invite.j
 Use this when you want a single redacted health report without creating new jobs:
 
 ```bash
-python -m chatp2p.cli operator alpha-status --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_87b5cefe53e67c6c --min-live-workers 2 --report D:\ChatP2PData\alpha-status-report.json
+python -m chatp2p.cli operator alpha-status --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_... --min-live-workers 2 --report D:\ChatP2PData\alpha-status-report.json
 ```
 
 Pass means the coordinator health endpoint is reachable, the local managed processes are healthy enough for the configured home, the minimum live worker count is present, the expected worker is live when provided, and there are no disputed jobs. A backlog of queued, pending, or leased jobs is reported as a warning rather than a failure.
@@ -188,7 +188,7 @@ Pass means the coordinator health endpoint is reachable, the local managed proce
 After a real partner has joined and the remote proof passes, collect a redacted evidence folder:
 
 ```bash
-python -m chatp2p.cli operator alpha-evidence --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_87b5cefe53e67c6c --jobs 25 --out D:\ChatP2PData\alpha-evidence --include-inference-proof --inference-mode echo --inference-jobs 20
+python -m chatp2p.cli operator alpha-evidence --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --expected-worker-id worker_... --jobs 25 --out D:\ChatP2PData\alpha-evidence --include-inference-proof --inference-mode echo --inference-jobs 20
 ```
 
 The command writes:
@@ -208,7 +208,7 @@ Pass means the current alpha status passed, the command created fresh determinis
 Once the evidence command is passing, use the ops pack command for the repeatable operator handoff:
 
 ```bash
-python -m chatp2p.cli operator alpha-ops-pack --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --out D:\ChatP2PData\alpha-ops-pack-live --expected-worker-id worker_87b5cefe53e67c6c --include-routing-evidence
+python -m chatp2p.cli operator alpha-ops-pack --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --out D:\ChatP2PData\alpha-ops-pack-live --expected-worker-id worker_... --include-routing-evidence
 ```
 
 The command writes:
@@ -222,6 +222,22 @@ The command writes:
 
 Pass means the underlying evidence pack passed, routing evidence passed when requested, token redaction passed, and the zip was created. Share the ops pack folder or zip only after `token_redaction` is passing. Keep `alpha-invite.json`, `operator-config.json`, `.mesh`, identity files, and SQLite databases private.
 
+## Operator Reliability Pack
+
+When the partner has an autopilot worker and a backup coordinator lane available, the operator can check both lanes without asking the partner to run anything manually:
+
+```bash
+python -m chatp2p.cli operator reliability-pack --primary-invite D:\ChatP2PData\alpha-invite.json --backup-invite D:\ChatP2PData\backup-alpha-invite-partner.json --expected-primary-worker-id worker_PRIMARY --expected-backup-worker-id worker_BACKUP --out D:\ChatP2PData\reliability-pack-live
+```
+
+The command writes `reliability-summary.json`, `reliability-summary.md`, network status, a skipped deterministic-smoke note, and primary/backup verified echo inference proof reports. Deterministic smoke is skipped by default so recurring checks do not leave single-worker deterministic jobs pending; add `--include-deterministic-smoke` when that proof is needed manually. Pass means the operator can continue without partner action at that moment. Install a local recurring check with:
+
+```bash
+python -m chatp2p.cli operator install-reliability-task --primary-invite D:\ChatP2PData\alpha-invite.json --backup-invite D:\ChatP2PData\backup-alpha-invite-partner.json --expected-primary-worker-id worker_PRIMARY --expected-backup-worker-id worker_BACKUP --out D:\ChatP2PData\reliability-pack-live --interval-minutes 30 --work-dir D:\Projects\ChatP2P
+```
+
+Use `--dry-run` first to inspect the Scheduled Task plan without creating it. See `docs/OPERATOR_RELIABILITY.md` for the full workflow.
+
 ## Node Watchdog
 
 Run a one-shot check and restart unhealthy managed roles:
@@ -233,7 +249,7 @@ python -m chatp2p.cli node watchdog --home D:\ChatP2PData\.mesh --invite D:\Chat
 The watchdog uses the invite file to restart workers, so it does not need to recover the admission token from redacted process state. The operator config is only required when the watchdog may restart the coordinator. Use `--role worker` on a contributor machine, and omit `--operator-config` there:
 
 ```bash
-python -m chatp2p.cli node watchdog --home E:\ChatP2P-private-version--main\.runtime\.mesh --invite E:\ChatP2P-private-version--main\alpha-invite.json --role worker --report E:\ChatP2P-private-version--main\.runtime\node-watchdog-report.json
+python -m chatp2p.cli node watchdog --home E:\ChatP2P-partner\.runtime\.mesh --invite E:\ChatP2P-partner\alpha-invite.json --role worker --report E:\ChatP2P-partner\.runtime\node-watchdog-report.json
 ```
 
 Use `--checks 0` to keep the watchdog running until interrupted, or leave the default `--checks 1` for a safe one-shot health repair.
@@ -255,20 +271,20 @@ If Windows returns `Access is denied` while creating the Scheduled Task, rerun t
 On a contributor machine, install only the worker watchdog:
 
 ```bash
-python -m chatp2p.cli node install-task --home E:\ChatP2P-private-version--main\.runtime\.mesh --invite E:\ChatP2P-private-version--main\alpha-invite.json --role worker --task-name "ChatP2P Worker Watchdog" --report E:\ChatP2P-private-version--main\.runtime\node-watchdog-report.json
+python -m chatp2p.cli node install-task --home E:\ChatP2P-partner\.runtime\.mesh --invite E:\ChatP2P-partner\alpha-invite.json --role worker --task-name "ChatP2P Worker Watchdog" --report E:\ChatP2P-partner\.runtime\node-watchdog-report.json
 ```
 
 After starting or repairing a contributor worker, verify it against the operator coordinator:
 
 ```bash
-python -m chatp2p.cli node status --home E:\ChatP2P-private-version--main\.runtime\.mesh --invite E:\ChatP2P-private-version--main\alpha-invite.json
+python -m chatp2p.cli node status --home E:\ChatP2P-partner\.runtime\.mesh --invite E:\ChatP2P-partner\alpha-invite.json
 ```
 
 Use `--dry-run` first if you want to inspect the exact task plan without creating it. Remove tasks with:
 
 ```bash
 python -m chatp2p.cli node uninstall-task --task-name "ChatP2P Operator Watchdog" --home D:\ChatP2PData\.mesh
-python -m chatp2p.cli node uninstall-task --task-name "ChatP2P Worker Watchdog" --home E:\ChatP2P-private-version--main\.runtime\.mesh
+python -m chatp2p.cli node uninstall-task --task-name "ChatP2P Worker Watchdog" --home E:\ChatP2P-partner\.runtime\.mesh
 ```
 
 ## Rollback

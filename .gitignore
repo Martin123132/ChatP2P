@@ -1,9 +1,44 @@
 __pycache__/
 *.py[cod]
 *.sqlite3
+*.sqlite3-*
 .mesh/
+.mesh*/
+.runtime/
+.runtime*/
 .pytest_cache/
 .venv/
 build/
 dist/
 *.egg-info/
+
+# Local secrets and runtime artifacts. Keep generated alpha/operator/provider
+# files out of the public repo; examples belong in docs, not live JSON.
+.env
+.env.*
+*.pem
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+alpha-invite.json
+*alpha-invite*.json
+operator-config.json
+*operator-config*.json
+provider-config.json
+*provider-config*.json
+
+# Generated reports, logs, task launchers, and evidence bundles.
+*.log
+*.pid
+*.pid.json
+*.cmd
+*.vbs
+*-report.json
+*report*.json
+alpha-evidence*/
+alpha-ops-pack*/
+provider-ops-pack*/
+reliability-pack*/
+run/
+logs/
