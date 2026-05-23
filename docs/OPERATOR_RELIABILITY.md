@@ -55,6 +55,30 @@ The key fields are:
 - `backup_only`
 - `blocked`
 
+## Operator Console
+
+When you want the answer without running another proof, generate the static Operator Console:
+
+```powershell
+python -m chatp2p.cli operator console `
+  --repo D:\Projects\ChatP2P `
+  --home D:\ChatP2PData\.mesh `
+  --primary-invite D:\ChatP2PData\alpha-invite.json `
+  --backup-invite D:\ChatP2PData\backup-alpha-invite-partner.json `
+  --expected-primary-worker-id worker_... `
+  --expected-backup-worker-id worker_... `
+  --reliability-dir D:\ChatP2PData\reliability-pack-live `
+  --out D:\ChatP2PData\operator-console
+```
+
+The console is read-only. It does not create jobs, restart workers, or require partner action. It writes:
+
+- `D:\ChatP2PData\operator-console\operator-console.json`
+- `D:\ChatP2PData\operator-console\operator-console.md`
+- `D:\ChatP2PData\operator-console\operator-console.html`
+
+Use `summary.can_continue_without_partner` and `summary.recommended_next_action` as the quick decision fields.
+
 ## Recurring Local Check
 
 Install a local Windows Scheduled Task from the operator machine:

@@ -49,6 +49,20 @@ python -m chatp2p.cli operator privacy-scan --root D:\Projects\ChatP2P --report 
 
 The scan fails on committed invite/operator files, real-looking credentials, exact worker IDs, live tailnet IPs, hostnames, and private partner paths in public docs. Matches for credential-shaped values are redacted in the report.
 
+To get a static operator view without starting jobs or another dashboard process, generate the Operator Console report:
+
+```powershell
+python -m chatp2p.cli operator console `
+  --repo D:\Projects\ChatP2P `
+  --home D:\ChatP2PData\.mesh `
+  --primary-invite D:\ChatP2PData\alpha-invite.json `
+  --backup-invite D:\ChatP2PData\backup-alpha-invite-partner.json `
+  --reliability-dir D:\ChatP2PData\reliability-pack-live `
+  --out D:\ChatP2PData\operator-console
+```
+
+The console writes `operator-console.json`, `operator-console.md`, and `operator-console.html`. It summarizes primary and backup lane health, local managed processes, privacy-scan status, latest reliability-pack evidence, and whether the operator can continue without partner action.
+
 ## Network Smoke Test
 
 Terminal 1:
@@ -320,6 +334,8 @@ chatp2p operator reliability-pack `
 ```
 
 The reliability pack writes network status, primary/backup verified echo inference proofs, token-redaction checks, and a `reliability-summary.md`. Deterministic failover smoke is skipped by default to avoid leaving single-worker proof jobs pending; use `--include-deterministic-smoke` when you deliberately want that older proof. Install a local recurring Windows check with `chatp2p operator install-reliability-task ... --interval-minutes 30`. Full details live in [docs/OPERATOR_RELIABILITY.md](docs/OPERATOR_RELIABILITY.md).
+
+For a read-only snapshot of what to do next, run `chatp2p operator console ...`. It does not create proof jobs or restart processes; it turns existing health, reliability, privacy, and autopilot reports into one static operator page.
 
 To let the node check and restart managed processes from the invite, run a one-shot watchdog check:
 
