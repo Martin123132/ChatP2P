@@ -38,10 +38,15 @@ def test_operator_console_writes_static_reports_and_redacts_invite_tokens(tmp_pa
     assert report["status"] == "warn"
     assert report["summary"]["can_continue_without_partner"] is True
     assert report["summary"]["recommended_next_action"] == "continue_development"
-    for key in ("json", "markdown", "html"):
+    assert report["action_queue"]["next_action"]["action_id"] == "continue_development"
+    assert report["action_queue"]["next_action"]["partner_required"] is False
+    for key in ("json", "markdown", "html", "action_queue_json", "action_queue_markdown"):
         artifact = Path(report["artifacts"][key])
         assert artifact.exists()
         assert token not in artifact.read_text(encoding="utf-8")
+    html_report = Path(report["artifacts"]["html"]).read_text(encoding="utf-8")
+    assert "Action Queue" in html_report
+    assert "continue_development" in html_report
 
 
 def test_operator_console_privacy_failure_becomes_next_action(tmp_path):
@@ -74,6 +79,7 @@ def test_operator_console_privacy_failure_becomes_next_action(tmp_path):
     assert report["status"] == "fail"
     assert report["summary"]["recommended_next_action"] == "fix_public_privacy_findings"
     assert report["summary"]["can_continue_without_partner"] is False
+    assert report["action_queue"]["next_action"]["action_id"] == "fix_public_privacy_findings"
     assert report["privacy_scan"]["findings"][0]["match"] == "<redacted>"
     assert leaked_token not in json.dumps(report)
 
@@ -123,6 +129,8 @@ def test_operator_console_can_continue_on_backup_lane(monkeypatch, tmp_path):
     assert report["summary"]["backup_ready"] is True
     assert report["summary"]["can_continue_without_partner"] is True
     assert report["summary"]["recommended_next_action"] == "continue_on_backup_lane"
+    assert report["action_queue"]["next_action"]["action_id"] == "continue_on_backup_lane"
+    assert report["action_queue"]["next_action"]["partner_required"] is False
 
 
 def test_operator_console_without_reliability_pack_still_gives_next_step(monkeypatch, tmp_path):

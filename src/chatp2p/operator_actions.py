@@ -88,10 +88,10 @@ _RECOMMENDED_ACTIONS: dict[str, dict[str, Any]] = {
 
 
 def build_operator_action_queue(daily_report: dict[str, Any]) -> dict[str, Any]:
-    """Build a ranked queue from an operator daily-check report."""
+    """Build a ranked queue from an operator daily-check or console report."""
 
     summary = daily_report.get("summary") or {}
-    steps = daily_report.get("steps") or {}
+    steps = _normalised_steps(daily_report)
     artifacts = daily_report.get("artifacts") or {}
     actions: list[dict[str, Any]] = []
 
@@ -134,11 +134,11 @@ def build_operator_action_queue(daily_report: dict[str, Any]) -> dict[str, Any]:
     _add_catalog_action(
         actions,
         recommended,
-        source="daily_summary",
+        source="operator_summary",
         artifacts={
-            "daily_check": artifacts.get("json"),
-            "daily_markdown": artifacts.get("markdown"),
-            "operator_console_html": artifacts.get("operator_console_html"),
+            "report_json": artifacts.get("json"),
+            "report_markdown": artifacts.get("markdown"),
+            "operator_console_html": artifacts.get("operator_console_html") or artifacts.get("html"),
         },
     )
 
@@ -146,15 +146,17 @@ def build_operator_action_queue(daily_report: dict[str, Any]) -> dict[str, Any]:
         _add_action(
             actions,
             action_id=f"review_warning_{_slug(str(warning))}",
-            priority=75,
+            priority=95,
             severity="warning",
             category="operator",
             title="Review operator warning",
             detail=str(warning),
-            source="daily_summary",
+            source="operator_summary",
             partner_required="partner" in str(warning).lower(),
         )
     for error in summary.get("errors") or []:
+        if str(error) in {"public privacy scan has findings", "reliability pack refresh failed"}:
+            continue
         _add_action(
             actions,
             action_id=f"resolve_error_{_slug(str(error))}",
@@ -163,7 +165,7 @@ def build_operator_action_queue(daily_report: dict[str, Any]) -> dict[str, Any]:
             category="operator",
             title="Resolve operator error",
             detail=str(error),
-            source="daily_summary",
+            source="operator_summary",
             partner_required=False,
         )
 
@@ -177,6 +179,35 @@ def build_operator_action_queue(daily_report: dict[str, Any]) -> dict[str, Any]:
         "next_action": actions[0] if actions else None,
         "counts": _severity_counts(actions),
         "actions": actions,
+    }
+
+
+def _normalised_steps(report: dict[str, Any]) -> dict[str, Any]:
+    steps = report.get("steps")
+    if isinstance(steps, dict) and steps:
+        return steps
+
+    summary = report.get("summary") or {}
+    privacy = report.get("privacy_scan") or {}
+    artifacts = report.get("artifacts") or {}
+    return {
+        "privacy_scan": {
+            "ok": bool(privacy.get("ok")),
+            "status": privacy.get("status"),
+            "finding_count": privacy.get("finding_count"),
+        },
+        "reliability_refresh": {
+            "ok": True,
+            "status": "skipped",
+            "message": "Console reports do not refresh reliability evidence.",
+        },
+        "operator_console": {
+            "ok": True,
+            "status": "pass",
+            "message": str(summary.get("recommended_next_action") or ""),
+            "can_continue_without_partner": summary.get("can_continue_without_partner"),
+            "html": artifacts.get("html"),
+        },
     }
 
 

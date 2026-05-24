@@ -15,6 +15,7 @@ from .alpha import load_alpha_invite
 from .client import CoordinatorClient
 from .jsonio import read_json_file
 from .node_runtime import managed_processes_status
+from .operator_actions import build_operator_action_queue, write_operator_action_queue
 from .privacy import PrivacyScanConfig, run_public_privacy_scan
 
 
@@ -125,6 +126,8 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
     json_path = out_dir / "operator-console.json"
     markdown_path = out_dir / "operator-console.md"
     html_path = out_dir / "operator-console.html"
+    action_queue_json_path = out_dir / "action-queue.json"
+    action_queue_markdown_path = out_dir / "action-queue.md"
     history_path = out_dir / "operator-console-history.json"
     cleanup_plan_path = out_dir / "operator-console-cleanup-plan.ps1"
     stale_reports = _stale_report_inventory(
@@ -172,6 +175,8 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
             "json": str(json_path),
             "markdown": str(markdown_path),
             "html": str(html_path),
+            "action_queue_json": str(action_queue_json_path),
+            "action_queue_markdown": str(action_queue_markdown_path),
             "history": str(history_path),
             "cleanup_plan": str(cleanup_plan_path),
         },
@@ -179,6 +184,9 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
     report = _redact_sensitive_report(report, secrets_to_redact)
     history_summary = _update_console_history(history_path, report, limit=config.history_limit)
     report["history"] = _redact_sensitive_report(history_summary, secrets_to_redact)
+    action_queue = build_operator_action_queue(report)
+    report["action_queue"] = _redact_sensitive_report(action_queue, secrets_to_redact)
+    write_operator_action_queue(out_dir, report["action_queue"])
 
     markdown = format_operator_console_markdown(report)
     html_report = format_operator_console_html(report, markdown)
@@ -193,10 +201,13 @@ def format_operator_console_summary(report: dict[str, Any]) -> str:
     artifacts = report.get("artifacts", {})
     stale_reports = report.get("stale_reports", {})
     history = report.get("history", {})
+    top_action = ((report.get("action_queue") or {}).get("next_action") or {})
     lines = [
         f"ChatP2P operator console: {str(report.get('status', 'unknown')).upper()}",
         f"Can continue without partner: {_yes_no(summary.get('can_continue_without_partner'))}",
         f"Recommended next action: {summary.get('recommended_next_action', 'unknown')}",
+        f"Top queued action: {top_action.get('action_id', 'none')}",
+        f"Partner required: {_yes_no(top_action.get('partner_required'))}",
         f"Primary lane: {_lane_brief((report.get('lanes') or {}).get('primary', {}))}",
         f"Backup lane: {_lane_brief((report.get('lanes') or {}).get('backup', {}))}",
         f"Privacy scan: {str((report.get('privacy_scan') or {}).get('status', 'unknown')).upper()}",
@@ -218,6 +229,8 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
     local_processes = report.get("local", {}).get("managed_processes", [])
     history = report.get("history", {})
     stale_reports = report.get("stale_reports", {})
+    action_queue = report.get("action_queue", {})
+    top_action = action_queue.get("next_action") or {}
 
     lines = [
         "# ChatP2P Operator Console",
@@ -225,13 +238,38 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
         f"- Status: **{str(report.get('status', 'unknown')).upper()}**",
         f"- Can continue without partner: **{_yes_no(summary.get('can_continue_without_partner'))}**",
         f"- Recommended next action: `{summary.get('recommended_next_action', 'unknown')}`",
+        f"- Top queued action: `{top_action.get('action_id', 'none')}`",
+        f"- Partner required: **{_yes_no(top_action.get('partner_required'))}**",
         f"- Generated at: `{report.get('generated_at')}`",
         "",
+        "## Action Queue",
+        "",
+        "| Rank | Severity | Action | Partner required | Detail |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for action in action_queue.get("actions") or []:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(action.get("rank")),
+                    str(action.get("severity")),
+                    f"`{action.get('action_id')}`",
+                    _yes_no(action.get("partner_required")),
+                    _markdown_table_text(str(action.get("detail", ""))),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
         "## Lanes",
         "",
         "| Lane | Ready | Health | Live workers | Expected worker | Disputes |",
         "| --- | --- | --- | --- | --- | --- |",
-    ]
+        ]
+    )
     for label in ("primary", "backup"):
         lane = lanes.get(label, {})
         expected = lane.get("expected_worker") or {}
@@ -356,9 +394,12 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
 def format_operator_console_html(report: dict[str, Any], markdown: str | None = None) -> str:
     summary = report.get("summary", {})
     lanes = report.get("lanes", {})
+    action_queue = report.get("action_queue", {})
+    top_action = action_queue.get("next_action") or {}
     status = str(report.get("status", "unknown"))
     status_class = "ok" if status == "pass" else ("warn" if status == "warn" else "fail")
     lane_cards = "\n".join(_lane_card(label, lanes.get(label, {})) for label in ("primary", "backup"))
+    action_rows = _action_queue_rows(action_queue)
     markdown = markdown or format_operator_console_markdown(report)
     return f"""<!doctype html>
 <html lang="en">
@@ -413,6 +454,17 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
     .status.ok {{ color: var(--ok); }}
     .status.warn {{ color: var(--warn); }}
     .status.fail {{ color: var(--fail); }}
+    .severity {{
+      display: inline-flex;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 12px;
+      font-weight: 700;
+      border: 1px solid var(--line);
+    }}
+    .severity.info {{ color: var(--accent); }}
+    .severity.warning {{ color: var(--warn); }}
+    .severity.blocker {{ color: var(--fail); }}
     .grid {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
@@ -471,11 +523,34 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
           <p class="value">{html.escape(str(summary.get("recommended_next_action", "unknown")))}</p>
         </div>
         <div class="panel">
+          <p class="label">Top queued action</p>
+          <p class="value">{html.escape(str(top_action.get("action_id", "none")))}</p>
+        </div>
+        <div class="panel">
+          <p class="label">Partner required</p>
+          <p class="value">{html.escape(_yes_no(top_action.get("partner_required")))}</p>
+        </div>
+        <div class="panel">
           <p class="label">Generated</p>
           <p class="value">{html.escape(str(report.get("generated_at", "-")))}</p>
         </div>
       </div>
     </header>
+    <section>
+      <h2>Action Queue</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Rank</th>
+            <th>Severity</th>
+            <th>Action</th>
+            <th>Partner</th>
+            <th>Detail</th>
+          </tr>
+        </thead>
+        <tbody>{action_rows}</tbody>
+      </table>
+    </section>
     <section>
       <h2>Lanes</h2>
       <div class="grid">{lane_cards}</div>
@@ -1095,10 +1170,32 @@ def _lane_card(label: str, lane: dict[str, Any]) -> str:
     """
 
 
+def _action_queue_rows(action_queue: dict[str, Any]) -> str:
+    rows = []
+    for action in action_queue.get("actions") or []:
+        severity = str(action.get("severity", "unknown"))
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(action.get('rank', '-')))}</td>"
+            f'<td><span class="severity {html.escape(severity)}">{html.escape(severity)}</span></td>'
+            f"<td><code>{html.escape(str(action.get('action_id', 'unknown')))}</code></td>"
+            f"<td>{html.escape(_yes_no(action.get('partner_required')))}</td>"
+            f"<td>{html.escape(str(action.get('detail', '')))}</td>"
+            "</tr>"
+        )
+    if rows:
+        return "\n".join(rows)
+    return '<tr><td colspan="5">No queued actions.</td></tr>'
+
+
 def _lane_brief(lane: dict[str, Any]) -> str:
     if not lane:
         return "unknown"
     return f"{lane.get('status', 'unknown')} ready={_yes_no(lane.get('ready'))}"
+
+
+def _markdown_table_text(value: str) -> str:
+    return value.replace("|", "\\|").replace("\n", " ")
 
 
 def _age_seconds(timestamp: Any, *, now: datetime) -> float | None:
