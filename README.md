@@ -78,6 +78,24 @@ python -m chatp2p.cli operator daily-check `
 
 Daily check writes `daily-check.json` and `daily-check.md`, runs the privacy gate, updates the Operator Console, and prints one pass/warn/fail answer. It does not refresh reliability proof jobs unless `--refresh-reliability-pack` is passed.
 
+Install the same check as a local hourly Windows task when you want the workstation to keep producing a fresh operator answer:
+
+```powershell
+python -m chatp2p.cli operator install-daily-check-task `
+  --repo D:\Projects\ChatP2P `
+  --home D:\ChatP2PData\.mesh `
+  --primary-invite D:\ChatP2PData\alpha-invite.json `
+  --backup-invite D:\ChatP2PData\backup-alpha-invite-partner.json `
+  --reliability-dir D:\ChatP2PData\reliability-pack-live `
+  --out D:\ChatP2PData\daily-check `
+  --console-out D:\ChatP2PData\operator-console `
+  --interval-minutes 60 `
+  --work-dir D:\Projects\ChatP2P `
+  --allow-startup-folder-fallback
+```
+
+Use `--dry-run` first to inspect the generated launcher and task plan. The scheduled check is read-only by default and does not run proof jobs unless you opt into `--refresh-reliability-pack`.
+
 ## Network Smoke Test
 
 Terminal 1:

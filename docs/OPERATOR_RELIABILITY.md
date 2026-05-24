@@ -98,6 +98,27 @@ python -m chatp2p.cli operator daily-check `
 
 Daily check writes `daily-check.json` and `daily-check.md`, runs the public privacy scan, updates Operator Console, and exits with a clear status. It does not create proof jobs by default. Add `--refresh-reliability-pack` only when you deliberately want to run fresh reliability proof work.
 
+Install the same gate as an hourly local Windows task:
+
+```powershell
+Set-Location D:\Projects\ChatP2P
+$env:PYTHONPATH='D:\Projects\ChatP2P\src'
+
+python -m chatp2p.cli operator install-daily-check-task `
+  --repo D:\Projects\ChatP2P `
+  --home D:\ChatP2PData\.mesh `
+  --primary-invite D:\ChatP2PData\alpha-invite.json `
+  --backup-invite D:\ChatP2PData\backup-alpha-invite-partner.json `
+  --reliability-dir D:\ChatP2PData\reliability-pack-live `
+  --out D:\ChatP2PData\daily-check `
+  --console-out D:\ChatP2PData\operator-console `
+  --interval-minutes 60 `
+  --work-dir D:\Projects\ChatP2P `
+  --allow-startup-folder-fallback
+```
+
+Use `--dry-run` first to inspect the generated task plan. `--allow-startup-folder-fallback` installs a per-user Startup folder launcher if Windows denies Scheduled Task creation without elevation.
+
 ## Recurring Local Check
 
 Install a local Windows Scheduled Task from the operator machine:

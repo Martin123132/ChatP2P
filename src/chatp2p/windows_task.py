@@ -16,6 +16,7 @@ WINDOWS_TASK_INSTALL_REPORT_SCHEMA = "chatp2p.windows-task-install-report.v1"
 WINDOWS_TASK_UNINSTALL_REPORT_SCHEMA = "chatp2p.windows-task-uninstall-report.v1"
 DEFAULT_TASK_NAME = "ChatP2P Watchdog"
 DEFAULT_RELIABILITY_TASK_NAME = "ChatP2P Reliability Pack"
+DEFAULT_DAILY_CHECK_TASK_NAME = "ChatP2P Daily Check"
 DEFAULT_STARTUP_TIMEOUT_SECONDS = 90.0
 SUPPORTED_SCHEDULES = {"onlogon": "ONLOGON", "onstart": "ONSTART"}
 
@@ -65,6 +66,42 @@ class ReliabilityTaskConfig:
     status_timeout_seconds: float = 5.0
     timeout_seconds: float = 90.0
     poll_interval: float = 0.5
+    python_executable: Path | None = None
+    source_root: Path | None = None
+    work_dir: Path | None = None
+    launcher_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class DailyCheckTaskConfig:
+    repo: Path
+    home: Path
+    primary_invite_path: Path
+    out_dir: Path
+    task_name: str = DEFAULT_DAILY_CHECK_TASK_NAME
+    interval_minutes: int = 60
+    force: bool = True
+    startup_fallback: bool = False
+    backup_invite_path: Path | None = None
+    reliability_dir: Path | None = None
+    console_out_dir: Path | None = None
+    partner_report_paths: tuple[Path, ...] = ()
+    expected_primary_worker_id: str | None = None
+    expected_backup_worker_id: str | None = None
+    skip_network_checks: bool = False
+    refresh_reliability_pack: bool = False
+    include_deterministic_smoke: bool = False
+    jobs: int = 4
+    inference_jobs: int = 4
+    min_live_workers: int = 1
+    status_timeout_seconds: float = 5.0
+    timeout_seconds: float = 90.0
+    poll_interval: float = 0.5
+    freshness_seconds: float = 3600.0
+    history_limit: int = 20
+    stale_report_root: Path | None = None
+    stale_report_days: float = 2.0
+    stale_report_max_items: int = 50
     python_executable: Path | None = None
     source_root: Path | None = None
     work_dir: Path | None = None
@@ -146,6 +183,49 @@ def install_reliability_task(config: ReliabilityTaskConfig, *, dry_run: bool = F
         stdout=result.stdout,
         stderr=result.stderr,
     )
+
+
+def install_daily_check_task(config: DailyCheckTaskConfig, *, dry_run: bool = False) -> dict[str, Any]:
+    plan = build_daily_check_task_plan(config)
+    report = _task_report(
+        schema=WINDOWS_TASK_INSTALL_REPORT_SCHEMA,
+        task_name=config.task_name,
+        dry_run=dry_run,
+        plan=plan,
+        command=None,
+        returncode=None,
+        stdout=None,
+        stderr=None,
+    )
+    if dry_run:
+        return report
+    if not _is_windows():
+        report.update({"ok": False, "status": "unsupported", "error": "Windows Scheduled Tasks require Windows"})
+        return report
+
+    launcher_path = Path(plan["launcher_path"])
+    launcher_path.parent.mkdir(parents=True, exist_ok=True)
+    launcher_path.write_text(plan["launcher"], encoding="utf-8", newline="\r\n")
+    result = subprocess.run(plan["create_command"], capture_output=True, text=True, timeout=30)
+    report = _task_report(
+        schema=WINDOWS_TASK_INSTALL_REPORT_SCHEMA,
+        task_name=config.task_name,
+        dry_run=False,
+        plan=plan,
+        command=plan["create_command"],
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+    )
+    if result.returncode != 0 and config.startup_fallback and _is_access_denied(result.stderr):
+        fallback = _install_startup_fallback(plan)
+        report["fallback"] = fallback
+        if fallback["ok"]:
+            report["ok"] = True
+            report["status"] = "pass"
+            report["install_method"] = "startup-folder"
+            report["errors"] = []
+    return report
 
 
 def uninstall_watchdog_task(
@@ -278,6 +358,84 @@ def build_reliability_task_plan(config: ReliabilityTaskConfig) -> dict[str, Any]
     }
 
 
+def build_daily_check_task_plan(config: DailyCheckTaskConfig) -> dict[str, Any]:
+    _validate_daily_check_task_config(config)
+    repo = config.repo.expanduser().resolve()
+    home = config.home.expanduser().resolve()
+    primary_invite_path = config.primary_invite_path.expanduser().resolve()
+    backup_invite_path = config.backup_invite_path.expanduser().resolve() if config.backup_invite_path else None
+    reliability_dir = config.reliability_dir.expanduser().resolve() if config.reliability_dir else None
+    out_dir = config.out_dir.expanduser().resolve()
+    console_out_dir = config.console_out_dir.expanduser().resolve() if config.console_out_dir else None
+    stale_report_root = config.stale_report_root.expanduser().resolve() if config.stale_report_root else None
+    partner_report_paths = tuple(path.expanduser().resolve() for path in config.partner_report_paths)
+    python_executable = (config.python_executable or Path(sys.executable)).expanduser().resolve()
+    source_root = (config.source_root or Path(__file__).resolve().parents[1]).expanduser().resolve()
+    work_dir = (config.work_dir or source_root.parent).expanduser().resolve()
+    launcher_path = (config.launcher_path or out_dir / "run" / f"{_task_slug(config.task_name)}.cmd").expanduser().resolve()
+    daily_check_argv = _daily_check_argv(
+        config=config,
+        repo=repo,
+        home=home,
+        primary_invite_path=primary_invite_path,
+        backup_invite_path=backup_invite_path,
+        reliability_dir=reliability_dir,
+        out_dir=out_dir,
+        console_out_dir=console_out_dir,
+        partner_report_paths=partner_report_paths,
+        stale_report_root=stale_report_root,
+        python_executable=python_executable,
+    )
+    launcher = _launcher_contents(
+        python_executable=python_executable,
+        source_root=source_root,
+        work_dir=work_dir,
+        watchdog_argv=daily_check_argv,
+    )
+    task_action = subprocess.list2cmdline([_cmd_executable(), "/c", str(launcher_path)])
+    create_command = [
+        "schtasks.exe",
+        "/Create",
+        "/TN",
+        config.task_name,
+        "/SC",
+        "MINUTE",
+        "/MO",
+        str(config.interval_minutes),
+        "/TR",
+        task_action,
+    ]
+    if config.force:
+        create_command.append("/F")
+    return {
+        "task_name": config.task_name,
+        "schedule": "minute",
+        "interval_minutes": config.interval_minutes,
+        "repo": str(repo),
+        "home": str(home),
+        "primary_invite_path": str(primary_invite_path),
+        "backup_invite_path": str(backup_invite_path) if backup_invite_path else None,
+        "reliability_dir": str(reliability_dir) if reliability_dir else None,
+        "out_dir": str(out_dir),
+        "console_out_dir": str(console_out_dir) if console_out_dir else None,
+        "expected_primary_worker_id": config.expected_primary_worker_id,
+        "expected_backup_worker_id": config.expected_backup_worker_id,
+        "skip_network_checks": config.skip_network_checks,
+        "refresh_reliability_pack": config.refresh_reliability_pack,
+        "include_deterministic_smoke": config.include_deterministic_smoke,
+        "launcher_path": str(launcher_path),
+        "python_executable": str(python_executable),
+        "source_root": str(source_root),
+        "work_dir": str(work_dir),
+        "daily_check_argv": daily_check_argv,
+        "task_action": task_action,
+        "create_command": create_command,
+        "startup_launcher_path": str(_default_startup_launcher_path(config.task_name)),
+        "startup_fallback": config.startup_fallback,
+        "launcher": launcher,
+    }
+
+
 def build_watchdog_task_plan(config: WatchdogTaskConfig) -> dict[str, Any]:
     _validate_watchdog_task_config(config)
     home = config.home.expanduser().resolve()
@@ -387,6 +545,39 @@ def _validate_reliability_task_config(config: ReliabilityTaskConfig) -> None:
         raise ValueError("--expected-backup-worker-id cannot be blank")
 
 
+def _validate_daily_check_task_config(config: DailyCheckTaskConfig) -> None:
+    if not config.task_name.strip():
+        raise ValueError("--task-name cannot be blank")
+    if config.interval_minutes < 1:
+        raise ValueError("--interval-minutes must be at least 1")
+    if config.refresh_reliability_pack and (config.backup_invite_path is None or config.reliability_dir is None):
+        raise ValueError("--backup-invite and --reliability-dir are required with --refresh-reliability-pack")
+    if config.include_deterministic_smoke and config.jobs < 1:
+        raise ValueError("--jobs must be at least 1 when deterministic smoke is enabled")
+    if config.inference_jobs < 1:
+        raise ValueError("--inference-jobs must be at least 1")
+    if config.min_live_workers < 0:
+        raise ValueError("--min-live-workers cannot be negative")
+    if config.status_timeout_seconds <= 0:
+        raise ValueError("--status-timeout-seconds must be greater than 0")
+    if config.timeout_seconds <= 0:
+        raise ValueError("--timeout-seconds must be greater than 0")
+    if config.poll_interval <= 0:
+        raise ValueError("--poll-interval must be greater than 0")
+    if config.freshness_seconds <= 0:
+        raise ValueError("--freshness-seconds must be greater than 0")
+    if config.history_limit < 1:
+        raise ValueError("--history-limit must be at least 1")
+    if config.stale_report_days <= 0:
+        raise ValueError("--stale-report-days must be greater than 0")
+    if config.stale_report_max_items < 0:
+        raise ValueError("--stale-report-max-items cannot be negative")
+    if config.expected_primary_worker_id is not None and not config.expected_primary_worker_id.strip():
+        raise ValueError("--expected-primary-worker-id cannot be blank")
+    if config.expected_backup_worker_id is not None and not config.expected_backup_worker_id.strip():
+        raise ValueError("--expected-backup-worker-id cannot be blank")
+
+
 def _watchdog_argv(
     *,
     config: WatchdogTaskConfig,
@@ -475,6 +666,78 @@ def _reliability_argv(
         argv.extend(["--expected-primary-worker-id", config.expected_primary_worker_id])
     if config.expected_backup_worker_id is not None:
         argv.extend(["--expected-backup-worker-id", config.expected_backup_worker_id])
+    if config.include_deterministic_smoke:
+        argv.append("--include-deterministic-smoke")
+    return argv
+
+
+def _daily_check_argv(
+    *,
+    config: DailyCheckTaskConfig,
+    repo: Path,
+    home: Path,
+    primary_invite_path: Path,
+    backup_invite_path: Path | None,
+    reliability_dir: Path | None,
+    out_dir: Path,
+    console_out_dir: Path | None,
+    partner_report_paths: tuple[Path, ...],
+    stale_report_root: Path | None,
+    python_executable: Path,
+) -> list[str]:
+    argv = [
+        str(python_executable),
+        "-m",
+        "chatp2p.cli",
+        "operator",
+        "daily-check",
+        "--repo",
+        str(repo),
+        "--home",
+        str(home),
+        "--primary-invite",
+        str(primary_invite_path),
+        "--out",
+        str(out_dir),
+        "--jobs",
+        str(config.jobs),
+        "--inference-jobs",
+        str(config.inference_jobs),
+        "--min-live-workers",
+        str(config.min_live_workers),
+        "--status-timeout-seconds",
+        str(config.status_timeout_seconds),
+        "--timeout-seconds",
+        str(config.timeout_seconds),
+        "--poll-interval",
+        str(config.poll_interval),
+        "--freshness-seconds",
+        str(config.freshness_seconds),
+        "--history-limit",
+        str(config.history_limit),
+        "--stale-report-days",
+        str(config.stale_report_days),
+        "--stale-report-max-items",
+        str(config.stale_report_max_items),
+    ]
+    if backup_invite_path is not None:
+        argv.extend(["--backup-invite", str(backup_invite_path)])
+    if reliability_dir is not None:
+        argv.extend(["--reliability-dir", str(reliability_dir)])
+    if console_out_dir is not None:
+        argv.extend(["--console-out", str(console_out_dir)])
+    for partner_report_path in partner_report_paths:
+        argv.extend(["--partner-report", str(partner_report_path)])
+    if config.expected_primary_worker_id is not None:
+        argv.extend(["--expected-primary-worker-id", config.expected_primary_worker_id])
+    if config.expected_backup_worker_id is not None:
+        argv.extend(["--expected-backup-worker-id", config.expected_backup_worker_id])
+    if stale_report_root is not None:
+        argv.extend(["--stale-report-root", str(stale_report_root)])
+    if config.skip_network_checks:
+        argv.append("--skip-network-checks")
+    if config.refresh_reliability_pack:
+        argv.append("--refresh-reliability-pack")
     if config.include_deterministic_smoke:
         argv.append("--include-deterministic-smoke")
     return argv
