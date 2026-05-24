@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .alpha import AlphaReliabilityPackConfig, run_alpha_reliability_pack
+from .operator_actions import build_operator_action_queue, write_operator_action_queue
 from .operator_console import OperatorConsoleConfig, run_operator_console
 from .privacy import PrivacyScanConfig, run_public_privacy_scan
 
@@ -90,6 +91,8 @@ def run_operator_daily_check(config: OperatorDailyCheckConfig) -> dict[str, Any]
 
     json_path = out_dir / "daily-check.json"
     markdown_path = out_dir / "daily-check.md"
+    action_queue_json_path = out_dir / "action-queue.json"
+    action_queue_markdown_path = out_dir / "action-queue.md"
     report = {
         "schema": OPERATOR_DAILY_CHECK_SCHEMA,
         "ok": summary["status"] != "fail",
@@ -121,8 +124,13 @@ def run_operator_daily_check(config: OperatorDailyCheckConfig) -> dict[str, Any]
             "operator_console_json": (console.get("artifacts") or {}).get("json"),
             "operator_console_markdown": (console.get("artifacts") or {}).get("markdown"),
             "operator_console_html": (console.get("artifacts") or {}).get("html"),
+            "action_queue_json": str(action_queue_json_path),
+            "action_queue_markdown": str(action_queue_markdown_path),
         },
     }
+    action_queue = build_operator_action_queue(report)
+    report["action_queue"] = action_queue
+    write_operator_action_queue(out_dir, action_queue)
     json_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     markdown_path.write_text(format_operator_daily_check_markdown(report), encoding="utf-8")
     return report
@@ -136,6 +144,7 @@ def format_operator_daily_check_summary(report: dict[str, Any]) -> str:
             f"ChatP2P daily check: {str(report.get('status', 'unknown')).upper()}",
             f"Can continue without partner: {_yes_no(summary.get('can_continue_without_partner'))}",
             f"Next action: {summary.get('recommended_next_action', 'unknown')}",
+            f"Top queued action: {((report.get('action_queue') or {}).get('next_action') or {}).get('action_id', 'none')}",
             f"Privacy scan: {str((report.get('steps') or {}).get('privacy_scan', {}).get('status', 'unknown')).upper()}",
             f"Operator console: {str((report.get('steps') or {}).get('operator_console', {}).get('status', 'unknown')).upper()}",
             f"Open: {artifacts.get('operator_console_html')}",
@@ -147,12 +156,14 @@ def format_operator_daily_check_markdown(report: dict[str, Any]) -> str:
     summary = report.get("summary", {})
     steps = report.get("steps", {})
     artifacts = report.get("artifacts", {})
+    action_queue = report.get("action_queue") or {}
     lines = [
         "# ChatP2P Daily Check",
         "",
         f"- Status: **{str(report.get('status', 'unknown')).upper()}**",
         f"- Can continue without partner: **{_yes_no(summary.get('can_continue_without_partner'))}**",
         f"- Recommended next action: `{summary.get('recommended_next_action', 'unknown')}`",
+        f"- Top queued action: `{(action_queue.get('next_action') or {}).get('action_id', 'none')}`",
         f"- Generated at: `{report.get('generated_at')}`",
         "",
         "## Steps",
@@ -175,8 +186,34 @@ def format_operator_daily_check_markdown(report: dict[str, Any]) -> str:
             f"- Daily JSON: `{artifacts.get('json')}`",
             f"- Daily Markdown: `{artifacts.get('markdown')}`",
             f"- Operator Console HTML: `{artifacts.get('operator_console_html')}`",
+            f"- Action Queue JSON: `{artifacts.get('action_queue_json')}`",
+            f"- Action Queue Markdown: `{artifacts.get('action_queue_markdown')}`",
         ]
     )
+    actions = action_queue.get("actions") or []
+    if actions:
+        lines.extend(
+            [
+                "",
+                "## Action Queue",
+                "",
+                "| Rank | Severity | Action | Partner required |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for action in actions[:6]:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(action.get("rank")),
+                        str(action.get("severity")),
+                        f"`{action.get('action_id')}`",
+                        _yes_no(action.get("partner_required")),
+                    ]
+                )
+                + " |"
+            )
     if summary.get("warnings"):
         lines.extend(["", "## Warnings", ""])
         lines.extend(f"- {warning}" for warning in summary["warnings"])

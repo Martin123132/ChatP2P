@@ -76,7 +76,15 @@ python -m chatp2p.cli operator daily-check `
   --console-out D:\ChatP2PData\operator-console
 ```
 
-Daily check writes `daily-check.json` and `daily-check.md`, runs the privacy gate, updates the Operator Console, and prints one pass/warn/fail answer. It does not refresh reliability proof jobs unless `--refresh-reliability-pack` is passed.
+Daily check writes `daily-check.json`, `daily-check.md`, `action-queue.json`, and `action-queue.md`; runs the privacy gate; updates the Operator Console; and prints one pass/warn/fail answer. It does not refresh reliability proof jobs unless `--refresh-reliability-pack` is passed. The action queue ranks the next local actions and marks whether partner involvement is required.
+
+You can regenerate the queue from an existing daily report:
+
+```powershell
+python -m chatp2p.cli operator action-queue `
+  --daily-report D:\ChatP2PData\daily-check\daily-check.json `
+  --out D:\ChatP2PData\daily-check
+```
 
 Install the same check as a local hourly Windows task when you want the workstation to keep producing a fresh operator answer:
 

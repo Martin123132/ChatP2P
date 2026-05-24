@@ -64,7 +64,13 @@ from .node_runtime import (
     stop_managed_process,
 )
 from .ollama import DEFAULT_OLLAMA_BASE_URL
+from .jsonio import read_json_file
 from .operator_config import OperatorConfig, write_operator_config
+from .operator_actions import (
+    build_operator_action_queue,
+    format_operator_action_queue_summary,
+    write_operator_action_queue,
+)
 from .operator_console import OperatorConsoleConfig, format_operator_console_summary, run_operator_console
 from .operator_daily import OperatorDailyCheckConfig, format_operator_daily_check_summary, run_operator_daily_check
 from .packets import JobLeaseRenewal, NodeRegistration
@@ -429,6 +435,25 @@ def operator_daily_check_command(args: argparse.Namespace) -> None:
     else:
         print(format_operator_daily_check_summary(report))
     if report["status"] == "fail":
+        raise SystemExit(1)
+
+
+def operator_action_queue_command(args: argparse.Namespace) -> None:
+    try:
+        daily_report = read_json_file(Path(args.daily_report), description="daily check report")
+        if not isinstance(daily_report, dict):
+            raise ValueError("daily check report must be a JSON object")
+        queue = build_operator_action_queue(daily_report)
+        artifacts = write_operator_action_queue(Path(args.out), queue)
+        queue["artifacts"] = artifacts
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(queue, indent=2, sort_keys=True))
+    else:
+        print(format_operator_action_queue_summary(queue))
+    if queue["status"] == "fail":
         raise SystemExit(1)
 
 
@@ -2591,6 +2616,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     operator_daily_check_parser.add_argument("--json", action="store_true", help="Print the full JSON report")
     operator_daily_check_parser.set_defaults(func=operator_daily_check_command)
+
+    operator_action_queue_parser = operator_subcommands.add_parser(
+        "action-queue",
+        help="Build a ranked action queue from an operator daily-check report",
+    )
+    operator_action_queue_parser.add_argument(
+        "--daily-report",
+        required=True,
+        help="Path to daily-check.json",
+    )
+    operator_action_queue_parser.add_argument(
+        "--out",
+        required=True,
+        help="Output directory for action-queue.json and action-queue.md",
+    )
+    operator_action_queue_parser.add_argument("--json", action="store_true", help="Print the full JSON action queue")
+    operator_action_queue_parser.set_defaults(func=operator_action_queue_command)
 
     operator_install_daily_check_task_parser = operator_subcommands.add_parser(
         "install-daily-check-task",

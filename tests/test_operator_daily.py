@@ -22,8 +22,11 @@ def test_daily_check_writes_summary_and_uses_console(monkeypatch, tmp_path):
     assert report["summary"]["can_continue_without_partner"] is True
     assert report["summary"]["recommended_next_action"] == "continue_development"
     assert report["steps"]["reliability_refresh"]["status"] == "skipped"
+    assert report["action_queue"]["next_action"]["action_id"] == "continue_development"
     assert Path(report["artifacts"]["json"]).exists()
     assert Path(report["artifacts"]["markdown"]).exists()
+    assert Path(report["artifacts"]["action_queue_json"]).exists()
+    assert Path(report["artifacts"]["action_queue_markdown"]).exists()
 
 
 def test_daily_check_fails_when_privacy_scan_fails(monkeypatch, tmp_path):
@@ -42,6 +45,7 @@ def test_daily_check_fails_when_privacy_scan_fails(monkeypatch, tmp_path):
     assert report["status"] == "fail"
     assert report["summary"]["recommended_next_action"] == "fix_public_privacy_findings"
     assert report["summary"]["can_continue_without_partner"] is False
+    assert report["action_queue"]["next_action"]["action_id"] == "fix_public_privacy_findings"
 
 
 def test_daily_check_can_refresh_reliability_pack(monkeypatch, tmp_path):
