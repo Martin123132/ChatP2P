@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
+import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,6 +19,7 @@ from .jsonio import read_json_file
 from .node_runtime import managed_processes_status
 from .operator_actions import build_operator_action_queue, write_operator_action_queue
 from .privacy import PrivacyScanConfig, run_public_privacy_scan
+from .windows_task import DEFAULT_DAILY_CHECK_TASK_NAME
 
 
 OPERATOR_CONSOLE_REPORT_SCHEMA = "chatp2p.operator-console-report.v1"
@@ -63,6 +66,9 @@ class OperatorConsoleConfig:
     stale_report_root: Path | None = None
     stale_report_days: float = DEFAULT_STALE_REPORT_DAYS
     stale_report_max_items: int = DEFAULT_STALE_REPORT_MAX_ITEMS
+    daily_check_dir: Path | None = None
+    daily_check_task_name: str | None = DEFAULT_DAILY_CHECK_TASK_NAME
+    query_daily_check_task: bool = True
 
 
 def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
@@ -114,12 +120,21 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
         now=now,
         freshness_seconds=config.freshness_seconds,
     )
+    daily_check = _daily_check_automation_summary(
+        daily_check_dir=config.daily_check_dir,
+        default_root=config.home.expanduser().resolve().parent,
+        task_name=config.daily_check_task_name,
+        query_task=config.query_daily_check_task,
+        now=now,
+        freshness_seconds=config.freshness_seconds,
+    )
     summary = _operator_summary(
         primary=primary,
         backup=backup,
         reliability=reliability,
         privacy_scan=privacy_scan,
         partner_autopilot=partner_autopilot,
+        daily_check=daily_check,
         skip_network_checks=config.skip_network_checks,
     )
 
@@ -160,6 +175,9 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
             "stale_report_root": str(config.stale_report_root) if config.stale_report_root else None,
             "stale_report_days": config.stale_report_days,
             "stale_report_max_items": config.stale_report_max_items,
+            "daily_check_dir": str(config.daily_check_dir) if config.daily_check_dir else None,
+            "daily_check_task_name": config.daily_check_task_name,
+            "query_daily_check_task": config.query_daily_check_task,
         },
         "summary": summary,
         "local": local,
@@ -170,6 +188,7 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
         "reliability": reliability,
         "privacy_scan": _privacy_summary(privacy_scan),
         "partner_autopilot": partner_autopilot,
+        "daily_check_automation": daily_check,
         "stale_reports": stale_reports,
         "artifacts": {
             "json": str(json_path),
@@ -202,12 +221,14 @@ def format_operator_console_summary(report: dict[str, Any]) -> str:
     stale_reports = report.get("stale_reports", {})
     history = report.get("history", {})
     top_action = ((report.get("action_queue") or {}).get("next_action") or {})
+    daily_check = report.get("daily_check_automation") or {}
     lines = [
         f"ChatP2P operator console: {str(report.get('status', 'unknown')).upper()}",
         f"Can continue without partner: {_yes_no(summary.get('can_continue_without_partner'))}",
         f"Recommended next action: {summary.get('recommended_next_action', 'unknown')}",
         f"Top queued action: {top_action.get('action_id', 'none')}",
         f"Partner required: {_yes_no(top_action.get('partner_required'))}",
+        f"Daily check automation: {daily_check.get('status', 'unknown')}",
         f"Primary lane: {_lane_brief((report.get('lanes') or {}).get('primary', {}))}",
         f"Backup lane: {_lane_brief((report.get('lanes') or {}).get('backup', {}))}",
         f"Privacy scan: {str((report.get('privacy_scan') or {}).get('status', 'unknown')).upper()}",
@@ -230,6 +251,7 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
     history = report.get("history", {})
     stale_reports = report.get("stale_reports", {})
     action_queue = report.get("action_queue", {})
+    daily_check = report.get("daily_check_automation") or {}
     top_action = action_queue.get("next_action") or {}
 
     lines = [
@@ -240,6 +262,7 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
         f"- Recommended next action: `{summary.get('recommended_next_action', 'unknown')}`",
         f"- Top queued action: `{top_action.get('action_id', 'none')}`",
         f"- Partner required: **{_yes_no(top_action.get('partner_required'))}**",
+        f"- Daily check automation: `{daily_check.get('status', 'unknown')}`",
         f"- Generated at: `{report.get('generated_at')}`",
         "",
         "## Action Queue",
@@ -268,6 +291,19 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
         "",
         "| Lane | Ready | Health | Live workers | Expected worker | Disputes |",
         "| --- | --- | --- | --- | --- | --- |",
+        ]
+    )
+    lines.extend(
+        [
+            "",
+            "## Scheduled Automation",
+            "",
+            f"- Status: `{daily_check.get('status', 'unknown')}`",
+            f"- Task query: `{(daily_check.get('task') or {}).get('status', 'unknown')}`",
+            f"- Task state: `{(daily_check.get('task') or {}).get('task_status') or '-'}`",
+            f"- Last daily report: `{(daily_check.get('report') or {}).get('status', 'unknown')}`",
+            f"- Report fresh: `{(daily_check.get('report') or {}).get('fresh')}`",
+            f"- Report path: `{(daily_check.get('report') or {}).get('path')}`",
         ]
     )
     for label in ("primary", "backup"):
@@ -395,6 +431,7 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
     summary = report.get("summary", {})
     lanes = report.get("lanes", {})
     action_queue = report.get("action_queue", {})
+    daily_check = report.get("daily_check_automation") or {}
     top_action = action_queue.get("next_action") or {}
     status = str(report.get("status", "unknown"))
     status_class = "ok" if status == "pass" else ("warn" if status == "warn" else "fail")
@@ -531,6 +568,10 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
           <p class="value">{html.escape(_yes_no(top_action.get("partner_required")))}</p>
         </div>
         <div class="panel">
+          <p class="label">Daily check automation</p>
+          <p class="value">{html.escape(str(daily_check.get("status", "unknown")).upper())}</p>
+        </div>
+        <div class="panel">
           <p class="label">Generated</p>
           <p class="value">{html.escape(str(report.get("generated_at", "-")))}</p>
         </div>
@@ -550,6 +591,10 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
         </thead>
         <tbody>{action_rows}</tbody>
       </table>
+    </section>
+    <section>
+      <h2>Scheduled Automation</h2>
+      {_daily_check_automation_table(daily_check)}
     </section>
     <section>
       <h2>Lanes</h2>
@@ -851,6 +896,168 @@ def _partner_autopilot_summary(path: Path, *, now: datetime, freshness_seconds: 
     }
 
 
+def _daily_check_automation_summary(
+    *,
+    daily_check_dir: Path | None,
+    default_root: Path,
+    task_name: str | None,
+    query_task: bool,
+    now: datetime,
+    freshness_seconds: float,
+) -> dict[str, Any]:
+    resolved_dir = daily_check_dir.expanduser().resolve() if daily_check_dir is not None else default_root / "daily-check"
+    report_summary = _daily_check_report_summary(
+        resolved_dir / "daily-check.json",
+        now=now,
+        freshness_seconds=freshness_seconds,
+    )
+    task_summary = _query_daily_check_task(task_name, enabled=query_task)
+    status = _daily_check_automation_status(report_summary, task_summary)
+    return {
+        "configured": True,
+        "status": status,
+        "ok": status == "pass",
+        "daily_check_dir": str(resolved_dir),
+        "report": report_summary,
+        "task": task_summary,
+    }
+
+
+def _daily_check_report_summary(path: Path, *, now: datetime, freshness_seconds: float) -> dict[str, Any]:
+    resolved = path.expanduser().resolve()
+    if not resolved.exists():
+        return {
+            "path": str(resolved),
+            "exists": False,
+            "status": "missing",
+            "ok": False,
+            "fresh": False,
+        }
+    try:
+        data = read_json_file(resolved, description="daily check report")
+    except (OSError, ValueError) as exc:
+        return {
+            "path": str(resolved),
+            "exists": True,
+            "status": "fail",
+            "ok": False,
+            "fresh": False,
+            "error": _error_message(exc),
+        }
+    generated_at = data.get("generated_at") if isinstance(data, dict) else None
+    age_seconds = _age_seconds(generated_at, now=now)
+    summary = data.get("summary") if isinstance(data, dict) else {}
+    action_queue = data.get("action_queue") if isinstance(data, dict) else {}
+    return {
+        "path": str(resolved),
+        "exists": True,
+        "schema": data.get("schema") if isinstance(data, dict) else None,
+        "ok": bool(data.get("ok")) if isinstance(data, dict) else False,
+        "status": data.get("status", "unknown") if isinstance(data, dict) else "unknown",
+        "generated_at": generated_at,
+        "age_seconds": age_seconds,
+        "fresh": age_seconds is not None and age_seconds <= freshness_seconds,
+        "can_continue_without_partner": (summary or {}).get("can_continue_without_partner"),
+        "recommended_next_action": (summary or {}).get("recommended_next_action"),
+        "top_queued_action": ((action_queue or {}).get("next_action") or {}).get("action_id"),
+    }
+
+
+def _query_daily_check_task(task_name: str | None, *, enabled: bool) -> dict[str, Any]:
+    if not enabled:
+        return {
+            "configured": bool(task_name),
+            "task_name": task_name,
+            "queried": False,
+            "status": "skipped",
+            "ok": None,
+        }
+    if not task_name:
+        return {
+            "configured": False,
+            "task_name": None,
+            "queried": False,
+            "status": "not_configured",
+            "ok": None,
+        }
+    if os.name != "nt":
+        return {
+            "configured": True,
+            "task_name": task_name,
+            "queried": False,
+            "status": "unsupported",
+            "ok": None,
+            "message": "Windows Scheduled Tasks are only available on Windows.",
+        }
+    try:
+        completed = subprocess.run(
+            ["schtasks.exe", "/Query", "/TN", task_name, "/FO", "LIST", "/V"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except OSError as exc:
+        return {
+            "configured": True,
+            "task_name": task_name,
+            "queried": True,
+            "status": "fail",
+            "ok": False,
+            "error": _error_message(exc),
+        }
+    fields = _parse_schtasks_list(completed.stdout)
+    if completed.returncode != 0:
+        return {
+            "configured": True,
+            "task_name": task_name,
+            "queried": True,
+            "status": "missing",
+            "ok": False,
+            "returncode": completed.returncode,
+            "stderr": completed.stderr.strip(),
+        }
+    last_result = fields.get("Last Result") or fields.get("Last Run Result")
+    return {
+        "configured": True,
+        "task_name": task_name,
+        "queried": True,
+        "status": "pass",
+        "ok": True,
+        "returncode": completed.returncode,
+        "task_status": fields.get("Status"),
+        "next_run_time": fields.get("Next Run Time"),
+        "last_run_time": fields.get("Last Run Time"),
+        "last_result": last_result,
+    }
+
+
+def _parse_schtasks_list(text: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        if key:
+            fields[key] = value.strip()
+    return fields
+
+
+def _daily_check_automation_status(report: dict[str, Any], task: dict[str, Any]) -> str:
+    if report.get("exists") and report.get("status") == "fail":
+        return "fail"
+    if not report.get("exists"):
+        return "missing"
+    if not report.get("fresh"):
+        return "stale"
+    if task.get("ok") is False:
+        return "warn"
+    if report.get("ok"):
+        return "pass"
+    return "warn"
+
+
 def _update_console_history(history_path: Path, report: dict[str, Any], *, limit: int) -> dict[str, Any]:
     previous_entries = _read_history_entries(history_path)
     previous_entry = previous_entries[0] if previous_entries else None
@@ -893,6 +1100,7 @@ def _history_entry(report: dict[str, Any]) -> dict[str, Any]:
     lanes = report.get("lanes") or {}
     privacy = report.get("privacy_scan") or {}
     stale_reports = report.get("stale_reports") or {}
+    daily_check = report.get("daily_check_automation") or {}
     return {
         "generated_at": report.get("generated_at"),
         "status": report.get("status"),
@@ -902,6 +1110,8 @@ def _history_entry(report: dict[str, Any]) -> dict[str, Any]:
         "backup_ready": (lanes.get("backup") or {}).get("ready"),
         "privacy_status": privacy.get("status"),
         "privacy_findings": privacy.get("finding_count"),
+        "daily_check_status": daily_check.get("status"),
+        "daily_check_report_status": (daily_check.get("report") or {}).get("status"),
         "stale_report_candidates": stale_reports.get("candidate_count"),
     }
 
@@ -917,6 +1127,8 @@ def _history_changes(previous: dict[str, Any] | None, current: dict[str, Any]) -
         "backup_ready": "backup_ready",
         "privacy_status": "privacy_status",
         "privacy_findings": "privacy_findings",
+        "daily_check_status": "daily_check_status",
+        "daily_check_report_status": "daily_check_report_status",
         "stale_report_candidates": "stale_report_candidates",
     }
     changes = []
@@ -1036,6 +1248,7 @@ def _operator_summary(
     reliability: dict[str, Any],
     privacy_scan: dict[str, Any],
     partner_autopilot: dict[str, Any],
+    daily_check: dict[str, Any],
     skip_network_checks: bool,
 ) -> dict[str, Any]:
     primary_ready = bool(primary.get("ready"))
@@ -1056,6 +1269,10 @@ def _operator_summary(
         warnings.append("partner autopilot report is stale or missing")
     if partner_autopilot.get("configured") and not partner_autopilot.get("ok"):
         warnings.append("partner autopilot report is failing")
+    if daily_check.get("status") in {"missing", "stale"}:
+        warnings.append(f"daily check automation is {daily_check.get('status')}")
+    elif daily_check.get("status") in {"warn", "fail"}:
+        warnings.append("daily check automation is not healthy")
     if not backup.get("configured"):
         warnings.append("backup invite is not configured")
     if not privacy_ok:
@@ -1186,6 +1403,31 @@ def _action_queue_rows(action_queue: dict[str, Any]) -> str:
     if rows:
         return "\n".join(rows)
     return '<tr><td colspan="5">No queued actions.</td></tr>'
+
+
+def _daily_check_automation_table(daily_check: dict[str, Any]) -> str:
+    report = daily_check.get("report") or {}
+    task = daily_check.get("task") or {}
+    rows = [
+        ("Overall", daily_check.get("status", "unknown")),
+        ("Task query", task.get("status", "unknown")),
+        ("Task state", task.get("task_status") or "-"),
+        ("Next run", task.get("next_run_time") or "-"),
+        ("Last run", task.get("last_run_time") or "-"),
+        ("Last result", task.get("last_result") or "-"),
+        ("Daily report", report.get("status", "unknown")),
+        ("Report fresh", _yes_no(report.get("fresh"))),
+        ("Report generated", report.get("generated_at") or "-"),
+        ("Report path", report.get("path") or "-"),
+    ]
+    body = "\n".join(
+        "<tr>"
+        f"<th>{html.escape(str(label))}</th>"
+        f"<td>{html.escape(str(value))}</td>"
+        "</tr>"
+        for label, value in rows
+    )
+    return f"<table><tbody>{body}</tbody></table>"
 
 
 def _lane_brief(lane: dict[str, Any]) -> str:

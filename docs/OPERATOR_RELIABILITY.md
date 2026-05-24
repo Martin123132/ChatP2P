@@ -68,6 +68,7 @@ python -m chatp2p.cli operator console `
   --expected-primary-worker-id worker_... `
   --expected-backup-worker-id worker_... `
   --reliability-dir D:\ChatP2PData\reliability-pack-live `
+  --daily-check-dir D:\ChatP2PData\daily-check `
   --out D:\ChatP2PData\operator-console
 ```
 
@@ -79,7 +80,7 @@ The console is read-only. It does not create jobs, restart workers, or require p
 - `D:\ChatP2PData\operator-console\operator-console-history.json`
 - `D:\ChatP2PData\operator-console\operator-console-cleanup-plan.ps1`
 
-Use `summary.can_continue_without_partner`, `summary.recommended_next_action`, and `action_queue.next_action` as the quick decision fields. The HTML report includes the ranked action queue so ordinary warnings do not become accidental blockers. The history file records previous console summaries so the report can show what changed since the last run. The cleanup plan lists stale report/proof artifacts for review only; it never deletes files automatically.
+Use `summary.can_continue_without_partner`, `summary.recommended_next_action`, and `action_queue.next_action` as the quick decision fields. The HTML report includes the ranked action queue and scheduled daily-check health so ordinary warnings do not become accidental blockers. The history file records previous console summaries so the report can show what changed since the last run. The cleanup plan lists stale report/proof artifacts for review only; it never deletes files automatically.
 
 ## Daily Check
 

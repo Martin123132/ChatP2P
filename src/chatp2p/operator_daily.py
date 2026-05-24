@@ -81,6 +81,7 @@ def run_operator_daily_check(config: OperatorDailyCheckConfig) -> dict[str, Any]
             stale_report_root=config.stale_report_root,
             stale_report_days=config.stale_report_days,
             stale_report_max_items=config.stale_report_max_items,
+            daily_check_dir=out_dir,
         )
     )
     summary = _daily_summary(

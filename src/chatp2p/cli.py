@@ -384,6 +384,9 @@ def operator_console_command(args: argparse.Namespace) -> None:
                 stale_report_root=Path(args.stale_report_root) if args.stale_report_root else None,
                 stale_report_days=args.stale_report_days,
                 stale_report_max_items=args.stale_report_max_items,
+                daily_check_dir=Path(args.daily_check_dir) if args.daily_check_dir else None,
+                daily_check_task_name=args.daily_check_task_name,
+                query_daily_check_task=not args.skip_daily_check_task_query,
             )
         )
     except (OSError, ValueError) as exc:
@@ -2495,6 +2498,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=50,
         type=int,
         help="Maximum stale report candidates to include",
+    )
+    operator_console_parser.add_argument(
+        "--daily-check-dir",
+        default=None,
+        help="Directory containing daily-check.json. Defaults to HOME parent/daily-check",
+    )
+    operator_console_parser.add_argument(
+        "--daily-check-task-name",
+        default=DEFAULT_DAILY_CHECK_TASK_NAME,
+        help="Windows Scheduled Task name for the hourly daily check",
+    )
+    operator_console_parser.add_argument(
+        "--skip-daily-check-task-query",
+        action="store_true",
+        help="Skip querying Windows Scheduled Tasks for the daily check task",
     )
     operator_console_parser.add_argument("--json", action="store_true", help="Print the full JSON report")
     operator_console_parser.set_defaults(func=operator_console_command)

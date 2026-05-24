@@ -133,6 +133,58 @@ def test_operator_console_can_continue_on_backup_lane(monkeypatch, tmp_path):
     assert report["action_queue"]["next_action"]["partner_required"] is False
 
 
+def test_operator_console_reports_daily_check_automation(monkeypatch, tmp_path):
+    repo = _clean_repo(tmp_path)
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    invite_path = private_dir / "primary-alpha-invite.json"
+    write_alpha_invite(
+        invite_path,
+        AlphaInvite.create(coordinator="http://127.0.0.1:8765", admission_token="secret-token-123456"),
+    )
+    reliability_dir = tmp_path / "reliability-pack"
+    reliability_dir.mkdir()
+    _write_reliability_summary(reliability_dir, can_continue=True)
+    daily_dir = tmp_path / "daily-check"
+    daily_dir.mkdir()
+    _write_daily_check_report(daily_dir)
+
+    monkeypatch.setattr(
+        "chatp2p.operator_console._query_daily_check_task",
+        lambda task_name, *, enabled: {
+            "configured": True,
+            "task_name": task_name,
+            "queried": enabled,
+            "status": "pass",
+            "ok": True,
+            "task_status": "Ready",
+            "next_run_time": "24/05/2026 03:20:00",
+            "last_run_time": "24/05/2026 02:20:00",
+            "last_result": "0",
+        },
+    )
+
+    report = run_operator_console(
+        OperatorConsoleConfig(
+            repo=repo,
+            home=tmp_path / ".mesh",
+            primary_invite_path=invite_path,
+            reliability_dir=reliability_dir,
+            out_dir=tmp_path / "operator-console",
+            daily_check_dir=daily_dir,
+            skip_network_checks=True,
+        )
+    )
+
+    daily_check = report["daily_check_automation"]
+    assert daily_check["status"] == "pass"
+    assert daily_check["task"]["task_status"] == "Ready"
+    assert daily_check["report"]["recommended_next_action"] == "continue_development"
+    html_report = Path(report["artifacts"]["html"]).read_text(encoding="utf-8")
+    assert "Scheduled Automation" in html_report
+    assert "Daily check automation" in html_report
+
+
 def test_operator_console_without_reliability_pack_still_gives_next_step(monkeypatch, tmp_path):
     repo = _clean_repo(tmp_path)
     private_dir = tmp_path / "private"
@@ -295,6 +347,11 @@ def test_operator_console_cli_parses(tmp_path):
             "7",
             "--stale-report-max-items",
             "12",
+            "--daily-check-dir",
+            str(tmp_path / "daily-check"),
+            "--daily-check-task-name",
+            "ChatP2P Daily Check Test",
+            "--skip-daily-check-task-query",
             "--json",
         ]
     )
@@ -305,6 +362,9 @@ def test_operator_console_cli_parses(tmp_path):
     assert args.history_limit == 5
     assert args.stale_report_days == 7
     assert args.stale_report_max_items == 12
+    assert args.daily_check_dir == str(tmp_path / "daily-check")
+    assert args.daily_check_task_name == "ChatP2P Daily Check Test"
+    assert args.skip_daily_check_task_query is True
 
 
 def _clean_repo(tmp_path):
@@ -334,3 +394,24 @@ def _write_reliability_summary(path, *, can_continue):
         },
     }
     (path / "reliability-summary.json").write_text(json.dumps(report), encoding="utf-8")
+
+
+def _write_daily_check_report(path):
+    report = {
+        "schema": "chatp2p.operator-daily-check-report.v1",
+        "ok": True,
+        "status": "pass",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": {
+            "can_continue_without_partner": True,
+            "recommended_next_action": "continue_development",
+            "warnings": [],
+            "errors": [],
+        },
+        "action_queue": {
+            "next_action": {
+                "action_id": "continue_development",
+            }
+        },
+    }
+    (path / "daily-check.json").write_text(json.dumps(report), encoding="utf-8")
