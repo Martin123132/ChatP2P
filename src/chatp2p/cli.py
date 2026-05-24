@@ -69,6 +69,8 @@ from .operator_config import OperatorConfig, write_operator_config
 from .operator_actions import (
     build_operator_action_queue,
     format_operator_action_queue_summary,
+    format_operator_action_run_summary,
+    run_operator_action,
     write_operator_action_queue,
 )
 from .operator_console import OperatorConsoleConfig, format_operator_console_summary, run_operator_console
@@ -457,6 +459,34 @@ def operator_action_queue_command(args: argparse.Namespace) -> None:
     else:
         print(format_operator_action_queue_summary(queue))
     if queue["status"] == "fail":
+        raise SystemExit(1)
+
+
+def operator_run_action_command(args: argparse.Namespace) -> None:
+    if args.execute and args.dry_run:
+        raise SystemExit("--execute and --dry-run cannot be used together")
+    queue_path = Path(args.queue)
+    try:
+        queue = read_json_file(queue_path, description="operator action queue")
+        if not isinstance(queue, dict):
+            raise ValueError("operator action queue must be a JSON object")
+        report = run_operator_action(
+            queue,
+            queue_path=queue_path,
+            action_id=args.action,
+            command_index=args.command_index,
+            dry_run=not args.execute,
+            out_path=Path(args.out) if args.out else None,
+            cwd=Path(args.cwd) if args.cwd else None,
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_operator_action_run_summary(report))
+    if report["status"] == "fail":
         raise SystemExit(1)
 
 
@@ -2651,6 +2681,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     operator_action_queue_parser.add_argument("--json", action="store_true", help="Print the full JSON action queue")
     operator_action_queue_parser.set_defaults(func=operator_action_queue_command)
+
+    operator_run_action_parser = operator_subcommands.add_parser(
+        "run-action",
+        help="Dry-run or execute an allowlisted suggested command from action-queue.json",
+    )
+    operator_run_action_parser.add_argument("--queue", required=True, help="Path to action-queue.json")
+    operator_run_action_parser.add_argument(
+        "--action",
+        default=None,
+        help="Action id to run. Defaults to the queue's next_action",
+    )
+    operator_run_action_parser.add_argument(
+        "--command-index",
+        default=0,
+        type=int,
+        help="Suggested command index to use for the selected action",
+    )
+    operator_run_action_parser.add_argument(
+        "--out",
+        default=None,
+        help="Path for operator-action-run-report.json. Defaults next to the queue",
+    )
+    operator_run_action_parser.add_argument(
+        "--cwd",
+        default=None,
+        help="Working directory for --execute. Defaults to the current directory",
+    )
+    operator_run_action_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview the selected allowlisted command without executing it. This is the default",
+    )
+    operator_run_action_parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually run the selected allowlisted local operator command",
+    )
+    operator_run_action_parser.add_argument("--json", action="store_true", help="Print the full JSON run report")
+    operator_run_action_parser.set_defaults(func=operator_run_action_command)
 
     operator_install_daily_check_task_parser = operator_subcommands.add_parser(
         "install-daily-check-task",

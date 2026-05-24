@@ -87,6 +87,16 @@ python -m chatp2p.cli operator action-queue `
   --out D:\ChatP2PData\daily-check
 ```
 
+You can safely preview the next suggested action without running it:
+
+```powershell
+python -m chatp2p.cli operator run-action `
+  --queue D:\ChatP2PData\operator-console\action-queue.json `
+  --dry-run
+```
+
+`run-action` executes only structured, allowlisted local operator commands when `--execute` is supplied. It refuses free-form shell strings and partner-required actions.
+
 Install the same check as a local hourly Windows task when you want the workstation to keep producing a fresh operator answer:
 
 ```powershell

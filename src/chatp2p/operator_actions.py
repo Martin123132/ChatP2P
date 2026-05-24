@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 OPERATOR_ACTION_QUEUE_SCHEMA = "chatp2p.operator-action-queue.v1"
+OPERATOR_ACTION_RUN_REPORT_SCHEMA = "chatp2p.operator-action-run-report.v1"
+ALLOWED_RUN_ACTION_OPERATOR_COMMANDS = {
+    "console",
+    "daily-check",
+    "privacy-scan",
+    "reliability-pack",
+}
 
 
 _RECOMMENDED_ACTIONS: dict[str, dict[str, Any]] = {
@@ -346,8 +355,9 @@ def _suggested_commands_for_action(action_id: str, report: dict[str, Any]) -> li
     commands: list[dict[str, str]] = []
     if action_id == "fix_public_privacy_findings":
         command = _privacy_scan_command(report)
+        argv = _privacy_scan_argv(report)
         if command:
-            commands.append(_command("Run public privacy scan", command))
+            commands.append(_command("Run public privacy scan", command, argv=argv))
     elif action_id in {
         "run_reliability_pack_when_ready",
         "refresh_reliability_pack",
@@ -355,29 +365,36 @@ def _suggested_commands_for_action(action_id: str, report: dict[str, Any]) -> li
         "repair_reliability_pack",
     }:
         command = _reliability_pack_command(report)
+        argv = _reliability_pack_argv(report)
         if command:
-            commands.append(_command("Refresh reliability pack", command))
+            commands.append(_command("Refresh reliability pack", command, argv=argv))
     elif action_id in {"rerun_console_with_network_checks", "repair_operator_console"}:
         command = _operator_console_command(report, include_skip_network_checks=False)
+        argv = _operator_console_argv(report, include_skip_network_checks=False)
         if command:
-            commands.append(_command("Regenerate Operator Console", command))
+            commands.append(_command("Regenerate Operator Console", command, argv=argv))
     elif action_id.startswith("review_warning_daily_check_automation"):
         command = _daily_check_command(report)
+        argv = _daily_check_argv(report)
         if command:
-            commands.append(_command("Run daily check now", command))
+            commands.append(_command("Run daily check now", command, argv=argv))
     elif action_id == "continue_development":
         command = _privacy_scan_command(report)
+        argv = _privacy_scan_argv(report)
         if command:
-            commands.append(_command("Recheck privacy before committing", command))
+            commands.append(_command("Recheck privacy before committing", command, argv=argv))
     return commands
 
 
-def _command(label: str, command: str) -> dict[str, str]:
-    return {
+def _command(label: str, command: str, *, argv: list[str] | None = None) -> dict[str, Any]:
+    spec: dict[str, Any] = {
         "label": label,
         "shell": "powershell",
         "command": command,
     }
+    if argv:
+        spec["argv"] = [str(item) for item in argv]
+    return spec
 
 
 def _privacy_scan_command(report: dict[str, Any]) -> str | None:
@@ -385,6 +402,13 @@ def _privacy_scan_command(report: dict[str, Any]) -> str | None:
     if not repo:
         return None
     return f"python -m chatp2p.cli operator privacy-scan --root {_ps(repo)}"
+
+
+def _privacy_scan_argv(report: dict[str, Any]) -> list[str] | None:
+    repo = _config_value(report, "repo")
+    if not repo:
+        return None
+    return ["python", "-m", "chatp2p.cli", "operator", "privacy-scan", "--root", str(repo)]
 
 
 def _reliability_pack_command(report: dict[str, Any]) -> str | None:
@@ -406,6 +430,33 @@ def _reliability_pack_command(report: dict[str, Any]) -> str | None:
         lines.append(f"  --expected-backup-worker-id {_ps(backup_worker)} `")
     lines.append(f"  --out {_ps(reliability_dir)}")
     return "\n".join(lines)
+
+
+def _reliability_pack_argv(report: dict[str, Any]) -> list[str] | None:
+    primary_invite = _config_value(report, "primary_invite_path")
+    backup_invite = _config_value(report, "backup_invite_path")
+    reliability_dir = _config_value(report, "reliability_dir")
+    if not primary_invite or not backup_invite or not reliability_dir:
+        return None
+    argv = [
+        "python",
+        "-m",
+        "chatp2p.cli",
+        "operator",
+        "reliability-pack",
+        "--primary-invite",
+        str(primary_invite),
+        "--backup-invite",
+        str(backup_invite),
+    ]
+    primary_worker = _config_value(report, "expected_primary_worker_id")
+    backup_worker = _config_value(report, "expected_backup_worker_id")
+    if primary_worker:
+        argv.extend(["--expected-primary-worker-id", str(primary_worker)])
+    if backup_worker:
+        argv.extend(["--expected-backup-worker-id", str(backup_worker)])
+    argv.extend(["--out", str(reliability_dir)])
+    return argv
 
 
 def _operator_console_command(report: dict[str, Any], *, include_skip_network_checks: bool) -> str | None:
@@ -442,6 +493,47 @@ def _operator_console_command(report: dict[str, Any], *, include_skip_network_ch
     return "\n".join(lines)
 
 
+def _operator_console_argv(report: dict[str, Any], *, include_skip_network_checks: bool) -> list[str] | None:
+    repo = _config_value(report, "repo")
+    home = _config_value(report, "home")
+    primary_invite = _config_value(report, "primary_invite_path")
+    out_dir = _config_value(report, "console_out_dir") or _config_value(report, "out_dir")
+    if not repo or not home or not primary_invite or not out_dir:
+        return None
+    argv = [
+        "python",
+        "-m",
+        "chatp2p.cli",
+        "operator",
+        "console",
+        "--repo",
+        str(repo),
+        "--home",
+        str(home),
+        "--primary-invite",
+        str(primary_invite),
+    ]
+    backup_invite = _config_value(report, "backup_invite_path")
+    reliability_dir = _config_value(report, "reliability_dir")
+    daily_check_dir = _config_value(report, "daily_check_dir") or _daily_out_dir(report)
+    primary_worker = _config_value(report, "expected_primary_worker_id")
+    backup_worker = _config_value(report, "expected_backup_worker_id")
+    if backup_invite:
+        argv.extend(["--backup-invite", str(backup_invite)])
+    if primary_worker:
+        argv.extend(["--expected-primary-worker-id", str(primary_worker)])
+    if backup_worker:
+        argv.extend(["--expected-backup-worker-id", str(backup_worker)])
+    if reliability_dir:
+        argv.extend(["--reliability-dir", str(reliability_dir)])
+    if daily_check_dir:
+        argv.extend(["--daily-check-dir", str(daily_check_dir)])
+    if include_skip_network_checks and _config_value(report, "skip_network_checks"):
+        argv.append("--skip-network-checks")
+    argv.extend(["--out", str(out_dir)])
+    return argv
+
+
 def _daily_check_command(report: dict[str, Any]) -> str | None:
     repo = _config_value(report, "repo")
     home = _config_value(report, "home")
@@ -470,6 +562,195 @@ def _daily_check_command(report: dict[str, Any]) -> str | None:
     else:
         lines[-1] = lines[-1].rstrip(" `")
     return "\n".join(lines)
+
+
+def _daily_check_argv(report: dict[str, Any]) -> list[str] | None:
+    repo = _config_value(report, "repo")
+    home = _config_value(report, "home")
+    primary_invite = _config_value(report, "primary_invite_path")
+    out_dir = _daily_out_dir(report)
+    if not repo or not home or not primary_invite or not out_dir:
+        return None
+    argv = [
+        "python",
+        "-m",
+        "chatp2p.cli",
+        "operator",
+        "daily-check",
+        "--repo",
+        str(repo),
+        "--home",
+        str(home),
+        "--primary-invite",
+        str(primary_invite),
+    ]
+    backup_invite = _config_value(report, "backup_invite_path")
+    reliability_dir = _config_value(report, "reliability_dir")
+    console_out = _config_value(report, "console_out_dir") or (
+        _config_value(report, "out_dir") if report.get("schema") == "chatp2p.operator-console-report.v1" else None
+    )
+    if backup_invite:
+        argv.extend(["--backup-invite", str(backup_invite)])
+    if reliability_dir:
+        argv.extend(["--reliability-dir", str(reliability_dir)])
+    argv.extend(["--out", str(out_dir)])
+    if console_out:
+        argv.extend(["--console-out", str(console_out)])
+    return argv
+
+
+def run_operator_action(
+    queue: dict[str, Any],
+    *,
+    queue_path: Path,
+    action_id: str | None = None,
+    command_index: int = 0,
+    dry_run: bool = True,
+    out_path: Path | None = None,
+    cwd: Path | None = None,
+) -> dict[str, Any]:
+    started_at = time.time()
+    selected_action = _select_action(queue, action_id)
+    selected_command = _select_command(selected_action, command_index)
+    argv = _validated_action_argv(selected_command)
+    command_preview = selected_command.get("command")
+    report_path = out_path or queue_path.expanduser().resolve().parent / "operator-action-run-report.json"
+    run_cwd = cwd.expanduser().resolve() if cwd is not None else Path.cwd()
+    execution: dict[str, Any] = {
+        "attempted": False,
+        "dry_run": dry_run,
+    }
+
+    errors: list[str] = []
+    status = "dry_run"
+    ok = True
+    if not dry_run:
+        execution = _execute_action_argv(argv, cwd=run_cwd)
+        ok = bool(execution.get("ok"))
+        status = "pass" if ok else "fail"
+        if not ok:
+            errors.append(f"command returned {execution.get('returncode')}")
+
+    report = {
+        "schema": OPERATOR_ACTION_RUN_REPORT_SCHEMA,
+        "ok": ok,
+        "status": status,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(time.time() - started_at, 3),
+        "queue_path": str(queue_path.expanduser().resolve()),
+        "action": {
+            "action_id": selected_action.get("action_id"),
+            "rank": selected_action.get("rank"),
+            "severity": selected_action.get("severity"),
+            "partner_required": selected_action.get("partner_required"),
+            "can_run_without_partner": selected_action.get("can_run_without_partner"),
+            "title": selected_action.get("title"),
+        },
+        "command": {
+            "index": command_index,
+            "label": selected_command.get("label"),
+            "shell": selected_command.get("shell"),
+            "preview": command_preview,
+            "argv": argv,
+            "allowlist": sorted(ALLOWED_RUN_ACTION_OPERATOR_COMMANDS),
+        },
+        "execution": execution,
+        "errors": errors,
+        "artifacts": {
+            "json": str(report_path.expanduser().resolve()),
+        },
+    }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    return report
+
+
+def format_operator_action_run_summary(report: dict[str, Any]) -> str:
+    action = report.get("action") or {}
+    command = report.get("command") or {}
+    execution = report.get("execution") or {}
+    return "\n".join(
+        [
+            f"ChatP2P action run: {str(report.get('status', 'unknown')).upper()}",
+            f"Action: {action.get('action_id', 'unknown')}",
+            f"Dry run: {_yes_no(execution.get('dry_run'))}",
+            f"Command: {command.get('label', 'unknown')}",
+            f"Attempted: {_yes_no(execution.get('attempted'))}",
+            f"Report: {(report.get('artifacts') or {}).get('json')}",
+        ]
+    )
+
+
+def _select_action(queue: dict[str, Any], action_id: str | None) -> dict[str, Any]:
+    actions = queue.get("actions")
+    if not isinstance(actions, list):
+        raise ValueError("action queue must contain an actions list")
+    selected_id = action_id
+    if not selected_id:
+        next_action = queue.get("next_action") if isinstance(queue.get("next_action"), dict) else {}
+        selected_id = next_action.get("action_id")
+    for action in actions:
+        if isinstance(action, dict) and action.get("action_id") == selected_id:
+            if action.get("partner_required"):
+                raise ValueError(f"action requires partner involvement and cannot be run locally: {selected_id}")
+            return action
+    raise ValueError(f"action not found in queue: {selected_id}")
+
+
+def _select_command(action: dict[str, Any], command_index: int) -> dict[str, Any]:
+    if command_index < 0:
+        raise ValueError("--command-index cannot be negative")
+    commands = action.get("suggested_commands")
+    if not isinstance(commands, list) or not commands:
+        raise ValueError(f"action has no suggested commands: {action.get('action_id')}")
+    if command_index >= len(commands):
+        raise ValueError(f"action has no suggested command at index {command_index}")
+    command = commands[command_index]
+    if not isinstance(command, dict):
+        raise ValueError(f"suggested command at index {command_index} is not an object")
+    return command
+
+
+def _validated_action_argv(command: dict[str, Any]) -> list[str]:
+    raw_argv = command.get("argv")
+    if not isinstance(raw_argv, list) or not raw_argv:
+        raise ValueError("suggested command is missing structured argv and will not be executed")
+    argv = [str(part) for part in raw_argv]
+    executable_name = Path(argv[0]).name.lower()
+    if not (executable_name in {"py", "py.exe", "python", "python.exe"} or executable_name.startswith("python")):
+        raise ValueError(f"suggested command must use a Python executable, got: {Path(argv[0]).name}")
+    if len(argv) < 5 or argv[1:4] != ["-m", "chatp2p.cli", "operator"]:
+        raise ValueError("suggested command is not a chatp2p operator command")
+    operator_command = argv[4]
+    if operator_command not in ALLOWED_RUN_ACTION_OPERATOR_COMMANDS:
+        raise ValueError(f"operator command is not allowlisted: {operator_command}")
+    risky_flags = {"--admission-token", "--operator-config", "--public-alpha"}
+    present_risky_flags = sorted(flag for flag in risky_flags if flag in argv)
+    if present_risky_flags:
+        raise ValueError(f"suggested command contains disallowed sensitive flag(s): {', '.join(present_risky_flags)}")
+    return argv
+
+
+def _execute_action_argv(argv: list[str], *, cwd: Path) -> dict[str, Any]:
+    started_at = time.time()
+    completed = subprocess.run(
+        argv,
+        cwd=str(cwd),
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=None,
+    )
+    return {
+        "attempted": True,
+        "dry_run": False,
+        "cwd": str(cwd),
+        "returncode": completed.returncode,
+        "ok": completed.returncode == 0,
+        "duration_seconds": round(time.time() - started_at, 3),
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+    }
 
 
 def _daily_out_dir(report: dict[str, Any]) -> Any:

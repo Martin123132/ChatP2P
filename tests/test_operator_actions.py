@@ -1,9 +1,11 @@
+import json
 from pathlib import Path
 
 from chatp2p.cli import build_parser
 from chatp2p.operator_actions import (
     build_operator_action_queue,
     format_operator_action_queue_markdown,
+    run_operator_action,
     write_operator_action_queue,
 )
 
@@ -105,6 +107,98 @@ def test_action_queue_writes_json_and_markdown(tmp_path):
     assert "Suggested Commands" in markdown
 
 
+def test_run_action_dry_run_writes_report(tmp_path):
+    queue = build_operator_action_queue(
+        _daily_report(
+            status="pass",
+            can_continue=True,
+            recommended_next_action="continue_development",
+            privacy_ok=True,
+        )
+    )
+    queue_path = tmp_path / "action-queue.json"
+    report_path = tmp_path / "operator-action-run-report.json"
+    queue_path.write_text(json.dumps(queue), encoding="utf-8")
+
+    report = run_operator_action(
+        queue,
+        queue_path=queue_path,
+        action_id="continue_development",
+        dry_run=True,
+        out_path=report_path,
+    )
+
+    assert report["schema"] == "chatp2p.operator-action-run-report.v1"
+    assert report["status"] == "dry_run"
+    assert report["ok"] is True
+    assert report["execution"]["attempted"] is False
+    assert "operator privacy-scan" in report["command"]["preview"]
+    assert report_path.exists()
+
+
+def test_run_action_refuses_unstructured_command(tmp_path):
+    queue = build_operator_action_queue(
+        _daily_report(
+            status="pass",
+            can_continue=True,
+            recommended_next_action="continue_development",
+            privacy_ok=True,
+        )
+    )
+    queue["actions"][0]["suggested_commands"][0].pop("argv")
+
+    try:
+        run_operator_action(queue, queue_path=tmp_path / "action-queue.json")
+    except ValueError as exc:
+        assert "structured argv" in str(exc)
+    else:
+        raise AssertionError("expected run_operator_action to reject command without argv")
+
+
+def test_run_action_refuses_non_allowlisted_operator_command(tmp_path):
+    queue = build_operator_action_queue(
+        _daily_report(
+            status="pass",
+            can_continue=True,
+            recommended_next_action="continue_development",
+            privacy_ok=True,
+        )
+    )
+    queue["actions"][0]["suggested_commands"][0]["argv"] = [
+        "python",
+        "-m",
+        "chatp2p.cli",
+        "operator",
+        "config",
+    ]
+
+    try:
+        run_operator_action(queue, queue_path=tmp_path / "action-queue.json")
+    except ValueError as exc:
+        assert "not allowlisted" in str(exc)
+    else:
+        raise AssertionError("expected run_operator_action to reject non-allowlisted command")
+
+
+def test_run_action_refuses_non_python_executable(tmp_path):
+    queue = build_operator_action_queue(
+        _daily_report(
+            status="pass",
+            can_continue=True,
+            recommended_next_action="continue_development",
+            privacy_ok=True,
+        )
+    )
+    queue["actions"][0]["suggested_commands"][0]["argv"][0] = "cmd.exe"
+
+    try:
+        run_operator_action(queue, queue_path=tmp_path / "action-queue.json")
+    except ValueError as exc:
+        assert "Python executable" in str(exc)
+    else:
+        raise AssertionError("expected run_operator_action to reject non-Python executable")
+
+
 def test_operator_action_queue_cli_parses(tmp_path):
     parser = build_parser()
     args = parser.parse_args(
@@ -122,6 +216,34 @@ def test_operator_action_queue_cli_parses(tmp_path):
     assert args.func.__name__ == "operator_action_queue_command"
     assert args.daily_report == str(tmp_path / "daily-check.json")
     assert args.out == str(tmp_path / "actions")
+    assert args.json is True
+
+
+def test_operator_run_action_cli_parses(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "run-action",
+            "--queue",
+            str(tmp_path / "action-queue.json"),
+            "--action",
+            "continue_development",
+            "--command-index",
+            "0",
+            "--out",
+            str(tmp_path / "operator-action-run-report.json"),
+            "--dry-run",
+            "--json",
+        ]
+    )
+
+    assert args.func.__name__ == "operator_run_action_command"
+    assert args.queue == str(tmp_path / "action-queue.json")
+    assert args.action == "continue_development"
+    assert args.command_index == 0
+    assert args.dry_run is True
+    assert args.execute is False
     assert args.json is True
 
 
