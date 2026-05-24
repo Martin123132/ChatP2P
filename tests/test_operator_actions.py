@@ -23,6 +23,8 @@ def test_action_queue_blocks_on_privacy_findings(tmp_path):
     assert queue["next_action"]["action_id"] == "fix_public_privacy_findings"
     assert queue["next_action"]["partner_required"] is False
     assert queue["next_action"]["can_run_without_partner"] is True
+    assert queue["next_action"]["suggested_commands"][0]["shell"] == "powershell"
+    assert "operator privacy-scan" in queue["next_action"]["suggested_commands"][0]["command"]
 
 
 def test_action_queue_allows_local_development_without_partner(tmp_path):
@@ -60,6 +62,28 @@ def test_action_queue_prioritizes_reliability_refresh_failure(tmp_path):
     assert queue["status"] == "fail"
     assert queue["next_action"]["action_id"] == "repair_reliability_pack"
     assert queue["next_action"]["severity"] == "blocker"
+    assert "operator reliability-pack" in queue["next_action"]["suggested_commands"][0]["command"]
+
+
+def test_action_queue_suggests_daily_check_command_for_daily_check_warning(tmp_path):
+    report = _daily_report(
+        status="warn",
+        can_continue=True,
+        recommended_next_action="continue_development",
+        privacy_ok=True,
+    )
+    report["summary"]["warnings"] = ["daily check automation is stale"]
+
+    queue = build_operator_action_queue(report)
+    daily_action = next(
+        action
+        for action in queue["actions"]
+        if action["action_id"].startswith("review_warning_daily_check_automation")
+    )
+
+    assert daily_action["partner_required"] is False
+    assert "operator daily-check" in daily_action["suggested_commands"][0]["command"]
+    assert "--console-out" in daily_action["suggested_commands"][0]["command"]
 
 
 def test_action_queue_writes_json_and_markdown(tmp_path):
@@ -78,6 +102,7 @@ def test_action_queue_writes_json_and_markdown(tmp_path):
     assert Path(artifacts["json"]).exists()
     assert Path(artifacts["markdown"]).exists()
     assert "continue_development" in markdown
+    assert "Suggested Commands" in markdown
 
 
 def test_operator_action_queue_cli_parses(tmp_path):
@@ -111,6 +136,17 @@ def _daily_report(
         "schema": "chatp2p.operator-daily-check-report.v1",
         "status": status,
         "generated_at": "2026-05-24T00:00:00+00:00",
+        "config": {
+            "repo": "D:\\Projects\\ChatP2P",
+            "home": "D:\\ChatP2PData\\.mesh",
+            "primary_invite_path": "D:\\ChatP2PData\\alpha-invite.json",
+            "backup_invite_path": "D:\\ChatP2PData\\backup-alpha-invite-partner.json",
+            "reliability_dir": "D:\\ChatP2PData\\reliability-pack-live",
+            "out_dir": "D:\\ChatP2PData\\daily-check",
+            "console_out_dir": "D:\\ChatP2PData\\operator-console",
+            "expected_primary_worker_id": "worker_PRIMARY",
+            "expected_backup_worker_id": "worker_BACKUP",
+        },
         "summary": {
             "status": status,
             "can_continue_without_partner": can_continue,

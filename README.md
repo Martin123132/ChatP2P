@@ -77,7 +77,7 @@ python -m chatp2p.cli operator daily-check `
   --console-out D:\ChatP2PData\operator-console
 ```
 
-Daily check writes `daily-check.json`, `daily-check.md`, `action-queue.json`, and `action-queue.md`; runs the privacy gate; updates the Operator Console; and prints one pass/warn/fail answer. It does not refresh reliability proof jobs unless `--refresh-reliability-pack` is passed. The action queue ranks the next local actions and marks whether partner involvement is required.
+Daily check writes `daily-check.json`, `daily-check.md`, `action-queue.json`, and `action-queue.md`; runs the privacy gate; updates the Operator Console; and prints one pass/warn/fail answer. It does not refresh reliability proof jobs unless `--refresh-reliability-pack` is passed. The action queue ranks the next local actions, marks whether partner involvement is required, and includes token-free suggested PowerShell commands for common local follow-ups.
 
 You can regenerate the queue from an existing daily report:
 

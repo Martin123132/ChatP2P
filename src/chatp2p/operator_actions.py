@@ -170,6 +170,7 @@ def build_operator_action_queue(daily_report: dict[str, Any]) -> dict[str, Any]:
         )
 
     actions = _ranked_unique(actions)
+    _attach_suggested_commands(actions, daily_report)
     return {
         "schema": OPERATOR_ACTION_QUEUE_SCHEMA,
         "generated_at": daily_report.get("generated_at") or datetime.now(timezone.utc).isoformat(),
@@ -260,6 +261,10 @@ def format_operator_action_queue_markdown(queue: dict[str, Any]) -> str:
             )
             + " |"
         )
+    command_sections = _action_command_sections(queue)
+    if command_sections:
+        lines.extend(["", "## Suggested Commands", ""])
+        lines.extend(command_sections)
     lines.append("")
     return "\n".join(lines)
 
@@ -328,6 +333,182 @@ def _ranked_unique(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for index, action in enumerate(ranked, start=1):
         action["rank"] = index
     return ranked
+
+
+def _attach_suggested_commands(actions: list[dict[str, Any]], report: dict[str, Any]) -> None:
+    for action in actions:
+        commands = _suggested_commands_for_action(str(action.get("action_id") or ""), report)
+        if commands:
+            action["suggested_commands"] = commands
+
+
+def _suggested_commands_for_action(action_id: str, report: dict[str, Any]) -> list[dict[str, str]]:
+    commands: list[dict[str, str]] = []
+    if action_id == "fix_public_privacy_findings":
+        command = _privacy_scan_command(report)
+        if command:
+            commands.append(_command("Run public privacy scan", command))
+    elif action_id in {
+        "run_reliability_pack_when_ready",
+        "refresh_reliability_pack",
+        "repair_lane_then_rerun_reliability_pack",
+        "repair_reliability_pack",
+    }:
+        command = _reliability_pack_command(report)
+        if command:
+            commands.append(_command("Refresh reliability pack", command))
+    elif action_id in {"rerun_console_with_network_checks", "repair_operator_console"}:
+        command = _operator_console_command(report, include_skip_network_checks=False)
+        if command:
+            commands.append(_command("Regenerate Operator Console", command))
+    elif action_id.startswith("review_warning_daily_check_automation"):
+        command = _daily_check_command(report)
+        if command:
+            commands.append(_command("Run daily check now", command))
+    elif action_id == "continue_development":
+        command = _privacy_scan_command(report)
+        if command:
+            commands.append(_command("Recheck privacy before committing", command))
+    return commands
+
+
+def _command(label: str, command: str) -> dict[str, str]:
+    return {
+        "label": label,
+        "shell": "powershell",
+        "command": command,
+    }
+
+
+def _privacy_scan_command(report: dict[str, Any]) -> str | None:
+    repo = _config_value(report, "repo")
+    if not repo:
+        return None
+    return f"python -m chatp2p.cli operator privacy-scan --root {_ps(repo)}"
+
+
+def _reliability_pack_command(report: dict[str, Any]) -> str | None:
+    primary_invite = _config_value(report, "primary_invite_path")
+    backup_invite = _config_value(report, "backup_invite_path")
+    reliability_dir = _config_value(report, "reliability_dir")
+    if not primary_invite or not backup_invite or not reliability_dir:
+        return None
+    lines = [
+        "python -m chatp2p.cli operator reliability-pack `",
+        f"  --primary-invite {_ps(primary_invite)} `",
+        f"  --backup-invite {_ps(backup_invite)} `",
+    ]
+    primary_worker = _config_value(report, "expected_primary_worker_id")
+    backup_worker = _config_value(report, "expected_backup_worker_id")
+    if primary_worker:
+        lines.append(f"  --expected-primary-worker-id {_ps(primary_worker)} `")
+    if backup_worker:
+        lines.append(f"  --expected-backup-worker-id {_ps(backup_worker)} `")
+    lines.append(f"  --out {_ps(reliability_dir)}")
+    return "\n".join(lines)
+
+
+def _operator_console_command(report: dict[str, Any], *, include_skip_network_checks: bool) -> str | None:
+    repo = _config_value(report, "repo")
+    home = _config_value(report, "home")
+    primary_invite = _config_value(report, "primary_invite_path")
+    out_dir = _config_value(report, "console_out_dir") or _config_value(report, "out_dir")
+    if not repo or not home or not primary_invite or not out_dir:
+        return None
+    lines = [
+        "python -m chatp2p.cli operator console `",
+        f"  --repo {_ps(repo)} `",
+        f"  --home {_ps(home)} `",
+        f"  --primary-invite {_ps(primary_invite)} `",
+    ]
+    backup_invite = _config_value(report, "backup_invite_path")
+    reliability_dir = _config_value(report, "reliability_dir")
+    daily_check_dir = _config_value(report, "daily_check_dir") or _daily_out_dir(report)
+    primary_worker = _config_value(report, "expected_primary_worker_id")
+    backup_worker = _config_value(report, "expected_backup_worker_id")
+    if backup_invite:
+        lines.append(f"  --backup-invite {_ps(backup_invite)} `")
+    if primary_worker:
+        lines.append(f"  --expected-primary-worker-id {_ps(primary_worker)} `")
+    if backup_worker:
+        lines.append(f"  --expected-backup-worker-id {_ps(backup_worker)} `")
+    if reliability_dir:
+        lines.append(f"  --reliability-dir {_ps(reliability_dir)} `")
+    if daily_check_dir:
+        lines.append(f"  --daily-check-dir {_ps(daily_check_dir)} `")
+    if include_skip_network_checks and _config_value(report, "skip_network_checks"):
+        lines.append("  --skip-network-checks `")
+    lines.append(f"  --out {_ps(out_dir)}")
+    return "\n".join(lines)
+
+
+def _daily_check_command(report: dict[str, Any]) -> str | None:
+    repo = _config_value(report, "repo")
+    home = _config_value(report, "home")
+    primary_invite = _config_value(report, "primary_invite_path")
+    out_dir = _daily_out_dir(report)
+    if not repo or not home or not primary_invite or not out_dir:
+        return None
+    lines = [
+        "python -m chatp2p.cli operator daily-check `",
+        f"  --repo {_ps(repo)} `",
+        f"  --home {_ps(home)} `",
+        f"  --primary-invite {_ps(primary_invite)} `",
+    ]
+    backup_invite = _config_value(report, "backup_invite_path")
+    reliability_dir = _config_value(report, "reliability_dir")
+    console_out = _config_value(report, "console_out_dir") or (
+        _config_value(report, "out_dir") if report.get("schema") == "chatp2p.operator-console-report.v1" else None
+    )
+    if backup_invite:
+        lines.append(f"  --backup-invite {_ps(backup_invite)} `")
+    if reliability_dir:
+        lines.append(f"  --reliability-dir {_ps(reliability_dir)} `")
+    lines.append(f"  --out {_ps(out_dir)} `")
+    if console_out:
+        lines.append(f"  --console-out {_ps(console_out)}")
+    else:
+        lines[-1] = lines[-1].rstrip(" `")
+    return "\n".join(lines)
+
+
+def _daily_out_dir(report: dict[str, Any]) -> Any:
+    daily_check = report.get("daily_check_automation") if isinstance(report.get("daily_check_automation"), dict) else {}
+    return _config_value(report, "daily_check_dir") or daily_check.get("daily_check_dir") or (
+        _config_value(report, "out_dir") if report.get("schema") == "chatp2p.operator-daily-check-report.v1" else None
+    )
+
+
+def _config_value(report: dict[str, Any], key: str) -> Any:
+    config = report.get("config")
+    if not isinstance(config, dict):
+        return None
+    value = config.get(key)
+    if value in ("", None):
+        return None
+    return value
+
+
+def _ps(value: Any) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _action_command_sections(queue: dict[str, Any]) -> list[str]:
+    sections: list[str] = []
+    for action in queue.get("actions") or []:
+        commands = action.get("suggested_commands") or []
+        if not commands:
+            continue
+        sections.append(f"### `{action.get('action_id')}`")
+        sections.append("")
+        for command in commands:
+            sections.append(f"{command.get('label', 'Run command')}:")
+            sections.append("")
+            sections.append("```powershell")
+            sections.append(str(command.get("command", "")))
+            sections.append("```")
+            sections.append("")
+    return sections
 
 
 def _queue_status(actions: list[dict[str, Any]]) -> str:
