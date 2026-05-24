@@ -62,7 +62,7 @@ python -m chatp2p.cli operator console `
   --out D:\ChatP2PData\operator-console
 ```
 
-The console writes `operator-console.json`, `operator-console.md`, `operator-console.html`, `action-queue.json`, `action-queue.md`, `operator-console-history.json`, and a review-only cleanup plan. It summarizes primary and backup lane health, local managed processes, privacy-scan status, latest reliability-pack evidence, scheduled daily-check health, the ranked action queue, what changed since the previous console run, stale report candidates, and whether the operator can continue without partner action. The HTML also shows the dry-run and execute commands for the next local action, plus the latest `operator-action-run-report.json` status when present.
+The console writes `operator-console.json`, `operator-console.md`, `operator-console.html`, `action-queue.json`, `action-queue.md`, `operator-console-history.json`, and a review-only cleanup plan. It summarizes primary and backup lane health, local managed processes, privacy-scan status, latest reliability-pack evidence, scheduled daily-check health, the ranked action queue, self-heal status, what changed since the previous console run, stale report candidates, and whether the operator can continue without partner action. The HTML also shows the dry-run and execute commands for the next local action, plus the latest `operator-action-run-report.json` and `operator-self-heal-report.json` status when present.
 
 For the daily operator gate, run:
 
@@ -78,6 +78,18 @@ python -m chatp2p.cli operator daily-check `
 ```
 
 Daily check writes `daily-check.json`, `daily-check.md`, `action-queue.json`, and `action-queue.md`; runs the privacy gate; updates the Operator Console; and prints one pass/warn/fail answer. It does not refresh reliability proof jobs unless `--refresh-reliability-pack` is passed. The action queue ranks the next local actions, marks whether partner involvement is required, and includes token-free suggested PowerShell commands for common local follow-ups.
+
+For a read-only repair plan, generate the Operator Self-Heal report:
+
+```powershell
+python -m chatp2p.cli operator self-heal `
+  --console-report D:\ChatP2PData\operator-console\operator-console.json `
+  --daily-report D:\ChatP2PData\daily-check\daily-check.json `
+  --action-queue D:\ChatP2PData\operator-console\action-queue.json `
+  --out D:\ChatP2PData\operator-console
+```
+
+Self-Heal V1 does not run repairs. It lists repairable local report/task issues, selected action ids, and exact dry-run/execute commands for `operator run-action`. V1 covers stale or missing console/daily/action-run reports, stale reliability evidence, and public privacy findings; it does not contact partner machines or restart live nodes.
 
 You can regenerate the queue from an existing daily report:
 

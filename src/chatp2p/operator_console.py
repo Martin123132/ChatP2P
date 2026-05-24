@@ -18,6 +18,7 @@ from .client import CoordinatorClient
 from .jsonio import read_json_file
 from .node_runtime import managed_processes_status
 from .operator_actions import build_operator_action_queue, write_operator_action_queue
+from .operator_self_heal import latest_self_heal_summary
 from .privacy import PrivacyScanConfig, run_public_privacy_scan
 from .windows_task import DEFAULT_DAILY_CHECK_TASK_NAME
 
@@ -144,10 +145,16 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
     action_queue_json_path = out_dir / "action-queue.json"
     action_queue_markdown_path = out_dir / "action-queue.md"
     action_run_report_path = out_dir / "operator-action-run-report.json"
+    self_heal_report_path = out_dir / "operator-self-heal-report.json"
     history_path = out_dir / "operator-console-history.json"
     cleanup_plan_path = out_dir / "operator-console-cleanup-plan.ps1"
     action_run = _action_run_report_summary(
         action_run_report_path,
+        now=now,
+        freshness_seconds=config.freshness_seconds,
+    )
+    self_heal = latest_self_heal_summary(
+        self_heal_report_path,
         now=now,
         freshness_seconds=config.freshness_seconds,
     )
@@ -198,6 +205,7 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
         "action_runner": {
             "last_run": action_run,
         },
+        "self_heal": self_heal,
         "stale_reports": stale_reports,
         "artifacts": {
             "json": str(json_path),
@@ -206,6 +214,7 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
             "action_queue_json": str(action_queue_json_path),
             "action_queue_markdown": str(action_queue_markdown_path),
             "action_run_report": str(action_run_report_path),
+            "self_heal_report": str(self_heal_report_path),
             "history": str(history_path),
             "cleanup_plan": str(cleanup_plan_path),
         },
@@ -236,6 +245,7 @@ def format_operator_console_summary(report: dict[str, Any]) -> str:
     history = report.get("history", {})
     top_action = ((report.get("action_queue") or {}).get("next_action") or {})
     daily_check = report.get("daily_check_automation") or {}
+    self_heal = report.get("self_heal") or {}
     lines = [
         f"ChatP2P operator console: {str(report.get('status', 'unknown')).upper()}",
         f"Can continue without partner: {_yes_no(summary.get('can_continue_without_partner'))}",
@@ -243,6 +253,7 @@ def format_operator_console_summary(report: dict[str, Any]) -> str:
         f"Top queued action: {top_action.get('action_id', 'none')}",
         f"Partner required: {_yes_no(top_action.get('partner_required'))}",
         f"Daily check automation: {daily_check.get('status', 'unknown')}",
+        f"Self-heal: {self_heal.get('status', 'missing')} issues={self_heal.get('repairable_issue_count', 0)}",
         f"Primary lane: {_lane_brief((report.get('lanes') or {}).get('primary', {}))}",
         f"Backup lane: {_lane_brief((report.get('lanes') or {}).get('backup', {}))}",
         f"Privacy scan: {str((report.get('privacy_scan') or {}).get('status', 'unknown')).upper()}",
@@ -267,6 +278,7 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
     action_queue = report.get("action_queue", {})
     daily_check = report.get("daily_check_automation") or {}
     action_runner = report.get("action_runner") or {}
+    self_heal = report.get("self_heal") or {}
     top_action = action_queue.get("next_action") or {}
     next_runner = action_runner.get("next_action") or {}
     last_action_run = action_runner.get("last_run") or {}
@@ -280,6 +292,7 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
         f"- Top queued action: `{top_action.get('action_id', 'none')}`",
         f"- Partner required: **{_yes_no(top_action.get('partner_required'))}**",
         f"- Daily check automation: `{daily_check.get('status', 'unknown')}`",
+        f"- Self-heal: `{self_heal.get('status', 'missing')}` ({self_heal.get('repairable_issue_count', 0)} repairable issue(s))",
         f"- Last action run: `{last_action_run.get('status', 'missing')}`",
         f"- Generated at: `{report.get('generated_at')}`",
         "",
@@ -300,6 +313,26 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
         "",
         "```powershell",
         str(next_runner.get("execute_command") or "No local command is available for the next action."),
+        "```",
+        "",
+        "## Self-Heal",
+        "",
+        f"- Latest report status: `{self_heal.get('status', 'missing')}`",
+        f"- Latest report fresh: `{self_heal.get('fresh')}`",
+        f"- Repairable issue count: `{self_heal.get('repairable_issue_count', 0)}`",
+        f"- Top self-heal action: `{self_heal.get('top_self_heal_action') or 'none'}`",
+        f"- Report path: `{self_heal.get('path')}`",
+        "",
+        "Self-heal dry run:",
+        "",
+        "```powershell",
+        str(self_heal.get("top_dry_run_command") or _operator_self_heal_command(report)),
+        "```",
+        "",
+        "Self-heal execute:",
+        "",
+        "```powershell",
+        str(self_heal.get("top_execute_command") or "Run operator self-heal first; V1 does not auto-execute repairs."),
         "```",
         "",
         "## Action Queue",
@@ -470,12 +503,14 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
     action_queue = report.get("action_queue", {})
     daily_check = report.get("daily_check_automation") or {}
     action_runner = report.get("action_runner") or {}
+    self_heal = report.get("self_heal") or {}
     top_action = action_queue.get("next_action") or {}
     status = str(report.get("status", "unknown"))
     status_class = "ok" if status == "pass" else ("warn" if status == "warn" else "fail")
     lane_cards = "\n".join(_lane_card(label, lanes.get(label, {})) for label in ("primary", "backup"))
     action_rows = _action_queue_rows(action_queue)
     run_next_section = _run_next_action_section(action_runner)
+    self_heal_section = _self_heal_section(self_heal, report)
     markdown = markdown or format_operator_console_markdown(report)
     return f"""<!doctype html>
 <html lang="en">
@@ -611,12 +646,17 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
           <p class="value">{html.escape(str(daily_check.get("status", "unknown")).upper())}</p>
         </div>
         <div class="panel">
+          <p class="label">Self-heal</p>
+          <p class="value">{html.escape(str(self_heal.get("status", "missing")).upper())}</p>
+        </div>
+        <div class="panel">
       <p class="label">Generated</p>
           <p class="value">{html.escape(str(report.get("generated_at", "-")))}</p>
         </div>
       </div>
     </header>
     {run_next_section}
+    {self_heal_section}
     <section>
       <h2>Action Queue</h2>
       <table>
@@ -1198,6 +1238,29 @@ def _operator_run_action_command(queue_path: Path, action_id: str, *, execute: b
     )
 
 
+def _operator_self_heal_command(report: dict[str, Any]) -> str:
+    artifacts = report.get("artifacts") if isinstance(report.get("artifacts"), dict) else {}
+    json_path = artifacts.get("json") or "operator-console.json"
+    daily_check = report.get("daily_check_automation") if isinstance(report.get("daily_check_automation"), dict) else {}
+    daily_report = daily_check.get("report") if isinstance(daily_check.get("report"), dict) else {}
+    daily_path = daily_report.get("path")
+    if not daily_path:
+        config = report.get("config") if isinstance(report.get("config"), dict) else {}
+        daily_dir = config.get("daily_check_dir") or str(Path(str(config.get("home", "."))).parent / "daily-check")
+        daily_path = str(Path(str(daily_dir)) / "daily-check.json")
+    action_queue_path = artifacts.get("action_queue_json") or str(Path(str(json_path)).parent / "action-queue.json")
+    out_dir = Path(str(artifacts.get("self_heal_report") or json_path)).parent
+    return "\n".join(
+        [
+            "python -m chatp2p.cli operator self-heal `",
+            f"  --console-report {_ps_arg(json_path)} `",
+            f"  --daily-report {_ps_arg(daily_path)} `",
+            f"  --action-queue {_ps_arg(action_queue_path)} `",
+            f"  --out {_ps_arg(out_dir)}",
+        ]
+    )
+
+
 def _ps_arg(value: Any) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
@@ -1616,6 +1679,35 @@ def _run_next_action_section(action_runner: dict[str, Any]) -> str:
       <h2>Run Next Action</h2>
       <table><tbody>{body}</tbody></table>
       {commands_html}
+    </section>
+    """
+
+
+def _self_heal_section(self_heal: dict[str, Any], report: dict[str, Any]) -> str:
+    dry_run_command = self_heal.get("top_dry_run_command") or _operator_self_heal_command(report)
+    execute_command = self_heal.get("top_execute_command") or "Run operator self-heal first; V1 does not auto-execute repairs."
+    rows = [
+        ("Latest report status", self_heal.get("status") or "missing"),
+        ("Report fresh", _yes_no(self_heal.get("fresh"))),
+        ("Repairable issues", self_heal.get("repairable_issue_count") or 0),
+        ("Top self-heal action", self_heal.get("top_self_heal_action") or "-"),
+        ("Report path", self_heal.get("path") or "-"),
+    ]
+    body = "\n".join(
+        "<tr>"
+        f"<th>{html.escape(str(label))}</th>"
+        f"<td>{html.escape(str(value))}</td>"
+        "</tr>"
+        for label, value in rows
+    )
+    return f"""
+    <section>
+      <h2>Self-Heal</h2>
+      <table><tbody>{body}</tbody></table>
+      <h3>Dry Run</h3>
+      <pre>{html.escape(str(dry_run_command))}</pre>
+      <h3>Execute</h3>
+      <pre>{html.escape(str(execute_command))}</pre>
     </section>
     """
 

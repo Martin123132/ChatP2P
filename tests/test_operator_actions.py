@@ -180,6 +180,43 @@ def test_run_action_refuses_non_allowlisted_operator_command(tmp_path):
         raise AssertionError("expected run_operator_action to reject non-allowlisted command")
 
 
+def test_run_action_allows_action_queue_command(tmp_path):
+    queue = build_operator_action_queue(
+        _daily_report(
+            status="pass",
+            can_continue=True,
+            recommended_next_action="continue_development",
+            privacy_ok=True,
+        )
+    )
+    queue["actions"][0]["suggested_commands"][0] = {
+        "label": "Rebuild action queue",
+        "shell": "powershell",
+        "command": "python -m chatp2p.cli operator action-queue --daily-report daily-check.json --out actions",
+        "argv": [
+            "python",
+            "-m",
+            "chatp2p.cli",
+            "operator",
+            "action-queue",
+            "--daily-report",
+            str(tmp_path / "daily-check.json"),
+            "--out",
+            str(tmp_path / "actions"),
+        ],
+    }
+
+    report = run_operator_action(
+        queue,
+        queue_path=tmp_path / "action-queue.json",
+        action_id=queue["actions"][0]["action_id"],
+        dry_run=True,
+    )
+
+    assert report["status"] == "dry_run"
+    assert "action-queue" in report["command"]["allowlist"]
+
+
 def test_run_action_refuses_non_python_executable(tmp_path):
     queue = build_operator_action_queue(
         _daily_report(

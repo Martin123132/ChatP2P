@@ -89,6 +89,7 @@ def run_operator_daily_check(config: OperatorDailyCheckConfig) -> dict[str, Any]
         reliability_refresh=reliability_refresh,
         console=console,
     )
+    self_heal = console.get("self_heal") if isinstance(console.get("self_heal"), dict) else {}
 
     json_path = out_dir / "daily-check.json"
     markdown_path = out_dir / "daily-check.md"
@@ -117,6 +118,7 @@ def run_operator_daily_check(config: OperatorDailyCheckConfig) -> dict[str, Any]
             "privacy_scan": _privacy_step_summary(privacy),
             "reliability_refresh": reliability_refresh,
             "operator_console": _console_step_summary(console),
+            "self_heal": _self_heal_step_summary(self_heal),
         },
         "artifacts": {
             "json": str(json_path),
@@ -125,6 +127,7 @@ def run_operator_daily_check(config: OperatorDailyCheckConfig) -> dict[str, Any]
             "operator_console_json": (console.get("artifacts") or {}).get("json"),
             "operator_console_markdown": (console.get("artifacts") or {}).get("markdown"),
             "operator_console_html": (console.get("artifacts") or {}).get("html"),
+            "operator_self_heal": (console.get("artifacts") or {}).get("self_heal_report"),
             "action_queue_json": str(action_queue_json_path),
             "action_queue_markdown": str(action_queue_markdown_path),
         },
@@ -148,6 +151,7 @@ def format_operator_daily_check_summary(report: dict[str, Any]) -> str:
             f"Top queued action: {((report.get('action_queue') or {}).get('next_action') or {}).get('action_id', 'none')}",
             f"Privacy scan: {str((report.get('steps') or {}).get('privacy_scan', {}).get('status', 'unknown')).upper()}",
             f"Operator console: {str((report.get('steps') or {}).get('operator_console', {}).get('status', 'unknown')).upper()}",
+            f"Self-heal: {str((report.get('steps') or {}).get('self_heal', {}).get('status', 'unknown')).upper()}",
             f"Open: {artifacts.get('operator_console_html')}",
         ]
     )
@@ -176,6 +180,7 @@ def format_operator_daily_check_markdown(report: dict[str, Any]) -> str:
         ("privacy_scan", "Privacy scan"),
         ("reliability_refresh", "Reliability refresh"),
         ("operator_console", "Operator console"),
+        ("self_heal", "Self-heal"),
     ):
         step = steps.get(key, {})
         lines.append(f"| {label} | {step.get('status', 'unknown')} | {step.get('message', '')} |")
@@ -187,6 +192,7 @@ def format_operator_daily_check_markdown(report: dict[str, Any]) -> str:
             f"- Daily JSON: `{artifacts.get('json')}`",
             f"- Daily Markdown: `{artifacts.get('markdown')}`",
             f"- Operator Console HTML: `{artifacts.get('operator_console_html')}`",
+            f"- Self-Heal report: `{artifacts.get('operator_self_heal')}`",
             f"- Action Queue JSON: `{artifacts.get('action_queue_json')}`",
             f"- Action Queue Markdown: `{artifacts.get('action_queue_markdown')}`",
         ]
@@ -344,6 +350,26 @@ def _console_step_summary(report: dict[str, Any]) -> dict[str, Any]:
         "message": str(summary.get("recommended_next_action") or ""),
         "can_continue_without_partner": summary.get("can_continue_without_partner"),
         "html": (report.get("artifacts") or {}).get("html"),
+    }
+
+
+def _self_heal_step_summary(report: dict[str, Any]) -> dict[str, Any]:
+    if not report:
+        return {
+            "ok": True,
+            "status": "missing",
+            "message": "Self-heal report has not been generated yet.",
+            "repairable_issue_count": None,
+            "top_self_heal_action": None,
+            "report_path": None,
+        }
+    return {
+        "ok": report.get("status") != "fail",
+        "status": report.get("status"),
+        "message": f"{report.get('repairable_issue_count', 0)} repairable issue(s).",
+        "repairable_issue_count": report.get("repairable_issue_count"),
+        "top_self_heal_action": report.get("top_self_heal_action"),
+        "report_path": report.get("path"),
     }
 
 

@@ -42,6 +42,7 @@ def test_operator_console_writes_static_reports_and_redacts_invite_tokens(tmp_pa
     assert report["action_queue"]["next_action"]["partner_required"] is False
     assert report["action_runner"]["next_action"]["status"] == "available"
     assert "operator run-action" in report["action_runner"]["next_action"]["dry_run_command"]
+    assert report["self_heal"]["status"] == "missing"
     for key in ("json", "markdown", "html", "action_queue_json", "action_queue_markdown"):
         artifact = Path(report["artifacts"][key])
         assert artifact.exists()
@@ -49,6 +50,8 @@ def test_operator_console_writes_static_reports_and_redacts_invite_tokens(tmp_pa
     html_report = Path(report["artifacts"]["html"]).read_text(encoding="utf-8")
     assert "Action Queue" in html_report
     assert "Run Next Action" in html_report
+    assert "Self-Heal" in html_report
+    assert "operator self-heal" in html_report
     assert "operator run-action" in html_report
     assert "continue_development" in html_report
 

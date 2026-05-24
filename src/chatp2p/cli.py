@@ -75,6 +75,11 @@ from .operator_actions import (
 )
 from .operator_console import OperatorConsoleConfig, format_operator_console_summary, run_operator_console
 from .operator_daily import OperatorDailyCheckConfig, format_operator_daily_check_summary, run_operator_daily_check
+from .operator_self_heal import (
+    OperatorSelfHealConfig,
+    format_operator_self_heal_summary,
+    run_operator_self_heal,
+)
 from .packets import JobLeaseRenewal, NodeRegistration
 from .proof import OllamaProofConfig, SwarmProofConfig, proof_summary, run_ollama_proof, run_swarm_proof
 from .privacy import PrivacyScanConfig, run_public_privacy_scan
@@ -486,6 +491,28 @@ def operator_run_action_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_operator_action_run_summary(report))
+    if report["status"] == "fail":
+        raise SystemExit(1)
+
+
+def operator_self_heal_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_operator_self_heal(
+            OperatorSelfHealConfig(
+                console_report_path=Path(args.console_report),
+                daily_report_path=Path(args.daily_report),
+                action_queue_path=Path(args.action_queue),
+                out_dir=Path(args.out),
+                freshness_seconds=args.freshness_seconds,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_operator_self_heal_summary(report))
     if report["status"] == "fail":
         raise SystemExit(1)
 
@@ -2720,6 +2747,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     operator_run_action_parser.add_argument("--json", action="store_true", help="Print the full JSON run report")
     operator_run_action_parser.set_defaults(func=operator_run_action_command)
+
+    operator_self_heal_parser = operator_subcommands.add_parser(
+        "self-heal",
+        help="Build a read-only self-heal report for local operator evidence and task issues",
+    )
+    operator_self_heal_parser.add_argument(
+        "--console-report",
+        required=True,
+        help="Path to operator-console.json",
+    )
+    operator_self_heal_parser.add_argument(
+        "--daily-report",
+        required=True,
+        help="Path to daily-check.json",
+    )
+    operator_self_heal_parser.add_argument(
+        "--action-queue",
+        required=True,
+        help="Path to action-queue.json",
+    )
+    operator_self_heal_parser.add_argument("--out", required=True, help="Output directory for self-heal artifacts")
+    operator_self_heal_parser.add_argument(
+        "--freshness-seconds",
+        default=3600.0,
+        type=float,
+        help="Maximum age for console/daily/action reports before marking them stale",
+    )
+    operator_self_heal_parser.add_argument("--json", action="store_true", help="Print the full JSON self-heal report")
+    operator_self_heal_parser.set_defaults(func=operator_self_heal_command)
 
     operator_install_daily_check_task_parser = operator_subcommands.add_parser(
         "install-daily-check-task",

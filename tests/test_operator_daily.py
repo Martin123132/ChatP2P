@@ -22,6 +22,7 @@ def test_daily_check_writes_summary_and_uses_console(monkeypatch, tmp_path):
     assert report["summary"]["can_continue_without_partner"] is True
     assert report["summary"]["recommended_next_action"] == "continue_development"
     assert report["steps"]["reliability_refresh"]["status"] == "skipped"
+    assert report["steps"]["self_heal"]["status"] == "missing"
     assert report["action_queue"]["next_action"]["action_id"] == "continue_development"
     assert Path(report["artifacts"]["json"]).exists()
     assert Path(report["artifacts"]["markdown"]).exists()

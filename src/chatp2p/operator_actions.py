@@ -13,6 +13,7 @@ from typing import Any
 OPERATOR_ACTION_QUEUE_SCHEMA = "chatp2p.operator-action-queue.v1"
 OPERATOR_ACTION_RUN_REPORT_SCHEMA = "chatp2p.operator-action-run-report.v1"
 ALLOWED_RUN_ACTION_OPERATOR_COMMANDS = {
+    "action-queue",
     "console",
     "daily-check",
     "privacy-scan",
@@ -85,6 +86,38 @@ _RECOMMENDED_ACTIONS: dict[str, dict[str, Any]] = {
         "detail": "The optional reliability refresh failed; inspect the refresh report before using it as evidence.",
         "partner_required": False,
     },
+    "regenerate_operator_console": {
+        "priority": 94,
+        "severity": "warning",
+        "category": "operator",
+        "title": "Regenerate Operator Console",
+        "detail": "The Operator Console report is missing or stale; regenerate the static local report.",
+        "partner_required": False,
+    },
+    "refresh_daily_check_report": {
+        "priority": 96,
+        "severity": "warning",
+        "category": "operator",
+        "title": "Refresh daily check report",
+        "detail": "The daily-check report is missing or stale; run the read-only daily operator gate.",
+        "partner_required": False,
+    },
+    "refresh_action_queue": {
+        "priority": 97,
+        "severity": "warning",
+        "category": "operator",
+        "title": "Refresh action queue",
+        "detail": "The action queue is missing or stale; rebuild it from the latest daily-check report.",
+        "partner_required": False,
+    },
+    "create_action_run_report": {
+        "priority": 98,
+        "severity": "info",
+        "category": "operator",
+        "title": "Create action-run report",
+        "detail": "No action-run report exists yet; dry-run or execute an allowlisted local operator action to create one.",
+        "partner_required": False,
+    },
     "continue_development": {
         "priority": 90,
         "severity": "info",
@@ -138,6 +171,7 @@ def build_operator_action_queue(daily_report: dict[str, Any]) -> dict[str, Any]:
             partner_required=False,
             artifacts={"operator_console_html": operator_console.get("html")},
         )
+    _add_self_heal_actions(actions, daily_report)
 
     recommended = str(summary.get("recommended_next_action") or "continue_development")
     _add_catalog_action(
@@ -373,11 +407,31 @@ def _suggested_commands_for_action(action_id: str, report: dict[str, Any]) -> li
         argv = _operator_console_argv(report, include_skip_network_checks=False)
         if command:
             commands.append(_command("Regenerate Operator Console", command, argv=argv))
+    elif action_id == "regenerate_operator_console":
+        command = _operator_console_command(report, include_skip_network_checks=True)
+        argv = _operator_console_argv(report, include_skip_network_checks=True)
+        if command:
+            commands.append(_command("Regenerate Operator Console", command, argv=argv))
+    elif action_id == "refresh_daily_check_report":
+        command = _daily_check_command(report)
+        argv = _daily_check_argv(report)
+        if command:
+            commands.append(_command("Run daily check now", command, argv=argv))
+    elif action_id == "refresh_action_queue":
+        command = _action_queue_command(report)
+        argv = _action_queue_argv(report)
+        if command:
+            commands.append(_command("Rebuild action queue", command, argv=argv))
     elif action_id.startswith("review_warning_daily_check_automation"):
         command = _daily_check_command(report)
         argv = _daily_check_argv(report)
         if command:
             commands.append(_command("Run daily check now", command, argv=argv))
+    elif action_id == "create_action_run_report":
+        command = _privacy_scan_command(report)
+        argv = _privacy_scan_argv(report)
+        if command:
+            commands.append(_command("Create action-run report with privacy scan", command, argv=argv))
     elif action_id == "continue_development":
         command = _privacy_scan_command(report)
         argv = _privacy_scan_argv(report)
@@ -395,6 +449,56 @@ def _command(label: str, command: str, *, argv: list[str] | None = None) -> dict
     if argv:
         spec["argv"] = [str(item) for item in argv]
     return spec
+
+
+def _add_self_heal_actions(actions: list[dict[str, Any]], report: dict[str, Any]) -> None:
+    daily_check = report.get("daily_check_automation") if isinstance(report.get("daily_check_automation"), dict) else {}
+    daily_report = daily_check.get("report") if isinstance(daily_check.get("report"), dict) else {}
+    daily_report_status = str(daily_report.get("status") or "")
+    if daily_report_status in {"missing", "stale"} or daily_report.get("fresh") is False:
+        _add_catalog_action(
+            actions,
+            "refresh_daily_check_report",
+            source="daily_check_automation",
+            artifacts={"daily_check_report": daily_report.get("path")},
+        )
+
+    reliability = report.get("reliability") if isinstance(report.get("reliability"), dict) else {}
+    reliability_status = str(reliability.get("status") or "")
+    if reliability_status in {"missing", "not_configured"}:
+        _add_catalog_action(
+            actions,
+            "run_reliability_pack_when_ready",
+            source="reliability_summary",
+            artifacts={"reliability_summary": reliability.get("summary_path") or reliability.get("path")},
+        )
+    elif reliability.get("exists") and reliability.get("fresh") is False:
+        _add_catalog_action(
+            actions,
+            "refresh_reliability_pack",
+            source="reliability_summary",
+            artifacts={"reliability_summary": reliability.get("summary_path") or reliability.get("path")},
+        )
+
+    action_runner = report.get("action_runner") if isinstance(report.get("action_runner"), dict) else {}
+    last_run = action_runner.get("last_run") if isinstance(action_runner.get("last_run"), dict) else {}
+    if str(last_run.get("status") or "") in {"missing", "stale"}:
+        _add_catalog_action(
+            actions,
+            "create_action_run_report",
+            source="action_runner",
+            artifacts={"action_run_report": last_run.get("path")},
+        )
+
+    steps = _normalised_steps(report)
+    operator_console = steps.get("operator_console") or {}
+    if str(operator_console.get("status") or "") in {"missing", "stale"}:
+        _add_catalog_action(
+            actions,
+            "regenerate_operator_console",
+            source="operator_console",
+            artifacts={"operator_console_html": operator_console.get("html")},
+        )
 
 
 def _privacy_scan_command(report: dict[str, Any]) -> str | None:
@@ -597,6 +701,58 @@ def _daily_check_argv(report: dict[str, Any]) -> list[str] | None:
     if console_out:
         argv.extend(["--console-out", str(console_out)])
     return argv
+
+
+def _action_queue_command(report: dict[str, Any]) -> str | None:
+    daily_report = _daily_report_path(report)
+    out_dir = _action_queue_out_dir(report)
+    if not daily_report or not out_dir:
+        return None
+    return "\n".join(
+        [
+            "python -m chatp2p.cli operator action-queue `",
+            f"  --daily-report {_ps(daily_report)} `",
+            f"  --out {_ps(out_dir)}",
+        ]
+    )
+
+
+def _action_queue_argv(report: dict[str, Any]) -> list[str] | None:
+    daily_report = _daily_report_path(report)
+    out_dir = _action_queue_out_dir(report)
+    if not daily_report or not out_dir:
+        return None
+    return [
+        "python",
+        "-m",
+        "chatp2p.cli",
+        "operator",
+        "action-queue",
+        "--daily-report",
+        str(daily_report),
+        "--out",
+        str(out_dir),
+    ]
+
+
+def _daily_report_path(report: dict[str, Any]) -> Any:
+    artifacts = report.get("artifacts") if isinstance(report.get("artifacts"), dict) else {}
+    if report.get("schema") == "chatp2p.operator-daily-check-report.v1":
+        if artifacts.get("json"):
+            return artifacts.get("json")
+        out_dir = _config_value(report, "out_dir")
+        return str(Path(str(out_dir)) / "daily-check.json") if out_dir else None
+    daily_check = report.get("daily_check_automation") if isinstance(report.get("daily_check_automation"), dict) else {}
+    daily_report = daily_check.get("report") if isinstance(daily_check.get("report"), dict) else {}
+    return daily_report.get("path") or artifacts.get("daily_check_json")
+
+
+def _action_queue_out_dir(report: dict[str, Any]) -> Any:
+    artifacts = report.get("artifacts") if isinstance(report.get("artifacts"), dict) else {}
+    queue_path = artifacts.get("action_queue_json")
+    if queue_path:
+        return str(Path(str(queue_path)).parent)
+    return _config_value(report, "console_out_dir") or _config_value(report, "out_dir")
 
 
 def run_operator_action(
