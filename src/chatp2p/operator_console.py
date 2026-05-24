@@ -143,8 +143,14 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
     html_path = out_dir / "operator-console.html"
     action_queue_json_path = out_dir / "action-queue.json"
     action_queue_markdown_path = out_dir / "action-queue.md"
+    action_run_report_path = out_dir / "operator-action-run-report.json"
     history_path = out_dir / "operator-console-history.json"
     cleanup_plan_path = out_dir / "operator-console-cleanup-plan.ps1"
+    action_run = _action_run_report_summary(
+        action_run_report_path,
+        now=now,
+        freshness_seconds=config.freshness_seconds,
+    )
     stale_reports = _stale_report_inventory(
         root=config.stale_report_root or config.home.expanduser().resolve().parent,
         out_dir=out_dir,
@@ -189,6 +195,9 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
         "privacy_scan": _privacy_summary(privacy_scan),
         "partner_autopilot": partner_autopilot,
         "daily_check_automation": daily_check,
+        "action_runner": {
+            "last_run": action_run,
+        },
         "stale_reports": stale_reports,
         "artifacts": {
             "json": str(json_path),
@@ -196,6 +205,7 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
             "html": str(html_path),
             "action_queue_json": str(action_queue_json_path),
             "action_queue_markdown": str(action_queue_markdown_path),
+            "action_run_report": str(action_run_report_path),
             "history": str(history_path),
             "cleanup_plan": str(cleanup_plan_path),
         },
@@ -205,6 +215,10 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
     report["history"] = _redact_sensitive_report(history_summary, secrets_to_redact)
     action_queue = build_operator_action_queue(report)
     report["action_queue"] = _redact_sensitive_report(action_queue, secrets_to_redact)
+    report["action_runner"]["next_action"] = _next_action_run_summary(
+        report["action_queue"],
+        queue_path=action_queue_json_path,
+    )
     write_operator_action_queue(out_dir, report["action_queue"])
 
     markdown = format_operator_console_markdown(report)
@@ -252,7 +266,10 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
     stale_reports = report.get("stale_reports", {})
     action_queue = report.get("action_queue", {})
     daily_check = report.get("daily_check_automation") or {}
+    action_runner = report.get("action_runner") or {}
     top_action = action_queue.get("next_action") or {}
+    next_runner = action_runner.get("next_action") or {}
+    last_action_run = action_runner.get("last_run") or {}
 
     lines = [
         "# ChatP2P Operator Console",
@@ -263,7 +280,27 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
         f"- Top queued action: `{top_action.get('action_id', 'none')}`",
         f"- Partner required: **{_yes_no(top_action.get('partner_required'))}**",
         f"- Daily check automation: `{daily_check.get('status', 'unknown')}`",
+        f"- Last action run: `{last_action_run.get('status', 'missing')}`",
         f"- Generated at: `{report.get('generated_at')}`",
+        "",
+        "## Run Next Action",
+        "",
+        f"- Action: `{next_runner.get('action_id', 'none')}`",
+        f"- Last run status: `{last_action_run.get('status', 'missing')}`",
+        f"- Last run generated at: `{last_action_run.get('generated_at')}`",
+        f"- Last run report: `{last_action_run.get('path')}`",
+        "",
+        "Dry run:",
+        "",
+        "```powershell",
+        str(next_runner.get("dry_run_command") or "No local command is available for the next action."),
+        "```",
+        "",
+        "Execute:",
+        "",
+        "```powershell",
+        str(next_runner.get("execute_command") or "No local command is available for the next action."),
+        "```",
         "",
         "## Action Queue",
         "",
@@ -287,23 +324,10 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-        "## Lanes",
-        "",
-        "| Lane | Ready | Health | Live workers | Expected worker | Disputes |",
-        "| --- | --- | --- | --- | --- | --- |",
-        ]
-    )
-    lines.extend(
-        [
+            "## Lanes",
             "",
-            "## Scheduled Automation",
-            "",
-            f"- Status: `{daily_check.get('status', 'unknown')}`",
-            f"- Task query: `{(daily_check.get('task') or {}).get('status', 'unknown')}`",
-            f"- Task state: `{(daily_check.get('task') or {}).get('task_status') or '-'}`",
-            f"- Last daily report: `{(daily_check.get('report') or {}).get('status', 'unknown')}`",
-            f"- Report fresh: `{(daily_check.get('report') or {}).get('fresh')}`",
-            f"- Report path: `{(daily_check.get('report') or {}).get('path')}`",
+            "| Lane | Ready | Health | Live workers | Expected worker | Disputes |",
+            "| --- | --- | --- | --- | --- | --- |",
         ]
     )
     for label in ("primary", "backup"):
@@ -326,6 +350,19 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
             )
             + " |"
         )
+    lines.extend(
+        [
+            "",
+            "## Scheduled Automation",
+            "",
+            f"- Status: `{daily_check.get('status', 'unknown')}`",
+            f"- Task query: `{(daily_check.get('task') or {}).get('status', 'unknown')}`",
+            f"- Task state: `{(daily_check.get('task') or {}).get('task_status') or '-'}`",
+            f"- Last daily report: `{(daily_check.get('report') or {}).get('status', 'unknown')}`",
+            f"- Report fresh: `{(daily_check.get('report') or {}).get('fresh')}`",
+            f"- Report path: `{(daily_check.get('report') or {}).get('path')}`",
+        ]
+    )
 
     lines.extend(
         [
@@ -432,11 +469,13 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
     lanes = report.get("lanes", {})
     action_queue = report.get("action_queue", {})
     daily_check = report.get("daily_check_automation") or {}
+    action_runner = report.get("action_runner") or {}
     top_action = action_queue.get("next_action") or {}
     status = str(report.get("status", "unknown"))
     status_class = "ok" if status == "pass" else ("warn" if status == "warn" else "fail")
     lane_cards = "\n".join(_lane_card(label, lanes.get(label, {})) for label in ("primary", "backup"))
     action_rows = _action_queue_rows(action_queue)
+    run_next_section = _run_next_action_section(action_runner)
     markdown = markdown or format_operator_console_markdown(report)
     return f"""<!doctype html>
 <html lang="en">
@@ -572,11 +611,12 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
           <p class="value">{html.escape(str(daily_check.get("status", "unknown")).upper())}</p>
         </div>
         <div class="panel">
-          <p class="label">Generated</p>
+      <p class="label">Generated</p>
           <p class="value">{html.escape(str(report.get("generated_at", "-")))}</p>
         </div>
       </div>
     </header>
+    {run_next_section}
     <section>
       <h2>Action Queue</h2>
       <table>
@@ -1058,6 +1098,110 @@ def _daily_check_automation_status(report: dict[str, Any], task: dict[str, Any])
     return "warn"
 
 
+def _action_run_report_summary(path: Path, *, now: datetime, freshness_seconds: float) -> dict[str, Any]:
+    resolved = path.expanduser().resolve()
+    if not resolved.exists():
+        return {
+            "path": str(resolved),
+            "exists": False,
+            "status": "missing",
+            "ok": None,
+            "fresh": False,
+        }
+    try:
+        data = read_json_file(resolved, description="operator action run report")
+    except (OSError, ValueError) as exc:
+        return {
+            "path": str(resolved),
+            "exists": True,
+            "status": "fail",
+            "ok": False,
+            "fresh": False,
+            "error": _error_message(exc),
+        }
+    if not isinstance(data, dict):
+        return {
+            "path": str(resolved),
+            "exists": True,
+            "status": "fail",
+            "ok": False,
+            "fresh": False,
+            "error": "operator action run report is not a JSON object",
+        }
+    generated_at = data.get("generated_at")
+    age_seconds = _age_seconds(generated_at, now=now)
+    action = data.get("action") if isinstance(data.get("action"), dict) else {}
+    command = data.get("command") if isinstance(data.get("command"), dict) else {}
+    execution = data.get("execution") if isinstance(data.get("execution"), dict) else {}
+    return {
+        "path": str(resolved),
+        "exists": True,
+        "schema": data.get("schema"),
+        "ok": data.get("ok"),
+        "status": data.get("status", "unknown"),
+        "generated_at": generated_at,
+        "age_seconds": age_seconds,
+        "fresh": age_seconds is not None and age_seconds <= freshness_seconds,
+        "action_id": action.get("action_id"),
+        "command_label": command.get("label"),
+        "dry_run": execution.get("dry_run"),
+        "attempted": execution.get("attempted"),
+        "returncode": execution.get("returncode"),
+    }
+
+
+def _next_action_run_summary(action_queue: dict[str, Any], *, queue_path: Path) -> dict[str, Any]:
+    action = action_queue.get("next_action") if isinstance(action_queue.get("next_action"), dict) else {}
+    action_id = action.get("action_id")
+    if not action_id:
+        return {
+            "status": "not_available",
+            "action_id": None,
+            "queue_path": str(queue_path.expanduser().resolve()),
+            "reason": "action queue has no next action",
+        }
+    if action.get("partner_required"):
+        return {
+            "status": "partner_required",
+            "action_id": action_id,
+            "partner_required": True,
+            "queue_path": str(queue_path.expanduser().resolve()),
+            "reason": "next action requires partner involvement",
+        }
+    if not action.get("suggested_commands"):
+        return {
+            "status": "not_available",
+            "action_id": action_id,
+            "partner_required": False,
+            "queue_path": str(queue_path.expanduser().resolve()),
+            "reason": "next action has no suggested local command",
+        }
+    return {
+        "status": "available",
+        "action_id": action_id,
+        "partner_required": False,
+        "queue_path": str(queue_path.expanduser().resolve()),
+        "dry_run_command": _operator_run_action_command(queue_path, str(action_id), execute=False),
+        "execute_command": _operator_run_action_command(queue_path, str(action_id), execute=True),
+    }
+
+
+def _operator_run_action_command(queue_path: Path, action_id: str, *, execute: bool) -> str:
+    mode_flag = "--execute" if execute else "--dry-run"
+    return "\n".join(
+        [
+            "python -m chatp2p.cli operator run-action `",
+            f"  --queue {_ps_arg(queue_path.expanduser().resolve())} `",
+            f"  --action {_ps_arg(action_id)} `",
+            f"  {mode_flag}",
+        ]
+    )
+
+
+def _ps_arg(value: Any) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 def _update_console_history(history_path: Path, report: dict[str, Any], *, limit: int) -> dict[str, Any]:
     previous_entries = _read_history_entries(history_path)
     previous_entry = previous_entries[0] if previous_entries else None
@@ -1101,6 +1245,8 @@ def _history_entry(report: dict[str, Any]) -> dict[str, Any]:
     privacy = report.get("privacy_scan") or {}
     stale_reports = report.get("stale_reports") or {}
     daily_check = report.get("daily_check_automation") or {}
+    action_runner = report.get("action_runner") or {}
+    last_action_run = action_runner.get("last_run") or {}
     return {
         "generated_at": report.get("generated_at"),
         "status": report.get("status"),
@@ -1112,6 +1258,8 @@ def _history_entry(report: dict[str, Any]) -> dict[str, Any]:
         "privacy_findings": privacy.get("finding_count"),
         "daily_check_status": daily_check.get("status"),
         "daily_check_report_status": (daily_check.get("report") or {}).get("status"),
+        "action_run_status": last_action_run.get("status"),
+        "action_run_action_id": last_action_run.get("action_id"),
         "stale_report_candidates": stale_reports.get("candidate_count"),
     }
 
@@ -1129,6 +1277,8 @@ def _history_changes(previous: dict[str, Any] | None, current: dict[str, Any]) -
         "privacy_findings": "privacy_findings",
         "daily_check_status": "daily_check_status",
         "daily_check_report_status": "daily_check_report_status",
+        "action_run_status": "action_run_status",
+        "action_run_action_id": "action_run_action_id",
         "stale_report_candidates": "stale_report_candidates",
     }
     changes = []
@@ -1428,6 +1578,46 @@ def _daily_check_automation_table(daily_check: dict[str, Any]) -> str:
         for label, value in rows
     )
     return f"<table><tbody>{body}</tbody></table>"
+
+
+def _run_next_action_section(action_runner: dict[str, Any]) -> str:
+    next_action = action_runner.get("next_action") or {}
+    last_run = action_runner.get("last_run") or {}
+    dry_run_command = next_action.get("dry_run_command")
+    execute_command = next_action.get("execute_command")
+    rows = [
+        ("Next action", next_action.get("action_id") or "-"),
+        ("Run status", next_action.get("status") or "unknown"),
+        ("Partner required", _yes_no(next_action.get("partner_required"))),
+        ("Last run status", last_run.get("status") or "missing"),
+        ("Last run action", last_run.get("action_id") or "-"),
+        ("Last run generated", last_run.get("generated_at") or "-"),
+        ("Last run report", last_run.get("path") or "-"),
+    ]
+    body = "\n".join(
+        "<tr>"
+        f"<th>{html.escape(str(label))}</th>"
+        f"<td>{html.escape(str(value))}</td>"
+        "</tr>"
+        for label, value in rows
+    )
+    if not dry_run_command or not execute_command:
+        reason = next_action.get("reason") or "No local command is available for the next action."
+        commands_html = f"<p>{html.escape(str(reason))}</p>"
+    else:
+        commands_html = (
+            "<h3>Dry Run</h3>"
+            f"<pre>{html.escape(str(dry_run_command))}</pre>"
+            "<h3>Execute</h3>"
+            f"<pre>{html.escape(str(execute_command))}</pre>"
+        )
+    return f"""
+    <section>
+      <h2>Run Next Action</h2>
+      <table><tbody>{body}</tbody></table>
+      {commands_html}
+    </section>
+    """
 
 
 def _lane_brief(lane: dict[str, Any]) -> str:

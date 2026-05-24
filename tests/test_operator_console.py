@@ -40,12 +40,16 @@ def test_operator_console_writes_static_reports_and_redacts_invite_tokens(tmp_pa
     assert report["summary"]["recommended_next_action"] == "continue_development"
     assert report["action_queue"]["next_action"]["action_id"] == "continue_development"
     assert report["action_queue"]["next_action"]["partner_required"] is False
+    assert report["action_runner"]["next_action"]["status"] == "available"
+    assert "operator run-action" in report["action_runner"]["next_action"]["dry_run_command"]
     for key in ("json", "markdown", "html", "action_queue_json", "action_queue_markdown"):
         artifact = Path(report["artifacts"][key])
         assert artifact.exists()
         assert token not in artifact.read_text(encoding="utf-8")
     html_report = Path(report["artifacts"]["html"]).read_text(encoding="utf-8")
     assert "Action Queue" in html_report
+    assert "Run Next Action" in html_report
+    assert "operator run-action" in html_report
     assert "continue_development" in html_report
 
 
@@ -183,6 +187,42 @@ def test_operator_console_reports_daily_check_automation(monkeypatch, tmp_path):
     html_report = Path(report["artifacts"]["html"]).read_text(encoding="utf-8")
     assert "Scheduled Automation" in html_report
     assert "Daily check automation" in html_report
+
+
+def test_operator_console_reports_last_action_run(tmp_path):
+    repo = _clean_repo(tmp_path)
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    invite_path = private_dir / "primary-alpha-invite.json"
+    write_alpha_invite(
+        invite_path,
+        AlphaInvite.create(coordinator="http://127.0.0.1:8765", admission_token="secret-token-123456"),
+    )
+    reliability_dir = tmp_path / "reliability-pack"
+    reliability_dir.mkdir()
+    _write_reliability_summary(reliability_dir, can_continue=True)
+    out_dir = tmp_path / "operator-console"
+    out_dir.mkdir()
+    _write_action_run_report(out_dir)
+
+    report = run_operator_console(
+        OperatorConsoleConfig(
+            repo=repo,
+            home=tmp_path / ".mesh",
+            primary_invite_path=invite_path,
+            reliability_dir=reliability_dir,
+            out_dir=out_dir,
+            skip_network_checks=True,
+        )
+    )
+
+    last_run = report["action_runner"]["last_run"]
+    assert last_run["status"] == "pass"
+    assert last_run["action_id"] == "continue_development"
+    assert last_run["fresh"] is True
+    html_report = Path(report["artifacts"]["html"]).read_text(encoding="utf-8")
+    assert "Last run status" in html_report
+    assert "operator-action-run-report.json" in html_report
 
 
 def test_operator_console_without_reliability_pack_still_gives_next_step(monkeypatch, tmp_path):
@@ -415,3 +455,24 @@ def _write_daily_check_report(path):
         },
     }
     (path / "daily-check.json").write_text(json.dumps(report), encoding="utf-8")
+
+
+def _write_action_run_report(path):
+    report = {
+        "schema": "chatp2p.operator-action-run-report.v1",
+        "ok": True,
+        "status": "pass",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "action": {
+            "action_id": "continue_development",
+        },
+        "command": {
+            "label": "Recheck privacy before committing",
+        },
+        "execution": {
+            "dry_run": False,
+            "attempted": True,
+            "returncode": 0,
+        },
+    }
+    (path / "operator-action-run-report.json").write_text(json.dumps(report), encoding="utf-8")

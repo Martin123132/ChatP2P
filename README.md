@@ -62,7 +62,7 @@ python -m chatp2p.cli operator console `
   --out D:\ChatP2PData\operator-console
 ```
 
-The console writes `operator-console.json`, `operator-console.md`, `operator-console.html`, `action-queue.json`, `action-queue.md`, `operator-console-history.json`, and a review-only cleanup plan. It summarizes primary and backup lane health, local managed processes, privacy-scan status, latest reliability-pack evidence, scheduled daily-check health, the ranked action queue, what changed since the previous console run, stale report candidates, and whether the operator can continue without partner action.
+The console writes `operator-console.json`, `operator-console.md`, `operator-console.html`, `action-queue.json`, `action-queue.md`, `operator-console-history.json`, and a review-only cleanup plan. It summarizes primary and backup lane health, local managed processes, privacy-scan status, latest reliability-pack evidence, scheduled daily-check health, the ranked action queue, what changed since the previous console run, stale report candidates, and whether the operator can continue without partner action. The HTML also shows the dry-run and execute commands for the next local action, plus the latest `operator-action-run-report.json` status when present.
 
 For the daily operator gate, run:
 
