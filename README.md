@@ -171,6 +171,17 @@ python -m chatp2p.cli operator install-daily-check-task `
 
 Use `--dry-run` first to inspect the generated launcher and task plan. The scheduled check is read-only by default and does not run proof jobs unless you opt into `--refresh-reliability-pack`.
 
+If you want to stop local daily-check automation on a machine, uninstall the task and launcher with:
+
+```powershell
+python -m chatp2p.cli operator uninstall-daily-check-task `
+  --home D:\ChatP2PData\.mesh `
+  --task-name "ChatP2P Daily Check" `
+  --launcher D:\ChatP2PData\.runtime\chatp2p-daily-check.cmd
+```
+
+Add `--keep-launcher` if you only want to remove the scheduled task and keep the generated launcher.
+
 ## Network Smoke Test
 
 Terminal 1:

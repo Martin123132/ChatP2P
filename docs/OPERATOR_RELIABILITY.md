@@ -226,6 +226,17 @@ D:\ChatP2PData\reliability-pack-live\run\
 Remove the task with:
 
 ```powershell
+python -m chatp2p.cli operator uninstall-daily-check-task `
+  --home D:\ChatP2PData\.mesh `
+  --task-name "ChatP2P Reliability Pack" `
+  --launcher D:\ChatP2PData\.runtime\chatp2p-reliability-pack.cmd
+```
+
+Use `--keep-launcher` to leave the generated launcher in place, or `--dry-run` to inspect actions before deletion.
+
+If you prefer direct Scheduled Task cleanup, the legacy command is:
+
+```powershell
 schtasks.exe /Delete /TN "ChatP2P Reliability Pack" /F
 ```
 

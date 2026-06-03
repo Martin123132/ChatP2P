@@ -1,5 +1,9 @@
+import builtins
 import sys
+from pathlib import Path
 
+import chatp2p.cli as cli_module
+import pytest
 from chatp2p.alpha import AlphaInvite, write_alpha_invite
 from chatp2p.cli import _node_status_connection_from_args, build_parser
 from chatp2p.node_runtime import (
@@ -150,6 +154,129 @@ def test_operator_daily_check_task_command_parse(tmp_path):
     assert args.dry_run is True
 
 
+def test_operator_uninstall_daily_check_task_command_parse(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "uninstall-daily-check-task",
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--task-name",
+            "ChatP2P Daily Check",
+            "--launcher",
+            str(tmp_path / "chatp2p-daily-check.cmd"),
+            "--keep-launcher",
+            "--dry-run",
+        ]
+    )
+
+    assert args.func.__name__ == "operator_uninstall_daily_check_task_command"
+    assert args.home == str(tmp_path / ".mesh")
+    assert args.task_name == "ChatP2P Daily Check"
+    assert args.launcher == str(tmp_path / "chatp2p-daily-check.cmd")
+    assert args.keep_launcher is True
+    assert args.dry_run is True
+
+
+def test_operator_uninstall_daily_check_task_command_invokes_uninstall_watchdog(monkeypatch, tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "uninstall-daily-check-task",
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--task-name",
+            "ChatP2P Daily Check",
+            "--launcher",
+            str(tmp_path / "chatp2p-daily-check.cmd"),
+            "--keep-launcher",
+            "--dry-run",
+        ]
+    )
+
+    captured = {}
+
+    def fake_uninstall_watchdog_task(
+        *,
+        task_name: str,
+        home: Path,
+        launcher_path: Path | None,
+        delete_launcher: bool,
+        dry_run: bool,
+    ) -> dict:
+        captured["task_name"] = task_name
+        captured["home"] = home
+        captured["launcher_path"] = launcher_path
+        captured["delete_launcher"] = delete_launcher
+        captured["dry_run"] = dry_run
+        return {
+            "schema": "chatp2p.windows-task-uninstall-report.v1",
+            "ok": True,
+            "status": "pass",
+            "dry_run": dry_run,
+            "task_name": task_name,
+            "plan": {},
+            "command": None,
+            "returncode": 0,
+            "stdout": "",
+            "stderr": "",
+            "errors": [],
+        }
+
+    monkeypatch.setattr(cli_module, "uninstall_watchdog_task", fake_uninstall_watchdog_task)
+    monkeypatch.setattr(builtins, "print", lambda *args, **kwargs: None)
+
+    cli_module.operator_uninstall_daily_check_task_command(args)
+
+    assert captured["task_name"] == "ChatP2P Daily Check"
+    assert captured["home"] == tmp_path / ".mesh"
+    assert captured["launcher_path"] == tmp_path / "chatp2p-daily-check.cmd"
+    assert captured["delete_launcher"] is False
+    assert captured["dry_run"] is True
+
+
+def test_operator_uninstall_daily_check_task_command_raises_on_report_failure(monkeypatch, tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "uninstall-daily-check-task",
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--task-name",
+            "ChatP2P Daily Check",
+        ]
+    )
+
+    def fake_uninstall_watchdog_task(
+        *,
+        task_name: str,
+        home: Path,
+        launcher_path: Path | None,
+        delete_launcher: bool,
+        dry_run: bool,
+    ) -> dict:
+        return {
+            "schema": "chatp2p.windows-task-uninstall-report.v1",
+            "ok": False,
+            "status": "fail",
+            "dry_run": dry_run,
+            "task_name": task_name,
+            "plan": {},
+            "command": None,
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "nope",
+            "errors": ["nope"],
+        }
+
+    monkeypatch.setattr(cli_module, "uninstall_watchdog_task", fake_uninstall_watchdog_task)
+    monkeypatch.setattr(builtins, "print", lambda *args, **kwargs: None)
+
+    with pytest.raises(SystemExit):
+        cli_module.operator_uninstall_daily_check_task_command(args)
 def test_node_status_can_derive_coordinator_from_invite(tmp_path):
     parser = build_parser()
     invite_path = tmp_path / "alpha-invite.json"
