@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -515,6 +516,57 @@ def operator_self_heal_command(args: argparse.Namespace) -> None:
         print(format_operator_self_heal_summary(report))
     if report["status"] == "fail":
         raise SystemExit(1)
+
+
+def operator_maintenance_command(args: argparse.Namespace) -> None:
+    if args.run_top_action and not args.allow_execute:
+        raise SystemExit("--run-top-action requires --allow-execute")
+
+    script_path = (Path(args.repo) / "scripts" / "operator-maintenance.ps1").resolve()
+    if not script_path.exists():
+        raise SystemExit(f"operator-maintenance.ps1 not found at: {script_path}")
+
+    repo_root = Path(args.repo).resolve()
+    command = [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script_path),
+        "-Root",
+        str(repo_root),
+        "-PrimaryInvite",
+        str(args.primary_invite),
+        "-OutRoot",
+        str(args.out),
+    ]
+
+    if args.backup_invite:
+        command.extend(["-BackupInvite", str(args.backup_invite)])
+    if args.reliability_dir is not None:
+        command.extend(["-ReliabilityDir", str(args.reliability_dir)])
+    if args.home:
+        command.extend(["-MeshHome", str(args.home)])
+    if args.skip_network_checks:
+        command.append("-SkipNetworkChecks")
+    if args.expected_primary_worker_id:
+        command.extend(["-ExpectedPrimaryWorkerId", str(args.expected_primary_worker_id)])
+    if args.expected_backup_worker_id:
+        command.extend(["-ExpectedBackupWorkerId", str(args.expected_backup_worker_id)])
+    if args.partner_report:
+        for partner_report in args.partner_report:
+            command.extend(["-PartnerReport", str(partner_report)])
+    if args.preview_top_action:
+        command.append("-PreviewTopAction")
+    if args.run_top_action:
+        command.append("-RunTopAction")
+    if args.allow_execute:
+        command.append("-AllowExecute")
+
+    result = subprocess.run(command, check=False, text=True, capture_output=False)
+    if result.returncode:
+        raise SystemExit(f"operator maintenance failed with exit code {result.returncode}")
 
 
 def operator_install_daily_check_task_command(args: argparse.Namespace) -> None:
@@ -2776,6 +2828,66 @@ def build_parser() -> argparse.ArgumentParser:
     )
     operator_self_heal_parser.add_argument("--json", action="store_true", help="Print the full JSON self-heal report")
     operator_self_heal_parser.set_defaults(func=operator_self_heal_command)
+
+    operator_maintenance_parser = operator_subcommands.add_parser(
+        "maintenance",
+        help="Run the full local operator maintenance loop in one command",
+    )
+    operator_maintenance_parser.add_argument("--repo", default=".", help="Public repository root containing scripts and CLI modules")
+    operator_maintenance_parser.add_argument(
+        "--home",
+        default=None,
+        help="Mesh home path to pass through (defaults to <repo>\\.mesh)",
+    )
+    operator_maintenance_parser.add_argument("--primary-invite", required=True, help="Path to primary alpha invite JSON")
+    operator_maintenance_parser.add_argument("--backup-invite", default=None, help="Optional backup alpha invite JSON")
+    operator_maintenance_parser.add_argument(
+        "--out",
+        required=True,
+        help="Output root for operator maintenance artifacts",
+    )
+    operator_maintenance_parser.add_argument(
+        "--reliability-dir",
+        default=None,
+        help="Optional reliability-pack directory containing reliability-summary.json",
+    )
+    operator_maintenance_parser.add_argument(
+        "--expected-primary-worker-id",
+        default=None,
+        help="Primary-lane worker ID expected to be live",
+    )
+    operator_maintenance_parser.add_argument(
+        "--expected-backup-worker-id",
+        default=None,
+        help="Backup-lane worker ID expected to be live",
+    )
+    operator_maintenance_parser.add_argument(
+        "--skip-network-checks",
+        action="store_true",
+        help="Skip coordinator health/snapshot checks in the maintenance pass",
+    )
+    operator_maintenance_parser.add_argument(
+        "--partner-report",
+        action="append",
+        default=None,
+        help="Optional partner/autopilot report JSON. Can be passed more than once",
+    )
+    operator_maintenance_parser.add_argument(
+        "--preview-top-action",
+        action="store_true",
+        help="Preview the top queued maintenance action only",
+    )
+    operator_maintenance_parser.add_argument(
+        "--run-top-action",
+        action="store_true",
+        help="Run the top local operator action after maintenance (must pair with --allow-execute)",
+    )
+    operator_maintenance_parser.add_argument(
+        "--allow-execute",
+        action="store_true",
+        help="Allow operator maintenance to execute the top action",
+    )
+    operator_maintenance_parser.set_defaults(func=operator_maintenance_command)
 
     operator_install_daily_check_task_parser = operator_subcommands.add_parser(
         "install-daily-check-task",

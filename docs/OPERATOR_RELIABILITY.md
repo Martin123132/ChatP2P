@@ -104,6 +104,19 @@ The report covers stale or missing daily-check reports, stale or missing Operato
 If you want to keep the same offline loop in one step, use:
 
 ```powershell
+python -m chatp2p.cli operator maintenance `
+  --repo C:\Projects\ChatP2P `
+  --home C:\ChatP2PData\.mesh `
+  --primary-invite C:\Projects\ChatP2P\alpha-invite.json `
+  --backup-invite C:\Projects\ChatP2P\backup-alpha-invite.json `
+  --out C:\ChatP2PData\maintenance `
+  --skip-network-checks `
+  --preview-top-action
+```
+
+Or the existing helper script:
+
+```powershell
 .\scripts\operator-maintenance.ps1 `
   -PrimaryInvite D:\ChatP2PData\alpha-invite.json `
   -BackupInvite D:\ChatP2PData\backup-alpha-invite.json `

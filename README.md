@@ -91,7 +91,22 @@ python -m chatp2p.cli operator self-heal `
 
 Self-Heal V1 does not run repairs. It lists repairable local report/task issues, selected action ids, and exact dry-run/execute commands for `operator run-action`. V1 covers stale or missing console/daily/action-run reports, stale reliability evidence, and public privacy findings; it does not contact partner machines or restart live nodes.
 
-You can run the same sequence locally with one helper script:
+You can run the same sequence locally with one command:
+
+```powershell
+python -m chatp2p.cli operator maintenance `
+  --repo C:\Projects\ChatP2P `
+  --home C:\ChatP2PData\.mesh `
+  --primary-invite C:\ChatP2PData\alpha-invite.json `
+  --backup-invite C:\ChatP2PData\backup-alpha-invite.json `
+  --out C:\ChatP2PData\maintenance `
+  --skip-network-checks `
+  --preview-top-action
+```
+
+This runs, in order, `operator console`, `operator daily-check`, `operator action-queue`, and `operator self-heal` and prints the summary from the latest console/self-heal pass. You can add `--preview-top-action` to inspect the generated `run-action` command first.
+
+You can also run the same flow with the helper script:
 
 ```powershell
 .\scripts\operator-maintenance.ps1 `

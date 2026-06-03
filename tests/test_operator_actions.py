@@ -1,7 +1,11 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from chatp2p.cli import build_parser
+from chatp2p import cli as cli_module
 from chatp2p.operator_actions import (
     build_operator_action_queue,
     format_operator_action_queue_markdown,
@@ -282,6 +286,112 @@ def test_operator_run_action_cli_parses(tmp_path):
     assert args.dry_run is True
     assert args.execute is False
     assert args.json is True
+
+
+def test_operator_maintenance_cli_parses(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "maintenance",
+            "--repo",
+            str(tmp_path),
+            "--primary-invite",
+            str(tmp_path / "alpha-invite.json"),
+            "--backup-invite",
+            str(tmp_path / "backup-alpha-invite.json"),
+            "--out",
+            str(tmp_path / "maintenance"),
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--reliability-dir",
+            str(tmp_path / "reliability"),
+            "--skip-network-checks",
+            "--expected-primary-worker-id",
+            "worker_primary",
+            "--expected-backup-worker-id",
+            "worker_backup",
+            "--partner-report",
+            str(tmp_path / "partner-autopilot-report.json"),
+            "--preview-top-action",
+            "--run-top-action",
+            "--allow-execute",
+        ]
+    )
+
+    assert args.func.__name__ == "operator_maintenance_command"
+    assert args.repo == str(tmp_path)
+    assert args.primary_invite == str(tmp_path / "alpha-invite.json")
+    assert args.out == str(tmp_path / "maintenance")
+    assert args.home == str(tmp_path / ".mesh")
+    assert args.skip_network_checks is True
+    assert args.preview_top_action is True
+    assert args.run_top_action is True
+    assert args.allow_execute is True
+
+
+def test_operator_maintenance_command_invokes_powershell(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"
+    scripts = repo / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    maintenance_script = scripts / "operator-maintenance.ps1"
+    maintenance_script.write_text("Write-Host \"maintenance\"", encoding="utf-8")
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "maintenance",
+            "--repo",
+            str(repo),
+            "--primary-invite",
+            str(tmp_path / "alpha-invite.json"),
+            "--out",
+            str(tmp_path / "maintenance"),
+            "--preview-top-action",
+            "--run-top-action",
+            "--allow-execute",
+        ]
+    )
+
+    captured = {}
+
+    def fake_run(command, check=False, text=False, capture_output=False, **kwargs):
+        captured["command"] = command
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+
+    cli_module.operator_maintenance_command(args)
+
+    expected_script = str((repo / "scripts" / "operator-maintenance.ps1").resolve())
+    assert captured["command"][0] == "powershell"
+    assert expected_script in captured["command"]
+    assert "-PrimaryInvite" in captured["command"]
+    assert str(tmp_path / "alpha-invite.json") in captured["command"]
+    assert "-PreviewTopAction" in captured["command"]
+    assert "-RunTopAction" in captured["command"]
+    assert "-AllowExecute" in captured["command"]
+
+
+def test_operator_maintenance_requires_execute_to_run_top_action(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "maintenance",
+            "--repo",
+            str(tmp_path),
+            "--primary-invite",
+            str(tmp_path / "alpha-invite.json"),
+            "--out",
+            str(tmp_path / "maintenance"),
+            "--run-top-action",
+        ]
+    )
+
+    with pytest.raises(SystemExit):
+        cli_module.operator_maintenance_command(args)
 
 
 def _daily_report(
