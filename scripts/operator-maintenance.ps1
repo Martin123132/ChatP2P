@@ -9,6 +9,7 @@ Usage:
     -OutRoot C:\ChatP2PData\maintenance
 #>
 
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$Root = (Get-Location).Path,
     [Parameter(Mandatory = $true)]
@@ -23,6 +24,7 @@ param(
     [string[]]$PartnerReport = @(),
     [switch]$PreviewTopAction,
     [switch]$RunTopAction,
+    [switch]$AllowExecute,
     [string]$Python = "python"
 )
 
@@ -60,8 +62,8 @@ try {
     $meshHomePath = if ([string]::IsNullOrWhiteSpace($MeshHome)) { Join-Path $repoRoot ".mesh" } else { $MeshHome }
     $outRoot = Resolve-PathOrDefault -Path $OutRoot -Fallback (Join-Path $repoRoot "ChatP2PData/maintenance") -Label "out root"
     $dailyCheckDir = Join-Path $outRoot "daily-check"
-  $consoleDir = Join-Path $outRoot "operator-console"
-  $selfHealDir = Join-Path $outRoot "operator-self-heal"
+    $consoleDir = Join-Path $outRoot "operator-console"
+    $selfHealDir = Join-Path $outRoot "operator-self-heal"
     $reliabilityPath = if ([string]::IsNullOrWhiteSpace($ReliabilityDir)) { Join-Path $outRoot "reliability" } else { $ReliabilityDir }
 
     New-Item -ItemType Directory -Force -Path $outRoot, $dailyCheckDir, $consoleDir, $selfHealDir | Out-Null
@@ -190,18 +192,22 @@ try {
     }
 
     if ($RunTopAction -and $action -and $action.can_run_without_partner -and $action.partner_required -eq $false) {
-        Write-Host "`nRunning top local action now (allowed in operator V1)..."
-        $runActionArgs = @(
-            "-m", "chatp2p.cli", "operator", "run-action",
-            "--queue", $actionQueueJson,
-            "--out", (Join-Path $outRoot "operator-action-run-report.json"),
-            "--execute",
-            "--json"
-        )
-        if ($action.action_id) {
-            $runActionArgs += @("--action", $action.action_id)
+        if (-not $AllowExecute) {
+            Write-Warning "RunTopAction is set, but execution is disabled. Add -AllowExecute to run this local action."
+        } elseif ($PSCmdlet.ShouldProcess($action.action_id, "operator run-action --execute")) {
+            Write-Host "`nRunning top local action now (allowed in operator V1)..."
+            $runActionArgs = @(
+                "-m", "chatp2p.cli", "operator", "run-action",
+                "--queue", $actionQueueJson,
+                "--out", (Join-Path $outRoot "operator-action-run-report.json"),
+                "--execute",
+                "--json"
+            )
+            if ($action.action_id) {
+                $runActionArgs += @("--action", $action.action_id)
+            }
+            Invoke-Command-Strict -Name "operator run-action --execute" -Args $runActionArgs
         }
-        Invoke-Command-Strict -Name "operator run-action --execute" -Args $runActionArgs
     } elseif ($RunTopAction) {
         Write-Warning "Top action was not safe for local execute; run-action was not invoked."
     }

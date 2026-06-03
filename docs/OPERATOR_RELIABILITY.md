@@ -114,6 +114,18 @@ If you want to keep the same offline loop in one step, use:
 
 This script runs the read-only console, daily check, action queue, and self-heal commands in sequence and prints the operator summary.
 
+To execute the top local action (only when safe and only after reviewing), add `-RunTopAction` + `-AllowExecute`:
+
+```powershell
+.\scripts\operator-maintenance.ps1 `
+  -PrimaryInvite D:\ChatP2PData\alpha-invite.json `
+  -BackupInvite D:\ChatP2PData\backup-alpha-invite.json `
+  -OutRoot D:\ChatP2PData\maintenance `
+  -SkipNetworkChecks `
+  -RunTopAction `
+  -AllowExecute
+```
+
 ## Daily Check
 
 Use daily check when you want one lightweight pass/warn/fail answer:

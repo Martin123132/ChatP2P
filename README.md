@@ -102,7 +102,21 @@ You can run the same sequence locally with one helper script:
   -PreviewTopAction
 ```
 
-This runs, in order, `operator console`, `operator daily-check`, `operator action-queue`, and `operator self-heal` and prints the summary from the latest console/self-heal pass. You can add `-RunTopAction` only when you have verified the planned action and want V1 explicit local execute.
+This runs, in order, `operator console`, `operator daily-check`, `operator action-queue`, and `operator self-heal` and prints the summary from the latest console/self-heal pass. You can add `-PreviewTopAction` to inspect the generated `run-action` command first.
+
+For execute, the script is intentionally explicit:
+
+```powershell
+.\scripts\operator-maintenance.ps1 `
+  -PrimaryInvite D:\ChatP2PData\alpha-invite.json `
+  -BackupInvite D:\ChatP2PData\backup-alpha-invite.json `
+  -OutRoot D:\ChatP2PData\maintenance `
+  -SkipNetworkChecks `
+  -RunTopAction `
+  -AllowExecute
+```
+
+`-AllowExecute` can also be combined with `-WhatIf` for a final confirmation-style dry-run path.
 
 You can regenerate the queue from an existing daily report:
 
