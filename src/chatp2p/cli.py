@@ -936,6 +936,71 @@ def operator_uninstall_reliability_task_command(args: argparse.Namespace) -> Non
         raise SystemExit(1)
 
 
+def _is_task_not_found_error(stderr: str | None) -> bool:
+    if not stderr:
+        return False
+    lowered = stderr.lower()
+    return (
+        "the system cannot find the file specified" in lowered
+        or "the system cannot find the file specified." in lowered
+        or "the specified task name" in lowered
+        and "not found" in lowered
+    )
+
+
+def operator_pause_command(args: argparse.Namespace) -> None:
+    def normalize_report(name: str, report: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        if report.get("ok"):
+            return report, True
+        if _is_task_not_found_error(report.get("stderr", "")):
+            report["status"] = "warn"
+            report["ok"] = True
+            report.setdefault("warnings", []).append(f"{name} task not found; already paused.")
+            report["errors"] = []
+            return report, True
+        return report, False
+
+    home = Path(args.home) if args.home else Path(".mesh")
+    steps: list[dict[str, Any]] = []
+    all_ok = True
+
+    for name, task_name, launcher in (
+        ("daily_check", args.daily_task_name, args.daily_launcher),
+        ("reliability_pack", args.reliability_task_name, args.reliability_launcher),
+    ):
+        report = uninstall_watchdog_task(
+            task_name=task_name,
+            home=home,
+            launcher_path=Path(launcher) if launcher else None,
+            delete_launcher=not args.keep_launcher,
+            dry_run=args.dry_run,
+        )
+        normalized_report, ok = normalize_report(name, report)
+        steps.append({"name": name, "report": normalized_report})
+        if not ok:
+            all_ok = False
+
+    pause_report = {
+        "schema": "chatp2p.operator-pause-report.v1",
+        "ok": all_ok,
+        "status": "pass" if all_ok else "fail",
+        "home": str(home),
+        "keep_launcher": bool(args.keep_launcher),
+        "dry_run": bool(args.dry_run),
+        "ignore_missing": True,
+        "steps": steps,
+    }
+    if args.json:
+        print(json.dumps(pause_report, indent=2, sort_keys=True))
+    else:
+        print(f"operator pause complete: {pause_report['status']}")
+        print(f"  home: {pause_report['home']}")
+        print(f"  daily task: {pause_report['steps'][0]['report'].get('status')}")
+        print(f"  reliability task: {pause_report['steps'][1]['report'].get('status')}")
+    if not all_ok:
+        raise SystemExit(1)
+
+
 def serve_coordinator(args: argparse.Namespace) -> None:
     home = Path(args.home)
     identity = _load_or_create_identity(home, "coordinator")
@@ -3425,6 +3490,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print uninstall plan without deleting task or launcher",
     )
     operator_uninstall_reliability_task_parser.set_defaults(func=operator_uninstall_reliability_task_command)
+
+    operator_pause_parser = operator_subcommands.add_parser(
+        "pause",
+        help="Pause local operator automation by removing scheduled tasks and launchers",
+    )
+    operator_pause_parser.add_argument("--home", default=".mesh", help="Runtime home used when resolving task launchers")
+    operator_pause_parser.add_argument(
+        "--daily-task-name",
+        default=DEFAULT_DAILY_CHECK_TASK_NAME,
+        help="Name of the installed daily-check task",
+    )
+    operator_pause_parser.add_argument(
+        "--reliability-task-name",
+        default=DEFAULT_RELIABILITY_TASK_NAME,
+        help="Name of the installed reliability-task task",
+    )
+    operator_pause_parser.add_argument(
+        "--daily-launcher",
+        default=None,
+        help="Optional path to the daily-check launcher (.cmd) to remove",
+    )
+    operator_pause_parser.add_argument(
+        "--reliability-launcher",
+        default=None,
+        help="Optional path to the reliability launcher (.cmd) to remove",
+    )
+    operator_pause_parser.add_argument(
+        "--keep-launcher",
+        action="store_true",
+        help="Keep generated launcher files; remove only scheduled tasks",
+    )
+    operator_pause_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print uninstall plans without removing anything",
+    )
+    operator_pause_parser.add_argument("--json", action="store_true", help="Print full JSON pause report")
+    operator_pause_parser.set_defaults(func=operator_pause_command)
 
     bootstrap_provider_parser = operator_subcommands.add_parser(
         "bootstrap-provider",

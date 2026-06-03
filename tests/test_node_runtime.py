@@ -1,4 +1,5 @@
 import builtins
+import json
 import sys
 from pathlib import Path
 
@@ -402,6 +403,222 @@ def test_operator_uninstall_daily_check_task_command_raises_on_report_failure(mo
 
     with pytest.raises(SystemExit):
         cli_module.operator_uninstall_daily_check_task_command(args)
+
+
+def test_operator_pause_command_parse(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "pause",
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--daily-task-name",
+            "ChatP2P Daily Check",
+            "--reliability-task-name",
+            "ChatP2P Reliability Pack",
+            "--daily-launcher",
+            str(tmp_path / "chatp2p-daily-check.cmd"),
+            "--reliability-launcher",
+            str(tmp_path / "chatp2p-reliability-pack.cmd"),
+            "--keep-launcher",
+            "--dry-run",
+            "--json",
+        ]
+    )
+
+    assert args.func.__name__ == "operator_pause_command"
+    assert args.home == str(tmp_path / ".mesh")
+    assert args.daily_task_name == "ChatP2P Daily Check"
+    assert args.reliability_task_name == "ChatP2P Reliability Pack"
+    assert args.daily_launcher == str(tmp_path / "chatp2p-daily-check.cmd")
+    assert args.reliability_launcher == str(tmp_path / "chatp2p-reliability-pack.cmd")
+    assert args.keep_launcher is True
+    assert args.dry_run is True
+    assert args.json is True
+
+
+def test_operator_pause_command_invokes_watchdog_uninstall_for_both_tasks(monkeypatch, tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "pause",
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--daily-task-name",
+            "ChatP2P Daily Check",
+            "--reliability-task-name",
+            "ChatP2P Reliability Pack",
+            "--daily-launcher",
+            str(tmp_path / "chatp2p-daily-check.cmd"),
+            "--reliability-launcher",
+            str(tmp_path / "chatp2p-reliability-pack.cmd"),
+            "--keep-launcher",
+            "--dry-run",
+        ]
+    )
+
+    calls = []
+
+    def fake_uninstall_watchdog_task(
+        *,
+        task_name: str,
+        home: Path,
+        launcher_path: Path | None,
+        delete_launcher: bool,
+        dry_run: bool,
+    ) -> dict:
+        calls.append((task_name, home, launcher_path, delete_launcher, dry_run))
+        return {
+            "schema": "chatp2p.windows-task-uninstall-report.v1",
+            "ok": True,
+            "status": "pass",
+            "dry_run": dry_run,
+            "task_name": task_name,
+            "plan": {},
+            "command": None,
+            "returncode": 0,
+            "stdout": "",
+            "stderr": "",
+            "errors": [],
+        }
+
+    monkeypatch.setattr(cli_module, "uninstall_watchdog_task", fake_uninstall_watchdog_task)
+    monkeypatch.setattr(builtins, "print", lambda *_, **__: None)
+
+    cli_module.operator_pause_command(args)
+
+    assert len(calls) == 2
+    assert calls[0][:4] == (
+        "ChatP2P Daily Check",
+        tmp_path / ".mesh",
+        tmp_path / "chatp2p-daily-check.cmd",
+        False,
+    )
+    assert calls[1][:4] == (
+        "ChatP2P Reliability Pack",
+        tmp_path / ".mesh",
+        tmp_path / "chatp2p-reliability-pack.cmd",
+        False,
+    )
+    assert calls[0][4] is True and calls[1][4] is True
+
+
+def test_operator_pause_command_tolerates_missing_task_errors(monkeypatch, tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "pause",
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--json",
+        ]
+    )
+
+    reported = []
+
+    def fake_uninstall_watchdog_task(
+        *,
+        task_name: str,
+        home: Path,
+        launcher_path: Path | None,
+        delete_launcher: bool,
+        dry_run: bool,
+    ) -> dict:
+        reported.append(task_name)
+        if task_name == "ChatP2P Daily Check":
+            return {
+                "schema": "chatp2p.windows-task-uninstall-report.v1",
+                "ok": False,
+                "status": "fail",
+                "dry_run": dry_run,
+                "task_name": task_name,
+                "plan": {},
+                "command": None,
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "The system cannot find the file specified.",
+                "errors": ["The system cannot find the file specified."],
+        }
+        return {
+            "schema": "chatp2p.windows-task-uninstall-report.v1",
+            "ok": False,
+            "status": "fail",
+            "dry_run": dry_run,
+            "task_name": task_name,
+            "plan": {},
+            "command": None,
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "The specified task name \"chatp2p-reliability-pack\" was not found.",
+            "errors": ["The specified task name \"chatp2p-reliability-pack\" was not found."],
+        }
+
+    rendered = []
+
+    def fake_print(*a, **k):
+        if a:
+            rendered.append(str(a[0]))
+
+    monkeypatch.setattr(cli_module, "uninstall_watchdog_task", fake_uninstall_watchdog_task)
+    monkeypatch.setattr(builtins, "print", fake_print)
+
+    cli_module.operator_pause_command(args)
+
+    assert set(reported) == {"ChatP2P Daily Check", "ChatP2P Reliability Pack"}
+    report = json.loads("".join(rendered))
+    assert report["ok"] is True
+    assert report["status"] == "pass"
+    assert report["ignore_missing"] is True
+    assert report["steps"][0]["report"]["status"] == "warn"
+    assert report["steps"][0]["report"]["ok"] is True
+    assert any("already paused" in w for w in report["steps"][0]["report"]["warnings"])
+    assert report["steps"][1]["report"]["status"] == "warn"
+    assert report["steps"][1]["report"]["ok"] is True
+
+
+def test_operator_pause_command_raises_on_non_missing_failure(monkeypatch, tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "pause",
+            "--home",
+            str(tmp_path / ".mesh"),
+        ]
+    )
+
+    def fake_uninstall_watchdog_task(
+        *,
+        task_name: str,
+        home: Path,
+        launcher_path: Path | None,
+        delete_launcher: bool,
+        dry_run: bool,
+    ) -> dict:
+        return {
+            "schema": "chatp2p.windows-task-uninstall-report.v1",
+            "ok": False,
+            "status": "fail",
+            "dry_run": dry_run,
+            "task_name": task_name,
+            "plan": {},
+            "command": None,
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "nope",
+            "errors": ["nope"],
+        }
+
+    monkeypatch.setattr(cli_module, "uninstall_watchdog_task", fake_uninstall_watchdog_task)
+    monkeypatch.setattr(builtins, "print", lambda *_, **__: None)
+
+    with pytest.raises(SystemExit):
+        cli_module.operator_pause_command(args)
+
+
 def test_node_status_can_derive_coordinator_from_invite(tmp_path):
     parser = build_parser()
     invite_path = tmp_path / "alpha-invite.json"
