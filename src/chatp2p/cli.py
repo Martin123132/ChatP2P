@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -540,6 +541,7 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
     action_queue_json = daily_dir / "action-queue.json"
     self_heal_json = self_heal_dir / "operator-self-heal-report.json"
     action_run_json = out_root / "operator-action-run-report.json"
+    maintenance_json = out_root / "operator-maintenance-report.json"
 
     out_root.mkdir(parents=True, exist_ok=True)
     daily_dir.mkdir(parents=True, exist_ok=True)
@@ -644,9 +646,58 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
         ("operator self-heal", self_heal_command),
     ]
 
+    maintenance_report: dict[str, Any] = {
+        "schema": "chatp2p.operator-maintenance-report.v1",
+        "status": "pass",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "config": {
+            "repo": str(repo_root),
+            "home": home,
+            "primary_invite": str(args.primary_invite),
+            "backup_invite": str(args.backup_invite) if args.backup_invite else None,
+            "out_dir": str(out_root),
+            "reliability_dir": str(args.reliability_dir) if args.reliability_dir is not None else None,
+            "expected_primary_worker_id": args.expected_primary_worker_id,
+            "expected_backup_worker_id": args.expected_backup_worker_id,
+            "skip_network_checks": bool(args.skip_network_checks),
+            "partner_report": [str(path) for path in args.partner_report or []],
+        },
+        "artifacts": {
+            "daily_check_json": str(daily_check_path),
+            "console_json": str(console_json),
+            "action_queue_json": str(action_queue_json),
+            "self_heal_json": str(self_heal_json),
+            "action_run_json": str(action_run_json),
+            "maintenance_json": str(maintenance_json),
+        },
+        "steps": [],
+    }
+
     for index, (label, command) in enumerate(steps, start=1):
         print(f"[{index}/{len(steps)}] {label}...")
-        _run_operator_maintenance_command(command, label=label, cwd=repo_root)
+        step_report = {
+            "label": label,
+            "command": [str(piece) for piece in command],
+            "returncode": 0,
+            "status": "pass",
+        }
+        maintenance_report["steps"].append(step_report)
+        try:
+            _run_operator_maintenance_command(command, label=label, cwd=repo_root)
+        except SystemExit as exc:
+            step_report["status"] = "fail"
+            step_report["returncode"] = 1
+            step_report["error"] = str(exc)
+            maintenance_report["status"] = "fail"
+            maintenance_json.write_text(
+                json.dumps(maintenance_report, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            if args.json:
+                print(json.dumps(maintenance_report, indent=2, sort_keys=True))
+            else:
+                print(f"\nOperator maintenance failed during {label}: {str(exc)}")
+            raise
 
     console_report = read_json_file(console_json, description="operator console report")
     self_heal_report = read_json_file(self_heal_json, description="operator self-heal report")
@@ -689,6 +740,15 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
         )
         print(f"Run preview:              {safe_action_message}")
         print(f"Top action status:        {top_action_status}")
+
+    maintenance_report["summary"] = {
+        "can_continue_without_partner": console_summary.get("can_continue_without_partner"),
+        "recommended_next_action": console_summary.get("recommended_next_action"),
+        "top_action": top_action,
+        "top_action_status": top_action_status,
+        "top_action_partner_required": top_action.get("partner_required") if top_action else None,
+        "repairable_issue_count": self_heal_report.get("summary", {}).get("repairable_issue_count"),
+    }
 
     if args.preview_top_action and top_action_status == "safe_local":
         print("\nPreparing preview...")
@@ -740,6 +800,10 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
                 )
         else:
             print("run-top-action requires allow-execute to run local action")
+
+    maintenance_json.write_text(json.dumps(maintenance_report, indent=2, sort_keys=True), encoding="utf-8")
+    if args.json:
+        print(json.dumps(maintenance_report, indent=2, sort_keys=True))
 
 
 def operator_maintenance_command(args: argparse.Namespace) -> None:
@@ -3110,6 +3174,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-execute",
         action="store_true",
         help="Allow operator maintenance to execute the top action",
+    )
+    operator_maintenance_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the full maintenance JSON report",
     )
     operator_maintenance_parser.set_defaults(func=operator_maintenance_command)
 
