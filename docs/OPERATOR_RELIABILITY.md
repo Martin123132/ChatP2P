@@ -101,6 +101,19 @@ It writes:
 
 The report covers stale or missing daily-check reports, stale or missing Operator Console reports, stale reliability-pack evidence, missing action-run reports, and public privacy findings. Every V1 self-heal action is local and `partner_required: false`. To run a selected repair later, use the generated `operator run-action --dry-run` command first, then the matching `--execute` command only when you are happy with the exact structured command.
 
+If you want to keep the same offline loop in one step, use:
+
+```powershell
+.\scripts\operator-maintenance.ps1 `
+  -PrimaryInvite D:\ChatP2PData\alpha-invite.json `
+  -BackupInvite D:\ChatP2PData\backup-alpha-invite.json `
+  -OutRoot D:\ChatP2PData\maintenance `
+  -SkipNetworkChecks `
+  -PreviewTopAction
+```
+
+This script runs the read-only console, daily check, action queue, and self-heal commands in sequence and prints the operator summary.
+
 ## Daily Check
 
 Use daily check when you want one lightweight pass/warn/fail answer:
