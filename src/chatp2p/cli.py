@@ -525,7 +525,19 @@ def _run_operator_maintenance_command(
     label: str,
     cwd: Path,
 ) -> None:
-    result = subprocess.run(command, check=False, text=True, capture_output=False, cwd=str(cwd))
+    result = subprocess.run(
+        command,
+        check=False,
+        text=True,
+        capture_output=True,
+        cwd=str(cwd),
+    )
+    stdout = getattr(result, "stdout", "")
+    stderr = getattr(result, "stderr", "")
+    if stdout:
+        print(stdout.rstrip())
+    if stderr:
+        print(stderr.rstrip())
     if result.returncode:
         raise SystemExit(f"{label} failed with exit code {result.returncode}")
 
@@ -852,7 +864,19 @@ def operator_maintenance_command(args: argparse.Namespace) -> None:
     if args.allow_execute:
         command.append("-AllowExecute")
 
-    result = subprocess.run(command, check=False, text=True, capture_output=False)
+    result = subprocess.run(
+        command,
+        check=False,
+        text=True,
+        capture_output=True,
+        cwd=str(repo_root),
+    )
+    stdout = getattr(result, "stdout", "")
+    stderr = getattr(result, "stderr", "")
+    if stdout:
+        print(stdout.rstrip())
+    if stderr:
+        print(stderr.rstrip())
     if result.returncode:
         raise SystemExit(f"operator maintenance failed with exit code {result.returncode}")
 

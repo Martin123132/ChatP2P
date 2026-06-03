@@ -45,9 +45,9 @@ function Resolve-PathOrDefault {
 function Invoke-Command-Strict {
     param(
         [string]$Name,
-        [string[]]$Args
+        [string[]]$CommandArgs
     )
-    & $python @Args
+    & $python @CommandArgs
     if ($LASTEXITCODE -ne 0) {
         throw "$Name failed with exit code $LASTEXITCODE"
     }
@@ -96,7 +96,7 @@ try {
             $consoleArgs += @("--partner-report", $report)
         }
     }
-    Invoke-Command-Strict -Name "operator console" -Args $consoleArgs
+    Invoke-Command-Strict -Name "operator console" -CommandArgs $consoleArgs
 
     Write-Host "[2/4] operator daily-check..."
     $dailyArgs = @(
@@ -120,7 +120,7 @@ try {
     if ($SkipNetworkChecks) {
         $dailyArgs += "--skip-network-checks"
     }
-    Invoke-Command-Strict -Name "operator daily-check" -Args $dailyArgs
+    Invoke-Command-Strict -Name "operator daily-check" -CommandArgs $dailyArgs
 
     Write-Host "[3/4] rebuild action-queue..."
     $dailyCheckJson = Join-Path $dailyCheckDir "daily-check.json"
@@ -133,7 +133,7 @@ try {
         "--out", $dailyCheckDir,
         "--json"
     )
-    Invoke-Command-Strict -Name "operator action-queue" -Args $queueArgs
+    Invoke-Command-Strict -Name "operator action-queue" -CommandArgs $queueArgs
 
     Write-Host "[4/4] operator self-heal..."
     $actionQueueJson = Join-Path $dailyCheckDir "action-queue.json"
@@ -152,7 +152,7 @@ try {
         "--out", $selfHealDir,
         "--json"
     )
-    Invoke-Command-Strict -Name "operator self-heal" -Args $selfHealArgs
+    Invoke-Command-Strict -Name "operator self-heal" -CommandArgs $selfHealArgs
 
     $selfHealJson = Join-Path $selfHealDir "operator-self-heal-report.json"
     $action = $null
@@ -206,7 +206,7 @@ try {
         if ($action.action_id) {
             $runActionArgs += @("--action", $action.action_id)
         }
-        Invoke-Command-Strict -Name "operator run-action --dry-run" -Args $runActionArgs
+            Invoke-Command-Strict -Name "operator run-action --dry-run" -CommandArgs $runActionArgs
     }
 
     if ($RunTopAction -and $action -and $topActionStatus -eq "safe_local") {
@@ -224,7 +224,7 @@ try {
             if ($action.action_id) {
                 $runActionArgs += @("--action", $action.action_id)
             }
-            Invoke-Command-Strict -Name "operator run-action --execute" -Args $runActionArgs
+            Invoke-Command-Strict -Name "operator run-action --execute" -CommandArgs $runActionArgs
         }
     } elseif ($RunTopAction) {
         throw "run-top-action requested, but top action is not safe for local execute. Regenerate the queue and resolve partner-required items first."
