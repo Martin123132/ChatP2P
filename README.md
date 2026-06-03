@@ -106,6 +106,8 @@ python -m chatp2p.cli operator maintenance `
 
 This runs, in order, `operator console`, `operator daily-check`, `operator action-queue`, and `operator self-heal` and prints the summary from the latest console/self-heal pass. You can add `--preview-top-action` to inspect the generated `run-action` command first.
 
+If `scripts\operator-maintenance.ps1` is missing, the command automatically falls back to an equivalent pure-Python sequence and still writes the same artifact set.
+
 You can also run the same flow with the helper script:
 
 ```powershell

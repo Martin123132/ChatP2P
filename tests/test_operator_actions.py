@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
+import sys
 
 import pytest
 
@@ -372,6 +373,66 @@ def test_operator_maintenance_command_invokes_powershell(monkeypatch, tmp_path):
     assert "-PreviewTopAction" in captured["command"]
     assert "-RunTopAction" in captured["command"]
     assert "-AllowExecute" in captured["command"]
+
+
+def test_operator_maintenance_command_falls_back_to_python_when_script_missing(monkeypatch, tmp_path):
+    parser = build_parser()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    args = parser.parse_args(
+        [
+            "operator",
+            "maintenance",
+            "--repo",
+            str(repo),
+            "--primary-invite",
+            str(tmp_path / "alpha-invite.json"),
+            "--out",
+            str(tmp_path / "maintenance"),
+            "--preview-top-action",
+            "--run-top-action",
+            "--allow-execute",
+        ]
+    )
+
+    captured_steps: list[list[str]] = []
+
+    def fake_runner(command: list[str], *, label: str, cwd: Path) -> None:
+        captured_steps.append(command.copy())
+
+    def fake_read_json_file(path: Path, description: str = "JSON file"):
+        path_text = str(path)
+        if path_text.endswith("operator-console.json"):
+            return {
+                "summary": {"can_continue_without_partner": True, "recommended_next_action": "continue_development"}
+            }
+        if path_text.endswith("operator-self-heal-report.json"):
+            return {"summary": {"repairable_issue_count": 0}}
+        if path_text.endswith("action-queue.json"):
+            return {
+                "next_action": {
+                    "action_id": "continue_development",
+                    "partner_required": False,
+                    "can_run_without_partner": True,
+                }
+            }
+        raise ValueError(f"unexpected JSON read: {path_text}")
+
+    monkeypatch.setattr(cli_module, "_run_operator_maintenance_command", fake_runner)
+    monkeypatch.setattr(cli_module, "read_json_file", fake_read_json_file)
+
+    cli_module.operator_maintenance_command(args)
+
+    assert len(captured_steps) == 6
+    assert Path(captured_steps[0][0]).name in {"python", "python.exe"} or captured_steps[0][0] == sys.executable
+    assert captured_steps[0][0] == sys.executable
+    assert captured_steps[0][2:5] == ["chatp2p.cli", "operator", "console"]
+    assert captured_steps[1][2:5] == ["chatp2p.cli", "operator", "daily-check"]
+    assert captured_steps[2][2:5] == ["chatp2p.cli", "operator", "action-queue"]
+    assert captured_steps[3][2:5] == ["chatp2p.cli", "operator", "self-heal"]
+    assert captured_steps[4][2:5] == ["chatp2p.cli", "operator", "run-action"]
+    assert captured_steps[5][2:5] == ["chatp2p.cli", "operator", "run-action"]
 
 
 def test_operator_maintenance_requires_execute_to_run_top_action(tmp_path):

@@ -127,6 +127,8 @@ Or the existing helper script:
 
 This script runs the read-only console, daily check, action queue, and self-heal commands in sequence and prints the operator summary.
 
+If `operator-maintenance.ps1` is unavailable, the `operator maintenance` command now falls back to a pure-Python sequence of the same subcommands automatically, so the maintenance loop remains usable on systems where PowerShell automation is not present.
+
 To execute the top local action (only when safe and only after reviewing), add `-RunTopAction` + `-AllowExecute`:
 
 ```powershell

@@ -518,13 +518,210 @@ def operator_self_heal_command(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def _run_operator_maintenance_command(
+    command: list[str],
+    *,
+    label: str,
+    cwd: Path,
+) -> None:
+    result = subprocess.run(command, check=False, text=True, capture_output=False, cwd=str(cwd))
+    if result.returncode:
+        raise SystemExit(f"{label} failed with exit code {result.returncode}")
+
+
+def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path) -> None:
+    home = str(Path(args.home).resolve()) if args.home else str((repo_root / ".mesh").resolve())
+    out_root = Path(args.out).resolve()
+    daily_dir = out_root / "daily-check"
+    console_dir = out_root / "operator-console"
+    self_heal_dir = out_root / "operator-self-heal"
+    daily_check_path = daily_dir / "daily-check.json"
+    console_json = console_dir / "operator-console.json"
+    action_queue_json = daily_dir / "action-queue.json"
+    self_heal_json = self_heal_dir / "operator-self-heal-report.json"
+    action_run_json = out_root / "operator-action-run-report.json"
+
+    out_root.mkdir(parents=True, exist_ok=True)
+    daily_dir.mkdir(parents=True, exist_ok=True)
+    console_dir.mkdir(parents=True, exist_ok=True)
+    self_heal_dir.mkdir(parents=True, exist_ok=True)
+
+    exe = sys.executable
+    console_command = [
+        exe,
+        "-m",
+        "chatp2p.cli",
+        "operator",
+        "console",
+        "--repo",
+        str(repo_root),
+        "--home",
+        home,
+        "--primary-invite",
+        str(args.primary_invite),
+        "--out",
+        str(console_dir),
+        "--daily-check-dir",
+        str(daily_dir),
+        "--json",
+    ]
+    if args.backup_invite:
+        console_command.extend(["--backup-invite", str(args.backup_invite)])
+    if args.expected_primary_worker_id:
+        console_command.extend(["--expected-primary-worker-id", str(args.expected_primary_worker_id)])
+    if args.expected_backup_worker_id:
+        console_command.extend(["--expected-backup-worker-id", str(args.expected_backup_worker_id)])
+    if args.reliability_dir is not None:
+        console_command.extend(["--reliability-dir", str(args.reliability_dir)])
+    if args.skip_network_checks:
+        console_command.append("--skip-network-checks")
+    for partner_report in args.partner_report or []:
+        console_command.extend(["--partner-report", str(partner_report)])
+
+    daily_command = [
+        exe,
+        "-m",
+        "chatp2p.cli",
+        "operator",
+        "daily-check",
+        "--repo",
+        str(repo_root),
+        "--home",
+        home,
+        "--primary-invite",
+        str(args.primary_invite),
+        "--out",
+        str(daily_dir),
+        "--console-out",
+        str(console_dir),
+        "--json",
+    ]
+    if args.backup_invite:
+        daily_command.extend(["--backup-invite", str(args.backup_invite)])
+    if args.expected_primary_worker_id:
+        daily_command.extend(["--expected-primary-worker-id", str(args.expected_primary_worker_id)])
+    if args.expected_backup_worker_id:
+        daily_command.extend(["--expected-backup-worker-id", str(args.expected_backup_worker_id)])
+    if args.reliability_dir is not None:
+        daily_command.extend(["--reliability-dir", str(args.reliability_dir)])
+    if args.skip_network_checks:
+        daily_command.append("--skip-network-checks")
+
+    action_queue_command = [
+        exe,
+        "-m",
+        "chatp2p.cli",
+        "operator",
+        "action-queue",
+        "--daily-report",
+        str(daily_check_path),
+        "--out",
+        str(daily_dir),
+        "--json",
+    ]
+
+    self_heal_command = [
+        exe,
+        "-m",
+        "chatp2p.cli",
+        "operator",
+        "self-heal",
+        "--console-report",
+        str(console_json),
+        "--daily-report",
+        str(daily_check_path),
+        "--action-queue",
+        str(action_queue_json),
+        "--out",
+        str(self_heal_dir),
+        "--json",
+    ]
+
+    steps: list[tuple[str, list[str]]] = [
+        ("operator console", console_command),
+        ("operator daily-check", daily_command),
+        ("operator action-queue", action_queue_command),
+        ("operator self-heal", self_heal_command),
+    ]
+
+    for index, (label, command) in enumerate(steps, start=1):
+        print(f"[{index}/{len(steps)}] {label}...")
+        _run_operator_maintenance_command(command, label=label, cwd=repo_root)
+
+    console_report = read_json_file(console_json, description="operator console report")
+    self_heal_report = read_json_file(self_heal_json, description="operator self-heal report")
+    action_queue = read_json_file(action_queue_json, description="operator action queue")
+    next_action = action_queue.get("next_action") if isinstance(action_queue, dict) else None
+
+    console_summary = console_report.get("summary", {})
+    print("\nOperator maintenance complete.")
+    print(f"Can continue without partner: {console_summary.get('can_continue_without_partner')}")
+    print(f"Recommended next action:  {console_summary.get('recommended_next_action')}")
+    print(
+        f"Self-heal summary:        {self_heal_report.get('summary', {}).get('repairable_issue_count')} repairable "
+        f"issue(s)"
+    )
+
+    if isinstance(next_action, dict):
+        safe_action_message = (
+            "safe to dry-run locally" if next_action.get("can_run_without_partner") else "requires partner to act"
+        )
+        print(
+            f"Top queue action:         {next_action.get('action_id')} (partner_required={next_action.get('partner_required')})"
+        )
+        print(f"Run preview:              {safe_action_message}")
+
+    if args.preview_top_action:
+        print("\nPreparing preview...")
+        preview_command = [
+            exe,
+            "-m",
+            "chatp2p.cli",
+            "operator",
+            "run-action",
+            "--queue",
+            str(action_queue_json),
+            "--out",
+            str(action_run_json),
+            "--json",
+        ]
+        if next_action:
+            preview_command.extend(["--action", str(next_action.get("action_id"))])
+        _run_operator_maintenance_command(preview_command, label="operator run-action (dry-run)", cwd=repo_root)
+
+    if args.run_top_action and next_action:
+        if args.allow_execute:
+            if next_action.get("partner_required") is False:
+                print("\nRunning top local action now (allowed in operator V1)...")
+                execute_command = [
+                    exe,
+                    "-m",
+                    "chatp2p.cli",
+                    "operator",
+                    "run-action",
+                    "--queue",
+                    str(action_queue_json),
+                    "--out",
+                    str(action_run_json),
+                    "--execute",
+                    "--json",
+                ]
+                if next_action.get("action_id"):
+                    execute_command.extend(["--action", str(next_action.get("action_id"))])
+                _run_operator_maintenance_command(execute_command, label="operator run-action (execute)", cwd=repo_root)
+            else:
+                print("Top action is not safe for local execute; run-action was not invoked.")
+        else:
+            print("run-top-action requires allow-execute to run local action")
+
+
 def operator_maintenance_command(args: argparse.Namespace) -> None:
     if args.run_top_action and not args.allow_execute:
         raise SystemExit("--run-top-action requires --allow-execute")
 
     script_path = (Path(args.repo) / "scripts" / "operator-maintenance.ps1").resolve()
     if not script_path.exists():
-        raise SystemExit(f"operator-maintenance.ps1 not found at: {script_path}")
+        return _run_operator_maintenance_fallback(args, Path(args.repo).resolve())
 
     repo_root = Path(args.repo).resolve()
     command = [
