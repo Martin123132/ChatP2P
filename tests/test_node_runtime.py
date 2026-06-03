@@ -179,6 +179,131 @@ def test_operator_uninstall_daily_check_task_command_parse(tmp_path):
     assert args.dry_run is True
 
 
+def test_operator_uninstall_reliability_task_command_parse(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "uninstall-reliability-task",
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--task-name",
+            "ChatP2P Reliability Pack",
+            "--launcher",
+            str(tmp_path / "chatp2p-reliability-pack.cmd"),
+            "--keep-launcher",
+            "--dry-run",
+        ]
+    )
+
+    assert args.func.__name__ == "operator_uninstall_reliability_task_command"
+    assert args.home == str(tmp_path / ".mesh")
+    assert args.task_name == "ChatP2P Reliability Pack"
+    assert args.launcher == str(tmp_path / "chatp2p-reliability-pack.cmd")
+    assert args.keep_launcher is True
+    assert args.dry_run is True
+
+
+def test_operator_uninstall_reliability_task_command_invokes_uninstall_watchdog(monkeypatch, tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "uninstall-reliability-task",
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--task-name",
+            "ChatP2P Reliability Pack",
+            "--launcher",
+            str(tmp_path / "chatp2p-reliability-pack.cmd"),
+            "--keep-launcher",
+            "--dry-run",
+        ]
+    )
+
+    captured = {}
+
+    def fake_uninstall_watchdog_task(
+        *,
+        task_name: str,
+        home: Path,
+        launcher_path: Path | None,
+        delete_launcher: bool,
+        dry_run: bool,
+    ) -> dict:
+        captured["task_name"] = task_name
+        captured["home"] = home
+        captured["launcher_path"] = launcher_path
+        captured["delete_launcher"] = delete_launcher
+        captured["dry_run"] = dry_run
+        return {
+            "schema": "chatp2p.windows-task-uninstall-report.v1",
+            "ok": True,
+            "status": "pass",
+            "dry_run": dry_run,
+            "task_name": task_name,
+            "plan": {},
+            "command": None,
+            "returncode": 0,
+            "stdout": "",
+            "stderr": "",
+            "errors": [],
+        }
+
+    monkeypatch.setattr(cli_module, "uninstall_watchdog_task", fake_uninstall_watchdog_task)
+    monkeypatch.setattr(builtins, "print", lambda *args, **kwargs: None)
+
+    cli_module.operator_uninstall_reliability_task_command(args)
+
+    assert captured["task_name"] == "ChatP2P Reliability Pack"
+    assert captured["home"] == tmp_path / ".mesh"
+    assert captured["launcher_path"] == tmp_path / "chatp2p-reliability-pack.cmd"
+    assert captured["delete_launcher"] is False
+    assert captured["dry_run"] is True
+
+
+def test_operator_uninstall_reliability_task_command_raises_on_report_failure(monkeypatch, tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "uninstall-reliability-task",
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--task-name",
+            "ChatP2P Reliability Pack",
+        ]
+    )
+
+    def fake_uninstall_watchdog_task(
+        *,
+        task_name: str,
+        home: Path,
+        launcher_path: Path | None,
+        delete_launcher: bool,
+        dry_run: bool,
+    ) -> dict:
+        return {
+            "schema": "chatp2p.windows-task-uninstall-report.v1",
+            "ok": False,
+            "status": "fail",
+            "dry_run": dry_run,
+            "task_name": task_name,
+            "plan": {},
+            "command": None,
+            "returncode": 1,
+            "stdout": "",
+            "stderr": "nope",
+            "errors": ["nope"],
+        }
+
+    monkeypatch.setattr(cli_module, "uninstall_watchdog_task", fake_uninstall_watchdog_task)
+    monkeypatch.setattr(builtins, "print", lambda *args, **kwargs: None)
+
+    with pytest.raises(SystemExit):
+        cli_module.operator_uninstall_reliability_task_command(args)
+
+
 def test_operator_uninstall_daily_check_task_command_invokes_uninstall_watchdog(monkeypatch, tmp_path):
     parser = build_parser()
     args = parser.parse_args(

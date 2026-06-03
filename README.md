@@ -454,6 +454,15 @@ chatp2p operator reliability-pack `
 
 The reliability pack writes network status, primary/backup verified echo inference proofs, token-redaction checks, and a `reliability-summary.md`. Deterministic failover smoke is skipped by default to avoid leaving single-worker proof jobs pending; use `--include-deterministic-smoke` when you deliberately want that older proof. Install a local recurring Windows check with `chatp2p operator install-reliability-task ... --interval-minutes 30`. Full details live in [docs/OPERATOR_RELIABILITY.md](docs/OPERATOR_RELIABILITY.md).
 
+If you need to remove a scheduled reliability pack task, use:
+
+```powershell
+python -m chatp2p.cli operator uninstall-reliability-task `
+  --home D:\ChatP2PData\.runtime `
+  --task-name "ChatP2P Reliability Pack" `
+  --launcher D:\ChatP2PData\.runtime\chatp2p-reliability-pack.cmd
+```
+
 For a read-only snapshot of what to do next, run `chatp2p operator console ...`. It does not create proof jobs, restart processes, or delete old artifacts; it turns existing health, reliability, privacy, autopilot, history, and stale-report evidence into one static operator page.
 
 To let the node check and restart managed processes from the invite, run a one-shot watchdog check:

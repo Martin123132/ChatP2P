@@ -223,10 +223,10 @@ The generated launcher lives under:
 D:\ChatP2PData\reliability-pack-live\run\
 ```
 
-Remove the task with:
+Remove the reliability-task automation with:
 
 ```powershell
-python -m chatp2p.cli operator uninstall-daily-check-task `
+python -m chatp2p.cli operator uninstall-reliability-task `
   --home D:\ChatP2PData\.mesh `
   --task-name "ChatP2P Reliability Pack" `
   --launcher D:\ChatP2PData\.runtime\chatp2p-reliability-pack.cmd

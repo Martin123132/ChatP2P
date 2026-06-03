@@ -919,6 +919,23 @@ def operator_uninstall_daily_check_task_command(args: argparse.Namespace) -> Non
         raise SystemExit(1)
 
 
+def operator_uninstall_reliability_task_command(args: argparse.Namespace) -> None:
+    try:
+        report = uninstall_watchdog_task(
+            task_name=args.task_name,
+            home=Path(args.home) if args.home else None,
+            launcher_path=Path(args.launcher) if args.launcher else None,
+            delete_launcher=not args.keep_launcher,
+            dry_run=args.dry_run,
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
 def serve_coordinator(args: argparse.Namespace) -> None:
     home = Path(args.home)
     identity = _load_or_create_identity(home, "coordinator")
@@ -3377,6 +3394,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print uninstall plan without deleting task or launcher",
     )
     operator_uninstall_daily_check_task_parser.set_defaults(func=operator_uninstall_daily_check_task_command)
+
+    operator_uninstall_reliability_task_parser = operator_subcommands.add_parser(
+        "uninstall-reliability-task",
+        help="Uninstall the local Windows Scheduled Task used by operator reliability pack",
+    )
+    operator_uninstall_reliability_task_parser.add_argument(
+        "--home",
+        default=".mesh",
+        help="Local runtime home used when creating scheduled tasks",
+    )
+    operator_uninstall_reliability_task_parser.add_argument(
+        "--task-name",
+        default=DEFAULT_RELIABILITY_TASK_NAME,
+        help="Windows Scheduled Task name",
+    )
+    operator_uninstall_reliability_task_parser.add_argument(
+        "--launcher",
+        default=None,
+        help="Optional generated launcher path to delete",
+    )
+    operator_uninstall_reliability_task_parser.add_argument(
+        "--keep-launcher",
+        action="store_true",
+        help="Keep the launcher files instead of deleting them",
+    )
+    operator_uninstall_reliability_task_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print uninstall plan without deleting task or launcher",
+    )
+    operator_uninstall_reliability_task_parser.set_defaults(func=operator_uninstall_reliability_task_command)
 
     bootstrap_provider_parser = operator_subcommands.add_parser(
         "bootstrap-provider",
