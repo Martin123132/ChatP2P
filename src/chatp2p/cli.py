@@ -654,6 +654,24 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
     next_action = action_queue.get("next_action") if isinstance(action_queue, dict) else None
 
     console_summary = console_report.get("summary", {})
+    top_action = next_action if isinstance(next_action, dict) else None
+    top_action_status = "none"
+    top_action_can_run_without_partner = False
+    if top_action:
+        has_local_commands = bool(top_action.get("suggested_commands"))
+        if "can_run_without_partner" in top_action:
+            top_action_can_run_without_partner = bool(top_action.get("can_run_without_partner"))
+        else:
+            # Legacy compatibility: if a queue entry omits this field, derive from partner_required.
+            top_action_can_run_without_partner = not bool(top_action.get("partner_required"))
+
+        if top_action.get("partner_required"):
+            top_action_status = "partner_required"
+        elif top_action_can_run_without_partner and has_local_commands:
+            top_action_status = "safe_local"
+        else:
+            top_action_status = "not_local_executable"
+
     print("\nOperator maintenance complete.")
     print(f"Can continue without partner: {console_summary.get('can_continue_without_partner')}")
     print(f"Recommended next action:  {console_summary.get('recommended_next_action')}")
@@ -664,14 +682,15 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
 
     if isinstance(next_action, dict):
         safe_action_message = (
-            "safe to dry-run locally" if next_action.get("can_run_without_partner") else "requires partner to act"
+            "safe to dry-run locally" if top_action_can_run_without_partner else "requires partner to act"
         )
         print(
             f"Top queue action:         {next_action.get('action_id')} (partner_required={next_action.get('partner_required')})"
         )
         print(f"Run preview:              {safe_action_message}")
+        print(f"Top action status:        {top_action_status}")
 
-    if args.preview_top_action:
+    if args.preview_top_action and top_action_status == "safe_local":
         print("\nPreparing preview...")
         preview_command = [
             exe,
@@ -688,10 +707,15 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
         if next_action:
             preview_command.extend(["--action", str(next_action.get("action_id"))])
         _run_operator_maintenance_command(preview_command, label="operator run-action (dry-run)", cwd=repo_root)
+    elif args.preview_top_action:
+        if top_action:
+            print("Skipping preview because top action cannot be run locally.")
+        else:
+            raise SystemExit("run-top-action preview requested but no executable top action is available.")
 
     if args.run_top_action and next_action:
         if args.allow_execute:
-            if next_action.get("partner_required") is False:
+            if top_action_status == "safe_local":
                 print("\nRunning top local action now (allowed in operator V1)...")
                 execute_command = [
                     exe,
@@ -710,7 +734,10 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
                     execute_command.extend(["--action", str(next_action.get("action_id"))])
                 _run_operator_maintenance_command(execute_command, label="operator run-action (execute)", cwd=repo_root)
             else:
-                print("Top action is not safe for local execute; run-action was not invoked.")
+                raise SystemExit(
+                    "run-top-action requested, but top action is not safe for local execute. "
+                    "Regenerate the queue and resolve partner-required items first."
+                )
         else:
             print("run-top-action requires allow-execute to run local action")
 

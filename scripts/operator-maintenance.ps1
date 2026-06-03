@@ -175,6 +175,24 @@ try {
             "requires partner to act"
         }
         Write-Host "Run preview:              $safeActionMessage"
+        if ($action.partner_required -or -not $action.can_run_without_partner) {
+            $topActionStatus = "not_local_executable"
+        } elseif (-not $action.suggested_commands) {
+            $topActionStatus = "missing_commands"
+        } else {
+            $topActionStatus = "safe_local"
+        }
+        Write-Host "Top action status:        $topActionStatus"
+    } else {
+        $topActionStatus = "none"
+    }
+
+    if ($PreviewTopAction -and $topActionStatus -ne "safe_local") {
+        if ($action) {
+            Write-Warning "Skipping preview because top action cannot be run locally."
+        } else {
+            throw "run-top-action preview requested but no executable top action is available."
+        }
     }
 
     if ($action -and $PreviewTopAction) {
@@ -191,7 +209,7 @@ try {
         Invoke-Command-Strict -Name "operator run-action --dry-run" -Args $runActionArgs
     }
 
-    if ($RunTopAction -and $action -and $action.can_run_without_partner -and $action.partner_required -eq $false) {
+    if ($RunTopAction -and $action -and $topActionStatus -eq "safe_local") {
         if (-not $AllowExecute) {
             Write-Warning "RunTopAction is set, but execution is disabled. Add -AllowExecute to run this local action."
         } elseif ($PSCmdlet.ShouldProcess($action.action_id, "operator run-action --execute")) {
@@ -209,7 +227,7 @@ try {
             Invoke-Command-Strict -Name "operator run-action --execute" -Args $runActionArgs
         }
     } elseif ($RunTopAction) {
-        Write-Warning "Top action was not safe for local execute; run-action was not invoked."
+        throw "run-top-action requested, but top action is not safe for local execute. Regenerate the queue and resolve partner-required items first."
     }
 }
 catch {

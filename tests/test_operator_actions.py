@@ -415,6 +415,7 @@ def test_operator_maintenance_command_falls_back_to_python_when_script_missing(m
                     "action_id": "continue_development",
                     "partner_required": False,
                     "can_run_without_partner": True,
+                    "suggested_commands": [{"argv": ["python"]}],
                 }
             }
         raise ValueError(f"unexpected JSON read: {path_text}")
@@ -433,6 +434,119 @@ def test_operator_maintenance_command_falls_back_to_python_when_script_missing(m
     assert captured_steps[3][2:5] == ["chatp2p.cli", "operator", "self-heal"]
     assert captured_steps[4][2:5] == ["chatp2p.cli", "operator", "run-action"]
     assert captured_steps[5][2:5] == ["chatp2p.cli", "operator", "run-action"]
+
+
+def test_operator_maintenance_skips_top_action_run_when_partner_required(monkeypatch, tmp_path):
+    parser = build_parser()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    args = parser.parse_args(
+        [
+            "operator",
+            "maintenance",
+            "--repo",
+            str(repo),
+            "--primary-invite",
+            str(tmp_path / "alpha-invite.json"),
+            "--out",
+            str(tmp_path / "maintenance"),
+            "--preview-top-action",
+            "--run-top-action",
+            "--allow-execute",
+        ]
+    )
+
+    captured_steps: list[list[str]] = []
+
+    def fake_runner(command: list[str], *, label: str, cwd: Path) -> None:
+        captured_steps.append(command.copy())
+
+    def fake_read_json_file(path: Path, description: str = "JSON file"):
+        path_text = str(path)
+        if path_text.endswith("operator-console.json"):
+            return {
+                "summary": {"can_continue_without_partner": True, "recommended_next_action": "continue_development"}
+            }
+        if path_text.endswith("operator-self-heal-report.json"):
+            return {"summary": {"repairable_issue_count": 0}}
+        if path_text.endswith("action-queue.json"):
+            return {
+                "next_action": {
+                    "action_id": "continue_development",
+                    "partner_required": True,
+                    "can_run_without_partner": False,
+                    "suggested_commands": [{"argv": ["python"]}],
+                }
+            }
+        raise ValueError(f"unexpected JSON read: {path_text}")
+
+    monkeypatch.setattr(cli_module, "_run_operator_maintenance_command", fake_runner)
+    monkeypatch.setattr(cli_module, "read_json_file", fake_read_json_file)
+
+    with pytest.raises(SystemExit):
+        cli_module.operator_maintenance_command(args)
+
+    assert len(captured_steps) == 4
+    assert captured_steps[0][2:5] == ["chatp2p.cli", "operator", "console"]
+    assert captured_steps[1][2:5] == ["chatp2p.cli", "operator", "daily-check"]
+    assert captured_steps[2][2:5] == ["chatp2p.cli", "operator", "action-queue"]
+    assert captured_steps[3][2:5] == ["chatp2p.cli", "operator", "self-heal"]
+
+
+def test_operator_maintenance_skips_top_action_preview_when_no_local_action(monkeypatch, tmp_path):
+    parser = build_parser()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    args = parser.parse_args(
+        [
+            "operator",
+            "maintenance",
+            "--repo",
+            str(repo),
+            "--primary-invite",
+            str(tmp_path / "alpha-invite.json"),
+            "--out",
+            str(tmp_path / "maintenance"),
+            "--preview-top-action",
+        ]
+    )
+
+    captured_steps: list[list[str]] = []
+
+    def fake_runner(command: list[str], *, label: str, cwd: Path) -> None:
+        captured_steps.append(command.copy())
+
+    def fake_read_json_file(path: Path, description: str = "JSON file"):
+        path_text = str(path)
+        if path_text.endswith("operator-console.json"):
+            return {
+                "summary": {"can_continue_without_partner": True, "recommended_next_action": "continue_development"}
+            }
+        if path_text.endswith("operator-self-heal-report.json"):
+            return {"summary": {"repairable_issue_count": 0}}
+        if path_text.endswith("action-queue.json"):
+            return {
+                "next_action": {
+                    "action_id": "continue_development",
+                    "partner_required": True,
+                    "can_run_without_partner": False,
+                    "suggested_commands": [],
+                }
+            }
+        raise ValueError(f"unexpected JSON read: {path_text}")
+
+    monkeypatch.setattr(cli_module, "_run_operator_maintenance_command", fake_runner)
+    monkeypatch.setattr(cli_module, "read_json_file", fake_read_json_file)
+
+    cli_module.operator_maintenance_command(args)
+
+    assert len(captured_steps) == 4
+    assert captured_steps[0][2:5] == ["chatp2p.cli", "operator", "console"]
+    assert captured_steps[1][2:5] == ["chatp2p.cli", "operator", "daily-check"]
+    assert captured_steps[2][2:5] == ["chatp2p.cli", "operator", "action-queue"]
+    assert captured_steps[3][2:5] == ["chatp2p.cli", "operator", "self-heal"]
 
 
 def test_operator_maintenance_requires_execute_to_run_top_action(tmp_path):
