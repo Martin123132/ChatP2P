@@ -182,6 +182,20 @@ python -m chatp2p.cli operator uninstall-daily-check-task `
 
 Add `--keep-launcher` if you only want to remove the scheduled task and keep the generated launcher.
 
+If you are going offline for a few days, `operator pause` gives a single command to pause both local reliability lanes:
+
+```powershell
+python -m chatp2p.cli operator pause `
+  --home D:\ChatP2PData\.mesh `
+  --daily-task-name "ChatP2P Daily Check" `
+  --reliability-task-name "ChatP2P Reliability Pack" `
+  --daily-launcher D:\ChatP2PData\.runtime\chatp2p-daily-check.cmd `
+  --reliability-launcher D:\ChatP2PData\.runtime\chatp2p-reliability-pack.cmd `
+  --keep-launcher
+```
+
+`operator pause` is read-only in the sense that it only uninstalls automation tasks and optional launchers; it does not touch live coordinator/worker processes.
+
 ## Network Smoke Test
 
 Terminal 1:

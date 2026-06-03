@@ -287,6 +287,20 @@ python -m chatp2p.cli node uninstall-task --task-name "ChatP2P Operator Watchdog
 python -m chatp2p.cli node uninstall-task --task-name "ChatP2P Worker Watchdog" --home E:\ChatP2P-partner\.runtime\.mesh
 ```
 
+If you just need to pause local operator automation while you are out (for example, during uni work), use:
+
+```powershell
+python -m chatp2p.cli operator pause `
+  --home D:\ChatP2PData\.mesh `
+  --daily-task-name "ChatP2P Daily Check" `
+  --reliability-task-name "ChatP2P Reliability Pack" `
+  --daily-launcher D:\ChatP2PData\.runtime\chatp2p-daily-check.cmd `
+  --reliability-launcher D:\ChatP2PData\.runtime\chatp2p-reliability-pack.cmd `
+  --keep-launcher
+```
+
+This command only removes automation task scheduling/launchers and does not restart nodes or clear runtime data.
+
 ## Rollback
 
 Stop the local operator node:

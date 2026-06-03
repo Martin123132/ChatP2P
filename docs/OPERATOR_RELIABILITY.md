@@ -197,6 +197,20 @@ python -m chatp2p.cli operator install-daily-check-task `
 
 Use `--dry-run` first to inspect the generated task plan. `--allow-startup-folder-fallback` installs a per-user Startup folder launcher if Windows denies Scheduled Task creation without elevation.
 
+If you need to pause this lane while you are away, run:
+
+```powershell
+python -m chatp2p.cli operator pause `
+  --home D:\ChatP2PData\.mesh `
+  --daily-task-name "ChatP2P Daily Check" `
+  --reliability-task-name "ChatP2P Reliability Pack" `
+  --daily-launcher D:\ChatP2PData\.runtime\chatp2p-daily-check.cmd `
+  --reliability-launcher D:\ChatP2PData\.runtime\chatp2p-reliability-pack.cmd `
+  --keep-launcher
+```
+
+This removes both scheduled operator tasks so the workstation stays quiet while your focus is elsewhere.
+
 ## Recurring Local Check
 
 Install a local Windows Scheduled Task from the operator machine:
@@ -238,6 +252,15 @@ If you prefer direct Scheduled Task cleanup, the legacy command is:
 
 ```powershell
 schtasks.exe /Delete /TN "ChatP2P Reliability Pack" /F
+```
+
+You can also pause both automation lanes at once with:
+
+```powershell
+python -m chatp2p.cli operator pause `
+  --home D:\ChatP2PData\.mesh `
+  --daily-task-name "ChatP2P Daily Check" `
+  --reliability-task-name "ChatP2P Reliability Pack"
 ```
 
 ## Notes
