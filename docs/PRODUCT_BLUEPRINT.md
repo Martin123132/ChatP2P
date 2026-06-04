@@ -66,6 +66,8 @@ The current node `credits` balance remains available for old clients, but the le
 
 Requester Reservation V1 adds that first spend path: a job may declare `requester_account_id` and `job_cost`, the coordinator debits `job_cost_reserved` before the job is queued, and accepted worker output still earns a separate `worker_result_reward`. Refunds and dispute settlement remain future work.
 
+Chat Inference V1 uses `inference.chat.v1` as the first real product loop for credits. A requester reserves credits, the coordinator routes the chat job to an Ollama-capable worker with the requested model, and the accepted answer earns the worker reward. This is the bridge between the ledger and the future chat UI; it is still local-model infrastructure, not a hosted model marketplace yet.
+
 ## Future Lane: ISP Edge / Broadband Bundle
 
 Keep a second product architecture lane for an ISP-edge simulation, but do not let it interrupt the current alpha path. The idea is not "AI inside fibre"; it is a broadband-provider-style deployment model where a provider runs a coordinator, subscribers run light gateway/device nodes, regional edge workers provide stronger capacity, and policy routes work through local, provider-edge, trusted-peer, then placeholder fallback paths.

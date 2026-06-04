@@ -83,6 +83,7 @@ def test_saved_benchmark_loads_as_worker_capabilities(tmp_path):
     assert capabilities["ollama_models"] == ["llama3.2:3b"]
     assert "eval.deterministic.v1" in capabilities["supported_job_types"]
     assert "inference.ollama.v1" in capabilities["supported_job_types"]
+    assert "inference.chat.v1" in capabilities["supported_job_types"]
 
 
 def test_node_benchmark_report_is_json_serializable():

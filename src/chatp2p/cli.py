@@ -1578,6 +1578,25 @@ def create_ollama_job(args: argparse.Namespace) -> None:
     print(json.dumps({"created": True, "job": job.to_dict()}, indent=2, sort_keys=True))
 
 
+def create_chat_job(args: argparse.Namespace) -> None:
+    client = _coordinator_client(args)
+    messages = []
+    if args.system:
+        messages.append({"role": "system", "content": args.system})
+    messages.append({"role": "user", "content": args.prompt})
+    job = client.create_chat_job(
+        model=args.model,
+        messages=messages,
+        temperature=args.temperature,
+        max_tokens=args.max_tokens,
+        reward=args.reward,
+        ttl_seconds=args.ttl_seconds,
+        requester_account_id=args.requester_account_id,
+        job_cost=args.job_cost,
+    )
+    print(json.dumps({"created": True, "job": job.to_dict()}, indent=2, sort_keys=True))
+
+
 def create_deterministic_job(args: argparse.Namespace) -> None:
     client = _coordinator_client(args)
     payload = _build_deterministic_payload(args)
@@ -5231,6 +5250,20 @@ def build_parser() -> argparse.ArgumentParser:
     ollama_parser.add_argument("--reward", default=1, type=int, help="Credits awarded for accepted result")
     ollama_parser.add_argument("--ttl-seconds", default=300, type=int, help="Job lifetime in seconds")
     ollama_parser.set_defaults(func=create_ollama_job)
+
+    chat_parser = job_subcommands.add_parser("create-chat", help="Create a funded chat inference job")
+    chat_parser.add_argument("--coordinator", default="http://127.0.0.1:8765", help="Coordinator base URL")
+    chat_parser.add_argument("--admission-token", default=None, help="Admission token for public alpha coordinators")
+    chat_parser.add_argument("--model", required=True, help="Ollama model name, such as llama3.2:3b")
+    chat_parser.add_argument("--prompt", required=True, help="User message to send to the chat model")
+    chat_parser.add_argument("--system", default=None, help="Optional system message")
+    chat_parser.add_argument("--temperature", default=None, type=float, help="Optional model temperature")
+    chat_parser.add_argument("--max-tokens", default=None, type=int, help="Optional maximum response tokens hint")
+    chat_parser.add_argument("--requester-account-id", default=None, help="Optional requester account to reserve credits from")
+    chat_parser.add_argument("--job-cost", default=None, type=int, help="Credits to reserve from requester account")
+    chat_parser.add_argument("--reward", default=1, type=int, help="Credits awarded for accepted result")
+    chat_parser.add_argument("--ttl-seconds", default=300, type=int, help="Job lifetime in seconds")
+    chat_parser.set_defaults(func=create_chat_job)
 
     deterministic_parser = job_subcommands.add_parser(
         "create-deterministic",

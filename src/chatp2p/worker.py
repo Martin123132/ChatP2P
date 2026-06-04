@@ -77,7 +77,28 @@ class WorkerNode:
                 base_url=self.ollama_base_url,
                 timeout_seconds=self.ollama_timeout_seconds,
             )
+        if job.job_type == "inference.chat.v1":
+            output = generate_ollama(
+                model=job.payload["model"],
+                prompt=self._chat_prompt(job.payload["messages"]),
+                temperature=job.payload.get("temperature"),
+                base_url=self.ollama_base_url,
+                timeout_seconds=self.ollama_timeout_seconds,
+            )
+            output["messages"] = job.payload["messages"]
+            output["interface"] = "chat"
+            if "max_tokens" in job.payload:
+                output["max_tokens"] = job.payload["max_tokens"]
+            return output
         raise ValueError(f"Unsupported job type: {job.job_type}")
+
+    def _chat_prompt(self, messages: list[dict[str, str]]) -> str:
+        lines = [
+            f"{message['role'].strip().upper()}: {message['content'].strip()}"
+            for message in messages
+        ]
+        lines.append("ASSISTANT:")
+        return "\n".join(lines)
 
     def _run_math_eval(self, payload: dict[str, Any]) -> dict[str, Any]:
         expression = payload.get("expression")

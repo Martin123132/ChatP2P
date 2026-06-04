@@ -243,6 +243,33 @@ class Coordinator:
             ttl_seconds=ttl_seconds,
         )
 
+    def create_chat_inference_job(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        reward: int = 1,
+        ttl_seconds: int = 300,
+        requester_account_id: str | None = None,
+        job_cost: int | None = None,
+    ) -> JobPacket:
+        payload: dict[str, Any] = {"model": model, "messages": messages}
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        return self.create_job(
+            job_type="inference.chat.v1",
+            model_id=model,
+            payload=payload,
+            reward=reward,
+            ttl_seconds=ttl_seconds,
+            requester_account_id=requester_account_id,
+            job_cost=job_cost,
+        )
+
     def create_job(
         self,
         *,
@@ -280,7 +307,7 @@ class Coordinator:
             effective_resource_requirements["requester_account_id"] = requester
             effective_resource_requirements["job_cost"] = effective_job_cost
             effective_resource_requirements["credit_policy"] = "reserve_on_create"
-        if job_type == "inference.ollama.v1":
+        if job_type in {"inference.ollama.v1", "inference.chat.v1"}:
             effective_resource_requirements["ollama_model"] = normalized_payload["model"]
 
         job = JobPacket.create(
@@ -335,6 +362,19 @@ class Coordinator:
                 "expected_output_schema": {"required": ["answer", "model", "confidence"]},
                 "verification_strategy": "signature-and-schema-check",
             }
+        if job_type == "inference.chat.v1":
+            return {
+                "model_id": payload["model"],
+                "resource_requirements": {
+                    "runtime": "ollama",
+                    "ollama_model": payload["model"],
+                    "min_capability_tier": "standard",
+                    "network": "local-ollama",
+                    "interface": "chat",
+                },
+                "expected_output_schema": {"required": ["answer", "model", "confidence", "messages"]},
+                "verification_strategy": "signature-and-schema-check",
+            }
         raise ValueError(f"unsupported job_type: {job_type}")
 
     def _validate_payload(self, job_type: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -348,6 +388,8 @@ class Coordinator:
             return self._validate_echo_payload(payload)
         if job_type == "inference.ollama.v1":
             return self._validate_ollama_payload(payload)
+        if job_type == "inference.chat.v1":
+            return self._validate_chat_payload(payload)
         raise ValueError(f"unsupported job_type: {job_type}")
 
     def _validate_math_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -379,6 +421,41 @@ class Coordinator:
             if temperature < 0 or temperature > 2:
                 raise ValueError("inference.ollama.v1 temperature must be between 0 and 2")
             normalized["temperature"] = temperature
+        return normalized
+
+    def _validate_chat_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        model = payload.get("model")
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("inference.chat.v1 requires a non-empty model string")
+        messages = payload.get("messages")
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("inference.chat.v1 requires a non-empty messages list")
+        normalized_messages: list[dict[str, str]] = []
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict):
+                raise ValueError(f"inference.chat.v1 message {index} must be an object")
+            role = message.get("role")
+            content = message.get("content")
+            if role not in {"system", "user", "assistant"}:
+                raise ValueError(f"inference.chat.v1 message {index} role must be system, user, or assistant")
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError(f"inference.chat.v1 message {index} content must be non-empty")
+            normalized_messages.append({"role": role, "content": content})
+        normalized: dict[str, Any] = {"model": model.strip(), "messages": normalized_messages}
+        if "temperature" in payload:
+            temperature = payload["temperature"]
+            if isinstance(temperature, bool) or not isinstance(temperature, int | float):
+                raise ValueError("inference.chat.v1 temperature must be a number")
+            if temperature < 0 or temperature > 2:
+                raise ValueError("inference.chat.v1 temperature must be between 0 and 2")
+            normalized["temperature"] = float(temperature)
+        if "max_tokens" in payload:
+            max_tokens = payload["max_tokens"]
+            if isinstance(max_tokens, bool) or not isinstance(max_tokens, int):
+                raise ValueError("inference.chat.v1 max_tokens must be an integer")
+            if max_tokens < 1:
+                raise ValueError("inference.chat.v1 max_tokens must be at least 1")
+            normalized["max_tokens"] = max_tokens
         return normalized
 
     def _validate_deterministic_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1056,7 +1133,7 @@ class Coordinator:
 
     def _routing_summary_for_job(self, job: JobPacket) -> dict[str, Any]:
         required_ollama_model = None
-        if job.job_type == "inference.ollama.v1":
+        if job.job_type in {"inference.ollama.v1", "inference.chat.v1"}:
             required_ollama_model = job.resource_requirements.get("ollama_model") or job.payload.get("model")
 
         eligible_nodes: list[dict[str, Any]] = []
@@ -1091,7 +1168,7 @@ class Coordinator:
             return False
         if job.job_type not in supported_job_types:
             return False
-        if job.job_type == "inference.ollama.v1":
+        if job.job_type in {"inference.ollama.v1", "inference.chat.v1"}:
             required_model = job.resource_requirements.get("ollama_model") or job.payload.get("model")
             if required_model not in capabilities.get("ollama_models", []):
                 return False

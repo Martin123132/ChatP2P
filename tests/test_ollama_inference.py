@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from chatp2p.benchmark import capabilities_from_benchmark
+from chatp2p.cli import build_parser
 from chatp2p.coordinator import Coordinator
 from chatp2p.crypto import NodeIdentity
 from chatp2p.ollama import OllamaError, list_ollama_models
@@ -86,6 +87,40 @@ def test_list_ollama_models_reads_tags_endpoint():
         thread.join(timeout=2)
 
 
+def test_create_chat_cli_parser_accepts_funding_fields():
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "job",
+            "create-chat",
+            "--coordinator",
+            "http://127.0.0.1:8765",
+            "--model",
+            "tiny-test-model",
+            "--system",
+            "Be concise.",
+            "--prompt",
+            "Say hello.",
+            "--temperature",
+            "0.2",
+            "--max-tokens",
+            "64",
+            "--requester-account-id",
+            "requester_demo_account",
+            "--job-cost",
+            "2",
+            "--reward",
+            "1",
+        ]
+    )
+
+    assert args.func.__name__ == "create_chat_job"
+    assert args.model == "tiny-test-model"
+    assert args.prompt == "Say hello."
+    assert args.requester_account_id == "requester_demo_account"
+    assert args.job_cost == 2
+
+
 def test_worker_runs_ollama_job_against_fake_server():
     server, thread, base_url, requests = _start_fake_ollama(
         {
@@ -133,6 +168,73 @@ def test_worker_runs_ollama_job_against_fake_server():
         thread.join(timeout=2)
 
 
+def test_worker_runs_chat_job_against_fake_ollama_server():
+    server, thread, base_url, requests = _start_fake_ollama(
+        {
+            "model": "tiny-test-model",
+            "response": "Hello from the contributed compute mesh.",
+            "done": True,
+            "eval_count": 11,
+        }
+    )
+    try:
+        coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+        requester_id = "requester_chat_account"
+        worker_identity = NodeIdentity.generate(prefix="worker")
+        worker = WorkerNode(
+            identity=worker_identity,
+            capability_profile=_ollama_capabilities(),
+            ollama_base_url=base_url,
+        )
+        coordinator.register_node(worker_identity.public(), capabilities=worker.capabilities())
+        coordinator.apply_credit_delta(
+            account_id=requester_id,
+            account_type="requester",
+            delta=3,
+            reason="operator_credit_grant",
+        )
+        job = coordinator.create_chat_inference_job(
+            model="tiny-test-model",
+            messages=[
+                {"role": "system", "content": "Be concise."},
+                {"role": "user", "content": "Say hello."},
+            ],
+            temperature=0.3,
+            max_tokens=64,
+            requester_account_id=requester_id,
+            job_cost=2,
+        )
+
+        assert job.job_type == "inference.chat.v1"
+        assert job.resource_requirements["interface"] == "chat"
+        assert job.resource_requirements["ollama_model"] == "tiny-test-model"
+
+        leased = coordinator.lease_next_job(worker_identity.node_id)
+        assert leased is not None
+        result = worker.run_job(leased)
+
+        assert result.output["answer"] == "Hello from the contributed compute mesh."
+        assert result.output["model"] == "tiny-test-model"
+        assert result.output["messages"] == job.payload["messages"]
+        assert result.output["interface"] == "chat"
+        assert result.output["max_tokens"] == 64
+        assert requests[0]["model"] == "tiny-test-model"
+        assert requests[0]["prompt"] == "SYSTEM: Be concise.\nUSER: Say hello.\nASSISTANT:"
+        assert requests[0]["options"]["temperature"] == 0.3
+        assert coordinator.submit_result(result)
+        assert coordinator.credits[requester_id] == 1
+        assert coordinator.credits[worker_identity.node_id] == 1
+        assert [entry.reason for entry in coordinator.credit_ledger] == [
+            "operator_credit_grant",
+            "job_cost_reserved",
+            "worker_result_reward",
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_ollama_job_requires_ollama_capable_worker():
     coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
     worker_identity = NodeIdentity.generate(prefix="worker")
@@ -145,6 +247,26 @@ def test_ollama_job_requires_ollama_capable_worker():
 
     assert "inference.ollama.v1" not in worker.capabilities()["supported_job_types"]
     assert coordinator.lease_next_job(worker_identity.node_id) is None
+
+
+def test_chat_job_requires_requested_local_model():
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    wrong_model_identity = NodeIdentity.generate(prefix="worker")
+    right_model_identity = NodeIdentity.generate(prefix="worker")
+    wrong_capabilities = _ollama_capabilities(models=["mistral:7b"])
+    right_capabilities = _ollama_capabilities(models=["tiny-test-model"])
+    coordinator.register_node(wrong_model_identity.public(), capabilities=wrong_capabilities)
+    coordinator.register_node(right_model_identity.public(), capabilities=right_capabilities)
+    coordinator.create_chat_inference_job(
+        model="tiny-test-model",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+
+    assert coordinator.lease_next_job(wrong_model_identity.node_id) is None
+    leased = coordinator.lease_next_job(right_model_identity.node_id)
+    assert leased is not None
+    assert leased.job_type == "inference.chat.v1"
+    assert leased.payload["messages"][0]["content"] == "hello"
 
 
 def test_ollama_job_requires_requested_local_model():
@@ -204,6 +326,33 @@ def test_ollama_payload_validation():
         coordinator.create_job(
             job_type="inference.ollama.v1",
             payload={"model": "tiny", "prompt": "hello", "temperature": 4},
+        )
+
+
+def test_chat_payload_validation():
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+
+    with pytest.raises(ValueError, match="model"):
+        coordinator.create_job(
+            job_type="inference.chat.v1",
+            payload={"model": "", "messages": [{"role": "user", "content": "hello"}]},
+        )
+    with pytest.raises(ValueError, match="messages"):
+        coordinator.create_job(job_type="inference.chat.v1", payload={"model": "tiny", "messages": []})
+    with pytest.raises(ValueError, match="role"):
+        coordinator.create_job(
+            job_type="inference.chat.v1",
+            payload={"model": "tiny", "messages": [{"role": "tool", "content": "hello"}]},
+        )
+    with pytest.raises(ValueError, match="content"):
+        coordinator.create_job(
+            job_type="inference.chat.v1",
+            payload={"model": "tiny", "messages": [{"role": "user", "content": ""}]},
+        )
+    with pytest.raises(ValueError, match="max_tokens"):
+        coordinator.create_job(
+            job_type="inference.chat.v1",
+            payload={"model": "tiny", "messages": [{"role": "user", "content": "hello"}], "max_tokens": 0},
         )
 
 

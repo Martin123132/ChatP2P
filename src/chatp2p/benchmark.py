@@ -22,6 +22,7 @@ CAPABILITY_PROFILE_NAME = "node-capabilities.json"
 CAPABILITY_TIERS = ["light", "standard", "gaming_laptop", "gpu_worker"]
 DEFAULT_SUPPORTED_JOB_TYPES = ["eval.math.v1", "eval.deterministic.v1", "inference.echo.v1"]
 OLLAMA_JOB_TYPE = "inference.ollama.v1"
+CHAT_JOB_TYPE = "inference.chat.v1"
 
 
 def run_node_benchmark(
@@ -186,6 +187,7 @@ def capabilities_from_benchmark(report: dict[str, Any]) -> dict[str, Any]:
     supported_job_types = list(DEFAULT_SUPPORTED_JOB_TYPES)
     if model_runtimes.get("ollama", {}).get("available") and ollama_models:
         supported_job_types.append(OLLAMA_JOB_TYPE)
+        supported_job_types.append(CHAT_JOB_TYPE)
     return {
         "supported_job_types": supported_job_types,
         "ollama_models": ollama_models,

@@ -119,6 +119,36 @@ class CoordinatorClient:
         response = self._request("POST", "/jobs", request)
         return JobPacket.from_dict(response["job"])
 
+    def create_chat_job(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, str]],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        reward: int = 1,
+        ttl_seconds: int = 300,
+        requester_account_id: str | None = None,
+        job_cost: int | None = None,
+    ) -> JobPacket:
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        return self.create_job(
+            job_type="inference.chat.v1",
+            payload=payload,
+            model_id=model,
+            reward=reward,
+            ttl_seconds=ttl_seconds,
+            requester_account_id=requester_account_id,
+            job_cost=job_cost,
+        )
+
     def next_job_with_lease(self, node: NodeIdentity) -> tuple[JobPacket, dict[str, Any]] | None:
         response = self._request("POST", "/jobs/next", JobLeaseRequest.create(node=node).to_dict())
         if response["job"] is None:
