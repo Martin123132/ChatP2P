@@ -117,9 +117,9 @@ python -m chatp2p.cli operator maintenance `
   --preview-top-action
 ```
 
-This runs, in order, `operator console`, `operator daily-check`, `operator action-queue`, and `operator self-heal` and prints the summary from the latest console/self-heal pass. You can add `--preview-top-action` to inspect the generated `run-action` command first.
+This runs, in order, `operator console`, `operator sync-status`, `operator daily-check`, `operator action-queue`, and `operator self-heal` and prints the summary from the latest console/sync/self-heal pass. The sync-status step is advisory inside maintenance, so missing live revision data is recorded without turning an otherwise useful offline maintenance report into a hard failure. You can add `--preview-top-action` to inspect the generated `run-action` command first.
 
-If `scripts\operator-maintenance.ps1` is missing, the command automatically falls back to an equivalent pure-Python sequence and still writes the same artifact set.
+If `scripts\operator-maintenance.ps1` is missing, the command automatically falls back to an equivalent pure-Python sequence and still writes the same artifact set, including `sync-status\sync-status.json`.
 
 You can also run the same flow with the helper script:
 
@@ -132,7 +132,7 @@ You can also run the same flow with the helper script:
   -PreviewTopAction
 ```
 
-This runs, in order, `operator console`, `operator daily-check`, `operator action-queue`, and `operator self-heal` and prints the summary from the latest console/self-heal pass. You can add `-PreviewTopAction` to inspect the generated `run-action` command first.
+This runs, in order, `operator console`, `operator sync-status`, `operator daily-check`, `operator action-queue`, and `operator self-heal` and prints the summary from the latest console/sync/self-heal pass. You can add `-PreviewTopAction` to inspect the generated `run-action` command first.
 
 For execute, the script is intentionally explicit:
 

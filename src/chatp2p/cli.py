@@ -549,6 +549,7 @@ _OPERATOR_REPORT_ONLY_COMMANDS: set[str] = {
     "operator daily-check",
     "operator action-queue",
     "operator self-heal",
+    "operator sync-status",
 }
 
 
@@ -594,9 +595,11 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
     out_root = Path(args.out).resolve()
     daily_dir = out_root / "daily-check"
     console_dir = out_root / "operator-console"
+    sync_status_dir = out_root / "sync-status"
     self_heal_dir = out_root / "operator-self-heal"
     daily_check_path = daily_dir / "daily-check.json"
     console_json = console_dir / "operator-console.json"
+    sync_status_json = sync_status_dir / "sync-status.json"
     action_queue_json = daily_dir / "action-queue.json"
     self_heal_json = self_heal_dir / "operator-self-heal-report.json"
     action_run_json = out_root / "operator-action-run-report.json"
@@ -605,6 +608,7 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
     out_root.mkdir(parents=True, exist_ok=True)
     daily_dir.mkdir(parents=True, exist_ok=True)
     console_dir.mkdir(parents=True, exist_ok=True)
+    sync_status_dir.mkdir(parents=True, exist_ok=True)
     self_heal_dir.mkdir(parents=True, exist_ok=True)
 
     exe = sys.executable
@@ -632,6 +636,8 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
         console_command.extend(["--expected-primary-worker-id", str(args.expected_primary_worker_id)])
     if args.expected_backup_worker_id:
         console_command.extend(["--expected-backup-worker-id", str(args.expected_backup_worker_id)])
+    if args.expected_public_revision:
+        console_command.extend(["--expected-public-revision", str(args.expected_public_revision)])
     if args.reliability_dir is not None:
         console_command.extend(["--reliability-dir", str(args.reliability_dir)])
     if args.skip_network_checks:
@@ -663,10 +669,29 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
         daily_command.extend(["--expected-primary-worker-id", str(args.expected_primary_worker_id)])
     if args.expected_backup_worker_id:
         daily_command.extend(["--expected-backup-worker-id", str(args.expected_backup_worker_id)])
+    if args.expected_public_revision:
+        daily_command.extend(["--expected-public-revision", str(args.expected_public_revision)])
     if args.reliability_dir is not None:
         daily_command.extend(["--reliability-dir", str(args.reliability_dir)])
     if args.skip_network_checks:
         daily_command.append("--skip-network-checks")
+
+    sync_status_command = [
+        exe,
+        "-m",
+        "chatp2p.cli",
+        "operator",
+        "sync-status",
+        "--repo",
+        str(repo_root),
+        "--console-report",
+        str(console_json),
+        "--out",
+        str(sync_status_dir),
+        "--json",
+    ]
+    if args.expected_public_revision:
+        sync_status_command.extend(["--expected-public-revision", str(args.expected_public_revision)])
 
     action_queue_command = [
         exe,
@@ -700,6 +725,7 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
 
     steps: list[tuple[str, list[str]]] = [
         ("operator console", console_command),
+        ("operator sync-status", sync_status_command),
         ("operator daily-check", daily_command),
         ("operator action-queue", action_queue_command),
         ("operator self-heal", self_heal_command),
@@ -718,12 +744,14 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
             "reliability_dir": str(args.reliability_dir) if args.reliability_dir is not None else None,
             "expected_primary_worker_id": args.expected_primary_worker_id,
             "expected_backup_worker_id": args.expected_backup_worker_id,
+            "expected_public_revision": args.expected_public_revision,
             "skip_network_checks": bool(args.skip_network_checks),
             "partner_report": [str(path) for path in args.partner_report or []],
         },
         "artifacts": {
             "daily_check_json": str(daily_check_path),
             "console_json": str(console_json),
+            "sync_status_json": str(sync_status_json),
             "action_queue_json": str(action_queue_json),
             "self_heal_json": str(self_heal_json),
             "action_run_json": str(action_run_json),
@@ -761,7 +789,8 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
                 print(f"\nOperator maintenance failed during {label}: {str(exc)}")
             raise
         if step_report["returncode"]:
-            step_report["status"] = "fail"
+            sync_status_advisory = label == "operator sync-status"
+            step_report["status"] = "warn" if sync_status_advisory else "fail"
             if report_mode == "report_only":
                 step_report["error"] = (
                     f"{label} completed with exit code {step_report['returncode']} "
@@ -769,9 +798,11 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
                 )
             else:
                 step_report["error"] = f"{label} completed with exit code {step_report['returncode']}"
-            maintenance_report["status"] = "fail"
+            if not sync_status_advisory:
+                maintenance_report["status"] = "fail"
 
     console_report = read_json_file(console_json, description="operator console report")
+    sync_status_report = read_json_file(sync_status_json, description="operator sync-status report") if sync_status_json.exists() else {}
     self_heal_report = read_json_file(self_heal_json, description="operator self-heal report")
     action_queue = read_json_file(action_queue_json, description="operator action queue")
     next_action = action_queue.get("next_action") if isinstance(action_queue, dict) else None
@@ -802,6 +833,9 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
         f"Self-heal summary:        {self_heal_report.get('summary', {}).get('repairable_issue_count')} repairable "
         f"issue(s)"
     )
+    sync_summary = sync_status_report.get("summary", {}) if isinstance(sync_status_report, dict) else {}
+    if sync_summary:
+        print(f"Sync status:              {sync_summary.get('sync_state')} ({sync_status_report.get('status')})")
 
     if isinstance(next_action, dict):
         safe_action_message = (
@@ -820,6 +854,9 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
         "top_action_status": top_action_status,
         "top_action_partner_required": top_action.get("partner_required") if top_action else None,
         "repairable_issue_count": self_heal_report.get("summary", {}).get("repairable_issue_count"),
+        "sync_state": sync_summary.get("sync_state") if sync_summary else None,
+        "sync_status": sync_status_report.get("status") if isinstance(sync_status_report, dict) else None,
+        "sync_recommended_next_action": sync_summary.get("recommended_next_action") if sync_summary else None,
     }
 
     if args.preview_top_action and top_action_status == "safe_local":
@@ -914,6 +951,8 @@ def operator_maintenance_command(args: argparse.Namespace) -> None:
         command.extend(["-ExpectedPrimaryWorkerId", str(args.expected_primary_worker_id)])
     if args.expected_backup_worker_id:
         command.extend(["-ExpectedBackupWorkerId", str(args.expected_backup_worker_id)])
+    if args.expected_public_revision:
+        command.extend(["-ExpectedPublicRevision", str(args.expected_public_revision)])
     if args.partner_report:
         for partner_report in args.partner_report:
             command.extend(["-PartnerReport", str(partner_report)])
@@ -3544,6 +3583,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--expected-backup-worker-id",
         default=None,
         help="Backup-lane worker ID expected to be live",
+    )
+    operator_maintenance_parser.add_argument(
+        "--expected-public-revision",
+        default=None,
+        help="Public repo revision expected on live nodes. Defaults to local repo HEAD when available.",
     )
     operator_maintenance_parser.add_argument(
         "--skip-network-checks",

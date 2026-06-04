@@ -365,6 +365,8 @@ def test_operator_maintenance_cli_parses(tmp_path):
             "worker_primary",
             "--expected-backup-worker-id",
             "worker_backup",
+            "--expected-public-revision",
+            "abc123",
             "--partner-report",
             str(tmp_path / "partner-autopilot-report.json"),
             "--preview-top-action",
@@ -380,6 +382,7 @@ def test_operator_maintenance_cli_parses(tmp_path):
     assert args.out == str(tmp_path / "maintenance")
     assert args.home == str(tmp_path / ".mesh")
     assert args.skip_network_checks is True
+    assert args.expected_public_revision == "abc123"
     assert args.preview_top_action is True
     assert args.run_top_action is True
     assert args.allow_execute is True
@@ -407,6 +410,8 @@ def test_operator_maintenance_command_invokes_powershell(monkeypatch, tmp_path):
             "--preview-top-action",
             "--run-top-action",
             "--allow-execute",
+            "--expected-public-revision",
+            "abc123",
             "--json",
         ]
     )
@@ -429,6 +434,8 @@ def test_operator_maintenance_command_invokes_powershell(monkeypatch, tmp_path):
     assert "-PreviewTopAction" in captured["command"]
     assert "-RunTopAction" in captured["command"]
     assert "-AllowExecute" in captured["command"]
+    assert "-ExpectedPublicRevision" in captured["command"]
+    assert "abc123" in captured["command"]
     assert "-Json" in captured["command"]
 
 
@@ -480,6 +487,18 @@ if ($joined -like "*operator daily-check*") {
             recommended_next_action = "review_partner_required_action"
         }
     } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $out "daily-check.json") -Encoding UTF8
+    exit 0
+}
+if ($joined -like "*operator sync-status*") {
+    $out = Get-ArgAfter "--out"
+    New-Item -ItemType Directory -Force -Path $out | Out-Null
+    [ordered]@{
+        status = "pass"
+        summary = [ordered]@{
+            sync_state = "synced"
+            recommended_next_action = "partner_synced_continue"
+        }
+    } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $out "sync-status.json") -Encoding UTF8
     exit 0
 }
 if ($joined -like "*operator action-queue*") {
@@ -548,9 +567,11 @@ exit 0
     assert report["schema"] == "chatp2p.operator-maintenance-report.v1"
     assert report["summary"]["top_action_status"] == "not_local_executable"
     assert report["summary"]["top_action_partner_required"] is True
-    assert len(report["steps"]) == 4
+    assert report["summary"]["sync_state"] == "synced"
+    assert len(report["steps"]) == 5
     assert {step["report_mode"] for step in report["steps"]} == {"report_only"}
     fake_calls = fake_log.read_text(encoding="utf-8")
+    assert "operator sync-status" in fake_calls
     assert "operator daily-check" in fake_calls
     assert "--reliability-dir " + str(tmp_path / "reliability-pack-live") in fake_calls
     assert "operator run-action" not in fake_calls
@@ -606,15 +627,16 @@ def test_operator_maintenance_command_falls_back_to_python_when_script_missing(m
 
     cli_module.operator_maintenance_command(args)
 
-    assert len(captured_steps) == 6
+    assert len(captured_steps) == 7
     assert Path(captured_steps[0][0]).name in {"python", "python.exe"} or captured_steps[0][0] == sys.executable
     assert captured_steps[0][0] == sys.executable
     assert captured_steps[0][2:5] == ["chatp2p.cli", "operator", "console"]
-    assert captured_steps[1][2:5] == ["chatp2p.cli", "operator", "daily-check"]
-    assert captured_steps[2][2:5] == ["chatp2p.cli", "operator", "action-queue"]
-    assert captured_steps[3][2:5] == ["chatp2p.cli", "operator", "self-heal"]
-    assert captured_steps[4][2:5] == ["chatp2p.cli", "operator", "run-action"]
+    assert captured_steps[1][2:5] == ["chatp2p.cli", "operator", "sync-status"]
+    assert captured_steps[2][2:5] == ["chatp2p.cli", "operator", "daily-check"]
+    assert captured_steps[3][2:5] == ["chatp2p.cli", "operator", "action-queue"]
+    assert captured_steps[4][2:5] == ["chatp2p.cli", "operator", "self-heal"]
     assert captured_steps[5][2:5] == ["chatp2p.cli", "operator", "run-action"]
+    assert captured_steps[6][2:5] == ["chatp2p.cli", "operator", "run-action"]
 
 
 def test_operator_maintenance_fallback_reports_json(monkeypatch, tmp_path, capsys):
@@ -677,15 +699,17 @@ def test_operator_maintenance_fallback_reports_json(monkeypatch, tmp_path, capsy
     assert report["summary"]["recommended_next_action"] == "continue_development"
     assert report["summary"]["top_action"]["action_id"] == "continue_development"
     assert report["artifacts"]["maintenance_json"] == str((tmp_path / "maintenance" / "operator-maintenance-report.json").resolve())
-    assert len(report["steps"]) == 4
+    assert len(report["steps"]) == 5
     assert any(step["label"] == "operator console" for step in report["steps"])
+    assert any(step["label"] == "operator sync-status" for step in report["steps"])
     assert any(step["status"] == "pass" for step in report["steps"])
     assert {step["returncode"] for step in report["steps"]} == {0}
-    assert len(captured_steps) == 4
+    assert len(captured_steps) == 5
     assert captured_steps[0][2:5] == ["chatp2p.cli", "operator", "console"]
-    assert captured_steps[1][2:5] == ["chatp2p.cli", "operator", "daily-check"]
-    assert captured_steps[2][2:5] == ["chatp2p.cli", "operator", "action-queue"]
-    assert captured_steps[3][2:5] == ["chatp2p.cli", "operator", "self-heal"]
+    assert captured_steps[1][2:5] == ["chatp2p.cli", "operator", "sync-status"]
+    assert captured_steps[2][2:5] == ["chatp2p.cli", "operator", "daily-check"]
+    assert captured_steps[3][2:5] == ["chatp2p.cli", "operator", "action-queue"]
+    assert captured_steps[4][2:5] == ["chatp2p.cli", "operator", "self-heal"]
 
 
 def test_operator_maintenance_fallback_treats_console_fail_as_report_only(monkeypatch, tmp_path, capsys):
@@ -751,10 +775,11 @@ def test_operator_maintenance_fallback_treats_console_fail_as_report_only(monkey
 
     assert report["schema"] == "chatp2p.operator-maintenance-report.v1"
     assert report["status"] == "fail"
-    assert len(report["steps"]) == 4
+    assert len(report["steps"]) == 5
     console_step = next(step for step in report["steps"] if step["label"] == "operator console")
     daily_step = next(step for step in report["steps"] if step["label"] == "operator daily-check")
     action_queue_step = next(step for step in report["steps"] if step["label"] == "operator action-queue")
+    sync_step = next(step for step in report["steps"] if step["label"] == "operator sync-status")
     assert console_step["returncode"] == 1
     assert console_step["status"] == "fail"
     assert console_step["report_mode"] == "report_only"
@@ -764,7 +789,70 @@ def test_operator_maintenance_fallback_treats_console_fail_as_report_only(monkey
     assert daily_step["report_mode"] == "report_only"
     assert "non-blocking report step" in daily_step["error"]
     assert action_queue_step["report_mode"] == "report_only"
+    assert sync_step["report_mode"] == "report_only"
     assert report["summary"]["top_action_status"] == "safe_local"
+
+
+def test_operator_maintenance_fallback_treats_sync_status_as_advisory(monkeypatch, tmp_path, capsys):
+    parser = build_parser()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    args = parser.parse_args(
+        [
+            "operator",
+            "maintenance",
+            "--repo",
+            str(repo),
+            "--primary-invite",
+            str(tmp_path / "alpha-invite.json"),
+            "--out",
+            str(tmp_path / "maintenance"),
+            "--json",
+        ]
+    )
+
+    captured_steps: list[list[str]] = []
+
+    def fake_runner(command: list[str], *, label: str, cwd: Path) -> int:
+        captured_steps.append(command.copy())
+        return 1 if label == "operator sync-status" else 0
+
+    def fake_read_json_file(path: Path, description: str = "JSON file"):
+        path_text = str(path)
+        if path_text.endswith("operator-console.json"):
+            return {
+                "summary": {"can_continue_without_partner": True, "recommended_next_action": "continue_development"},
+                "artifacts": {"json": str(path)},
+            }
+        if path_text.endswith("operator-self-heal-report.json"):
+            return {"summary": {"repairable_issue_count": 0}}
+        if path_text.endswith("action-queue.json"):
+            return {
+                "next_action": {
+                    "action_id": "continue_development",
+                    "partner_required": False,
+                    "can_run_without_partner": True,
+                    "suggested_commands": [{"argv": ["python"]}],
+                },
+                "artifacts": {"json": str(path)},
+            }
+        raise ValueError(f"unexpected JSON read: {path_text}")
+
+    monkeypatch.setattr(cli_module, "_run_operator_maintenance_command", fake_runner)
+    monkeypatch.setattr(cli_module, "read_json_file", fake_read_json_file)
+
+    cli_module.operator_maintenance_command(args)
+    output = capsys.readouterr().out
+    marker = output.find("{\n")
+    assert marker >= 0
+    report = json.loads(output[marker:])
+
+    assert report["status"] == "pass"
+    sync_step = next(step for step in report["steps"] if step["label"] == "operator sync-status")
+    assert sync_step["status"] == "warn"
+    assert sync_step["returncode"] == 1
+    assert len(captured_steps) == 5
 
 
 def test_operator_maintenance_skips_top_action_run_when_partner_required(monkeypatch, tmp_path):
@@ -818,11 +906,12 @@ def test_operator_maintenance_skips_top_action_run_when_partner_required(monkeyp
     with pytest.raises(SystemExit):
         cli_module.operator_maintenance_command(args)
 
-    assert len(captured_steps) == 4
+    assert len(captured_steps) == 5
     assert captured_steps[0][2:5] == ["chatp2p.cli", "operator", "console"]
-    assert captured_steps[1][2:5] == ["chatp2p.cli", "operator", "daily-check"]
-    assert captured_steps[2][2:5] == ["chatp2p.cli", "operator", "action-queue"]
-    assert captured_steps[3][2:5] == ["chatp2p.cli", "operator", "self-heal"]
+    assert captured_steps[1][2:5] == ["chatp2p.cli", "operator", "sync-status"]
+    assert captured_steps[2][2:5] == ["chatp2p.cli", "operator", "daily-check"]
+    assert captured_steps[3][2:5] == ["chatp2p.cli", "operator", "action-queue"]
+    assert captured_steps[4][2:5] == ["chatp2p.cli", "operator", "self-heal"]
 
 
 def test_operator_maintenance_skips_top_action_preview_when_no_local_action(monkeypatch, tmp_path):
@@ -873,11 +962,12 @@ def test_operator_maintenance_skips_top_action_preview_when_no_local_action(monk
 
     cli_module.operator_maintenance_command(args)
 
-    assert len(captured_steps) == 4
+    assert len(captured_steps) == 5
     assert captured_steps[0][2:5] == ["chatp2p.cli", "operator", "console"]
-    assert captured_steps[1][2:5] == ["chatp2p.cli", "operator", "daily-check"]
-    assert captured_steps[2][2:5] == ["chatp2p.cli", "operator", "action-queue"]
-    assert captured_steps[3][2:5] == ["chatp2p.cli", "operator", "self-heal"]
+    assert captured_steps[1][2:5] == ["chatp2p.cli", "operator", "sync-status"]
+    assert captured_steps[2][2:5] == ["chatp2p.cli", "operator", "daily-check"]
+    assert captured_steps[3][2:5] == ["chatp2p.cli", "operator", "action-queue"]
+    assert captured_steps[4][2:5] == ["chatp2p.cli", "operator", "self-heal"]
 
 
 def test_operator_maintenance_requires_execute_to_run_top_action(tmp_path):

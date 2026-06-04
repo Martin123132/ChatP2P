@@ -138,7 +138,7 @@ Or the existing helper script:
   -PreviewTopAction
 ```
 
-This script runs the read-only console, daily check, action queue, and self-heal commands in sequence and prints the operator summary.
+This script runs the read-only console, sync-status, daily check, action queue, and self-heal commands in sequence and prints the operator summary. The sync-status step is advisory inside maintenance: if live revision data is unavailable during an offline pass, maintenance records the sync warning without making that advisory check the blocker.
 
 If `operator-maintenance.ps1` is unavailable, the `operator maintenance` command now falls back to a pure-Python sequence of the same subcommands automatically, so the maintenance loop remains usable on systems where PowerShell automation is not present.
 

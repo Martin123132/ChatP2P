@@ -21,6 +21,7 @@ param(
     [switch]$SkipNetworkChecks,
     [string]$ExpectedPrimaryWorkerId = "",
     [string]$ExpectedBackupWorkerId = "",
+    [string]$ExpectedPublicRevision = "",
     [string[]]$PartnerReport = @(),
     [switch]$PreviewTopAction,
     [switch]$RunTopAction,
@@ -72,9 +73,12 @@ function Invoke-Command-Strict {
     if ($returnCode -ne 0) {
         if ($AllowFailure) {
             if ($null -ne $stepReport) {
-                $stepReport.status = "fail"
+                $syncStatusAdvisory = $Name -eq "operator sync-status"
+                $stepReport.status = if ($syncStatusAdvisory) { "warn" } else { "fail" }
                 $stepReport.error = "$Name completed with exit code $returnCode (non-blocking report step)"
-                $script:maintenanceReport.status = "fail"
+                if (-not $syncStatusAdvisory) {
+                    $script:maintenanceReport.status = "fail"
+                }
             }
             Write-Warning "$Name returned exit code $returnCode (continuing maintenance loop for report review)."
             return $returnCode
@@ -108,16 +112,18 @@ try {
     $outRoot = Resolve-PathOrDefault -Path $OutRoot -Fallback (Join-Path $repoRoot "ChatP2PData/maintenance") -Label "out root"
     $dailyCheckDir = Join-Path $outRoot "daily-check"
     $consoleDir = Join-Path $outRoot "operator-console"
+    $syncStatusDir = Join-Path $outRoot "sync-status"
     $selfHealDir = Join-Path $outRoot "operator-self-heal"
     $reliabilityPath = if ([string]::IsNullOrWhiteSpace($ReliabilityDir)) { Join-Path $outRoot "reliability" } else { $ReliabilityDir }
     $dailyCheckJson = Join-Path $dailyCheckDir "daily-check.json"
     $actionQueueJson = Join-Path $dailyCheckDir "action-queue.json"
     $consoleJson = Join-Path $consoleDir "operator-console.json"
+    $syncStatusJson = Join-Path $syncStatusDir "sync-status.json"
     $selfHealJson = Join-Path $selfHealDir "operator-self-heal-report.json"
     $actionRunJson = Join-Path $outRoot "operator-action-run-report.json"
     $maintenanceJson = Join-Path $outRoot "operator-maintenance-report.json"
 
-    New-Item -ItemType Directory -Force -Path $outRoot, $dailyCheckDir, $consoleDir, $selfHealDir | Out-Null
+    New-Item -ItemType Directory -Force -Path $outRoot, $dailyCheckDir, $consoleDir, $syncStatusDir, $selfHealDir | Out-Null
     $script:maintenanceJson = $maintenanceJson
     $script:maintenanceReport = [ordered]@{
         schema = "chatp2p.operator-maintenance-report.v1"
@@ -132,12 +138,14 @@ try {
             reliability_dir = $reliabilityPath
             expected_primary_worker_id = if ([string]::IsNullOrWhiteSpace($ExpectedPrimaryWorkerId)) { $null } else { $ExpectedPrimaryWorkerId }
             expected_backup_worker_id = if ([string]::IsNullOrWhiteSpace($ExpectedBackupWorkerId)) { $null } else { $ExpectedBackupWorkerId }
+            expected_public_revision = if ([string]::IsNullOrWhiteSpace($ExpectedPublicRevision)) { $null } else { $ExpectedPublicRevision }
             skip_network_checks = [bool]$SkipNetworkChecks
             partner_report = @($PartnerReport)
         }
         artifacts = [ordered]@{
             daily_check_json = $dailyCheckJson
             console_json = $consoleJson
+            sync_status_json = $syncStatusJson
             action_queue_json = $actionQueueJson
             self_heal_json = $selfHealJson
             action_run_json = $actionRunJson
@@ -146,7 +154,7 @@ try {
         steps = @()
     }
 
-    Write-Host "[1/4] operator console (read-only)..."
+    Write-Host "[1/5] operator console (read-only)..."
     $consoleArgs = @(
         "-m", "chatp2p.cli", "operator", "console",
         "--repo", $repoRoot,
@@ -166,6 +174,9 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($ExpectedBackupWorkerId)) {
         $consoleArgs += @("--expected-backup-worker-id", $ExpectedBackupWorkerId)
     }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedPublicRevision)) {
+        $consoleArgs += @("--expected-public-revision", $ExpectedPublicRevision)
+    }
     if ($SkipNetworkChecks) {
         $consoleArgs += "--skip-network-checks"
     }
@@ -176,7 +187,20 @@ try {
     }
     $consoleExitCode = Invoke-Command-Strict -Name "operator console" -CommandArgs $consoleArgs -AllowFailure
 
-    Write-Host "[2/4] operator daily-check..."
+    Write-Host "[2/5] operator sync-status..."
+    $syncStatusArgs = @(
+        "-m", "chatp2p.cli", "operator", "sync-status",
+        "--repo", $repoRoot,
+        "--console-report", $consoleJson,
+        "--out", $syncStatusDir,
+        "--json"
+    )
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedPublicRevision)) {
+        $syncStatusArgs += @("--expected-public-revision", $ExpectedPublicRevision)
+    }
+    $syncStatusExitCode = Invoke-Command-Strict -Name "operator sync-status" -CommandArgs $syncStatusArgs -AllowFailure
+
+    Write-Host "[3/5] operator daily-check..."
     $dailyArgs = @(
         "-m", "chatp2p.cli", "operator", "daily-check",
         "--repo", $repoRoot,
@@ -196,12 +220,15 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($ExpectedBackupWorkerId)) {
         $dailyArgs += @("--expected-backup-worker-id", $ExpectedBackupWorkerId)
     }
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedPublicRevision)) {
+        $dailyArgs += @("--expected-public-revision", $ExpectedPublicRevision)
+    }
     if ($SkipNetworkChecks) {
         $dailyArgs += "--skip-network-checks"
     }
     $dailyCheckExitCode = Invoke-Command-Strict -Name "operator daily-check" -CommandArgs $dailyArgs -AllowFailure
 
-    Write-Host "[3/4] rebuild action-queue..."
+    Write-Host "[4/5] rebuild action-queue..."
     if (-not (Test-Path $dailyCheckJson)) {
         throw "daily-check.json not found after daily-check: $dailyCheckJson"
     }
@@ -213,7 +240,7 @@ try {
     )
     $actionQueueExitCode = Invoke-Command-Strict -Name "operator action-queue" -CommandArgs $queueArgs -AllowFailure
 
-    Write-Host "[4/4] operator self-heal..."
+    Write-Host "[5/5] operator self-heal..."
     if (-not (Test-Path $actionQueueJson)) {
         throw "action-queue.json not found after action-queue: $actionQueueJson"
     }
@@ -237,12 +264,19 @@ try {
     }
 
     $consoleReport = Get-Content $consoleJson -Raw | ConvertFrom-Json
+    $syncStatusReport = $null
+    if (Test-Path $syncStatusJson) {
+        $syncStatusReport = Get-Content $syncStatusJson -Raw | ConvertFrom-Json
+    }
     $selfHealReport = Get-Content $selfHealJson -Raw | ConvertFrom-Json
     $repairableIssueCount = $selfHealReport.summary.repairable_issue_count
     Write-Host "`nOperator maintenance complete."
     Write-Host "Can continue without partner: $($consoleReport.summary.can_continue_without_partner)"
     Write-Host "Recommended next action:  $($consoleReport.summary.recommended_next_action)"
     Write-Host "Self-heal summary:        $repairableIssueCount repairable issue(s)"
+    if ($syncStatusReport -and $syncStatusReport.summary) {
+        Write-Host "Sync status:              $($syncStatusReport.summary.sync_state) ($($syncStatusReport.status))"
+    }
 
     if ($action) {
         Write-Host "Top queue action:         $($action.action_id) (partner_required=$($action.partner_required))"
@@ -279,6 +313,9 @@ try {
         top_action_status = $topActionStatus
         top_action_partner_required = if ($action) { $action.partner_required } else { $null }
         repairable_issue_count = $repairableIssueCount
+        sync_state = if ($syncStatusReport -and $syncStatusReport.summary) { $syncStatusReport.summary.sync_state } else { $null }
+        sync_status = if ($syncStatusReport) { $syncStatusReport.status } else { $null }
+        sync_recommended_next_action = if ($syncStatusReport -and $syncStatusReport.summary) { $syncStatusReport.summary.recommended_next_action } else { $null }
     }
     Write-MaintenanceReport
 
