@@ -719,7 +719,7 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
         }
         maintenance_report["steps"].append(step_report)
         try:
-            returncode = _run_operator_maintenance_command(command, label=label, cwd=repo_root)
+            returncode = _run_operator_maintenance_command(command, label=label, cwd=repo_root) or 0
             step_report["returncode"] = returncode
         except SystemExit as exc:
             step_report["status"] = "fail"
@@ -898,6 +898,8 @@ def operator_maintenance_command(args: argparse.Namespace) -> None:
         command.append("-RunTopAction")
     if args.allow_execute:
         command.append("-AllowExecute")
+    if args.json:
+        command.append("-Json")
 
     result = subprocess.run(
         command,

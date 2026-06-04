@@ -1,5 +1,8 @@
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 from types import SimpleNamespace
 import sys
 
@@ -354,6 +357,7 @@ def test_operator_maintenance_command_invokes_powershell(monkeypatch, tmp_path):
             "--preview-top-action",
             "--run-top-action",
             "--allow-execute",
+            "--json",
         ]
     )
 
@@ -375,6 +379,126 @@ def test_operator_maintenance_command_invokes_powershell(monkeypatch, tmp_path):
     assert "-PreviewTopAction" in captured["command"]
     assert "-RunTopAction" in captured["command"]
     assert "-AllowExecute" in captured["command"]
+    assert "-Json" in captured["command"]
+
+
+def test_operator_maintenance_script_writes_report_and_skips_partner_preview(tmp_path):
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if powershell is None:
+        pytest.skip("PowerShell is not available")
+
+    repo = Path(__file__).resolve().parents[1]
+    script = repo / "scripts" / "operator-maintenance.ps1"
+    fake_python = tmp_path / "fake-python.ps1"
+    fake_log = tmp_path / "fake-python.log"
+    out_root = tmp_path / "maintenance"
+    fake_python.write_text(
+        r'''
+$ErrorActionPreference = "Stop"
+$logPath = $env:CHATP2P_FAKE_PYTHON_LOG
+Add-Content -LiteralPath $logPath -Value ($args -join " ")
+$script:FakePythonArgs = $args
+
+function Get-ArgAfter {
+    param([string]$Name)
+    for ($i = 0; $i -lt $script:FakePythonArgs.Count; $i++) {
+        if ($script:FakePythonArgs[$i] -eq $Name -and ($i + 1) -lt $script:FakePythonArgs.Count) {
+            return $script:FakePythonArgs[$i + 1]
+        }
+    }
+    throw "missing argument: $Name"
+}
+
+$joined = $args -join " "
+if ($joined -like "*operator console*") {
+    $out = Get-ArgAfter "--out"
+    New-Item -ItemType Directory -Force -Path $out | Out-Null
+    [ordered]@{
+        summary = [ordered]@{
+            can_continue_without_partner = $true
+            recommended_next_action = "review_partner_required_action"
+        }
+    } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $out "operator-console.json") -Encoding UTF8
+    exit 0
+}
+if ($joined -like "*operator daily-check*") {
+    $out = Get-ArgAfter "--out"
+    New-Item -ItemType Directory -Force -Path $out | Out-Null
+    [ordered]@{
+        summary = [ordered]@{
+            can_continue_without_partner = $true
+            recommended_next_action = "review_partner_required_action"
+        }
+    } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $out "daily-check.json") -Encoding UTF8
+    exit 0
+}
+if ($joined -like "*operator action-queue*") {
+    $out = Get-ArgAfter "--out"
+    New-Item -ItemType Directory -Force -Path $out | Out-Null
+    [ordered]@{
+        next_action = [ordered]@{
+            action_id = "partner_needed"
+            partner_required = $true
+            can_run_without_partner = $false
+            suggested_commands = @([ordered]@{ argv = @("python") })
+        }
+    } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $out "action-queue.json") -Encoding UTF8
+    exit 0
+}
+if ($joined -like "*operator self-heal*") {
+    $out = Get-ArgAfter "--out"
+    New-Item -ItemType Directory -Force -Path $out | Out-Null
+    [ordered]@{
+        summary = [ordered]@{
+            repairable_issue_count = 0
+        }
+    } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $out "operator-self-heal-report.json") -Encoding UTF8
+    exit 0
+}
+if ($joined -like "*operator run-action*") {
+    exit 99
+}
+exit 0
+''',
+        encoding="utf-8",
+    )
+
+    env = dict(os.environ)
+    env["CHATP2P_FAKE_PYTHON_LOG"] = str(fake_log)
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script),
+            "-Root",
+            str(repo),
+            "-PrimaryInvite",
+            str(tmp_path / "alpha-invite.json"),
+            "-OutRoot",
+            str(out_root),
+            "-PreviewTopAction",
+            "-Json",
+            "-Python",
+            str(fake_python),
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "chatp2p.operator-maintenance-report.v1" in result.stdout
+    report = json.loads((out_root / "operator-maintenance-report.json").read_text(encoding="utf-8-sig"))
+    assert report["schema"] == "chatp2p.operator-maintenance-report.v1"
+    assert report["summary"]["top_action_status"] == "not_local_executable"
+    assert report["summary"]["top_action_partner_required"] is True
+    assert len(report["steps"]) == 4
+    assert {step["report_mode"] for step in report["steps"]} == {"report_only"}
+    assert "operator run-action" not in fake_log.read_text(encoding="utf-8")
 
 
 def test_operator_maintenance_command_falls_back_to_python_when_script_missing(monkeypatch, tmp_path):
@@ -501,6 +625,7 @@ def test_operator_maintenance_fallback_reports_json(monkeypatch, tmp_path, capsy
     assert len(report["steps"]) == 4
     assert any(step["label"] == "operator console" for step in report["steps"])
     assert any(step["status"] == "pass" for step in report["steps"])
+    assert {step["returncode"] for step in report["steps"]} == {0}
     assert len(captured_steps) == 4
     assert captured_steps[0][2:5] == ["chatp2p.cli", "operator", "console"]
     assert captured_steps[1][2:5] == ["chatp2p.cli", "operator", "daily-check"]

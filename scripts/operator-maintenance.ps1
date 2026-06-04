@@ -25,10 +25,13 @@ param(
     [switch]$PreviewTopAction,
     [switch]$RunTopAction,
     [switch]$AllowExecute,
+    [switch]$Json,
     [string]$Python = "python"
 )
 
 $ErrorActionPreference = "Stop"
+$script:maintenanceJson = $null
+$script:maintenanceReport = $null
 
 function Resolve-PathOrDefault {
     param([string]$Path, [string]$Fallback, [string]$Label)
@@ -48,15 +51,51 @@ function Invoke-Command-Strict {
         [string[]]$CommandArgs,
         [switch]$AllowFailure
     )
-    & $python @CommandArgs
-    if ($LASTEXITCODE -ne 0) {
-        if ($AllowFailure) {
-            Write-Warning "$Name returned exit code $LASTEXITCODE (continuing maintenance loop for report review)."
-            return $LASTEXITCODE
+    $reportMode = if ($AllowFailure) { "report_only" } else { "strict" }
+    $stepReport = $null
+    if ($null -ne $script:maintenanceReport) {
+        $stepReport = [ordered]@{
+            label = $Name
+            command = @($Python) + $CommandArgs
+            returncode = 0
+            status = "pass"
+            report_mode = $reportMode
         }
-        throw "$Name failed with exit code $LASTEXITCODE"
+        $script:maintenanceReport.steps = @($script:maintenanceReport.steps) + $stepReport
+    }
+
+    & $Python @CommandArgs
+    $returnCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
+    if ($null -ne $stepReport) {
+        $stepReport.returncode = $returnCode
+    }
+    if ($returnCode -ne 0) {
+        if ($AllowFailure) {
+            if ($null -ne $stepReport) {
+                $stepReport.status = "fail"
+                $stepReport.error = "$Name completed with exit code $returnCode (non-blocking report step)"
+                $script:maintenanceReport.status = "fail"
+            }
+            Write-Warning "$Name returned exit code $returnCode (continuing maintenance loop for report review)."
+            return $returnCode
+        }
+        if ($null -ne $stepReport) {
+            $stepReport.status = "fail"
+            $stepReport.error = "$Name failed with exit code $returnCode"
+            $script:maintenanceReport.status = "fail"
+        }
+        throw "$Name failed with exit code $returnCode"
     }
     return 0
+}
+
+function Write-MaintenanceReport {
+    if ($null -eq $script:maintenanceReport -or [string]::IsNullOrWhiteSpace($script:maintenanceJson)) {
+        return
+    }
+    $json = $script:maintenanceReport | ConvertTo-Json -Depth 20
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($script:maintenanceJson, $json, $utf8NoBom)
 }
 
 try {
@@ -71,8 +110,41 @@ try {
     $consoleDir = Join-Path $outRoot "operator-console"
     $selfHealDir = Join-Path $outRoot "operator-self-heal"
     $reliabilityPath = if ([string]::IsNullOrWhiteSpace($ReliabilityDir)) { Join-Path $outRoot "reliability" } else { $ReliabilityDir }
+    $dailyCheckJson = Join-Path $dailyCheckDir "daily-check.json"
+    $actionQueueJson = Join-Path $dailyCheckDir "action-queue.json"
+    $consoleJson = Join-Path $consoleDir "operator-console.json"
+    $selfHealJson = Join-Path $selfHealDir "operator-self-heal-report.json"
+    $actionRunJson = Join-Path $outRoot "operator-action-run-report.json"
+    $maintenanceJson = Join-Path $outRoot "operator-maintenance-report.json"
 
     New-Item -ItemType Directory -Force -Path $outRoot, $dailyCheckDir, $consoleDir, $selfHealDir | Out-Null
+    $script:maintenanceJson = $maintenanceJson
+    $script:maintenanceReport = [ordered]@{
+        schema = "chatp2p.operator-maintenance-report.v1"
+        status = "pass"
+        generated_at = (Get-Date).ToUniversalTime().ToString("o")
+        config = [ordered]@{
+            repo = $repoRoot
+            home = $meshHomePath
+            primary_invite = $PrimaryInvite
+            backup_invite = if ([string]::IsNullOrWhiteSpace($BackupInvite)) { $null } else { $BackupInvite }
+            out_dir = $outRoot
+            reliability_dir = $reliabilityPath
+            expected_primary_worker_id = if ([string]::IsNullOrWhiteSpace($ExpectedPrimaryWorkerId)) { $null } else { $ExpectedPrimaryWorkerId }
+            expected_backup_worker_id = if ([string]::IsNullOrWhiteSpace($ExpectedBackupWorkerId)) { $null } else { $ExpectedBackupWorkerId }
+            skip_network_checks = [bool]$SkipNetworkChecks
+            partner_report = @($PartnerReport)
+        }
+        artifacts = [ordered]@{
+            daily_check_json = $dailyCheckJson
+            console_json = $consoleJson
+            action_queue_json = $actionQueueJson
+            self_heal_json = $selfHealJson
+            action_run_json = $actionRunJson
+            maintenance_json = $maintenanceJson
+        }
+        steps = @()
+    }
 
     Write-Host "[1/4] operator console (read-only)..."
     $consoleArgs = @(
@@ -129,7 +201,6 @@ try {
     $dailyCheckExitCode = Invoke-Command-Strict -Name "operator daily-check" -CommandArgs $dailyArgs -AllowFailure
 
     Write-Host "[3/4] rebuild action-queue..."
-    $dailyCheckJson = Join-Path $dailyCheckDir "daily-check.json"
     if (-not (Test-Path $dailyCheckJson)) {
         throw "daily-check.json not found after daily-check: $dailyCheckJson"
     }
@@ -142,8 +213,6 @@ try {
     $actionQueueExitCode = Invoke-Command-Strict -Name "operator action-queue" -CommandArgs $queueArgs -AllowFailure
 
     Write-Host "[4/4] operator self-heal..."
-    $actionQueueJson = Join-Path $dailyCheckDir "action-queue.json"
-    $consoleJson = Join-Path $consoleDir "operator-console.json"
     if (-not (Test-Path $actionQueueJson)) {
         throw "action-queue.json not found after action-queue: $actionQueueJson"
     }
@@ -160,7 +229,6 @@ try {
     )
     $selfHealExitCode = Invoke-Command-Strict -Name "operator self-heal" -CommandArgs $selfHealArgs -AllowFailure
 
-    $selfHealJson = Join-Path $selfHealDir "operator-self-heal-report.json"
     $action = $null
     if (Test-Path $actionQueueJson) {
         $actionQueue = Get-Content $actionQueueJson -Raw | ConvertFrom-Json
@@ -168,10 +236,12 @@ try {
     }
 
     $consoleReport = Get-Content $consoleJson -Raw | ConvertFrom-Json
+    $selfHealReport = Get-Content $selfHealJson -Raw | ConvertFrom-Json
+    $repairableIssueCount = $selfHealReport.summary.repairable_issue_count
     Write-Host "`nOperator maintenance complete."
     Write-Host "Can continue without partner: $($consoleReport.summary.can_continue_without_partner)"
     Write-Host "Recommended next action:  $($consoleReport.summary.recommended_next_action)"
-    Write-Host "Self-heal summary:        $((Get-Content $selfHealJson -Raw | ConvertFrom-Json).summary.repairable_issue_count) repairable issue(s)"
+    Write-Host "Self-heal summary:        $repairableIssueCount repairable issue(s)"
 
     if ($action) {
         Write-Host "Top queue action:         $($action.action_id) (partner_required=$($action.partner_required))"
@@ -201,12 +271,22 @@ try {
         }
     }
 
-    if ($action -and $PreviewTopAction) {
+    $script:maintenanceReport["summary"] = [ordered]@{
+        can_continue_without_partner = $consoleReport.summary.can_continue_without_partner
+        recommended_next_action = $consoleReport.summary.recommended_next_action
+        top_action = $action
+        top_action_status = $topActionStatus
+        top_action_partner_required = if ($action) { $action.partner_required } else { $null }
+        repairable_issue_count = $repairableIssueCount
+    }
+    Write-MaintenanceReport
+
+    if ($action -and $PreviewTopAction -and $topActionStatus -eq "safe_local") {
         Write-Host "`nPreparing preview..."
         $runActionArgs = @(
             "-m", "chatp2p.cli", "operator", "run-action",
             "--queue", $actionQueueJson,
-            "--out", (Join-Path $outRoot "operator-action-run-report.json"),
+            "--out", $actionRunJson,
             "--json"
         )
         if ($action.action_id) {
@@ -223,7 +303,7 @@ try {
             $runActionArgs = @(
                 "-m", "chatp2p.cli", "operator", "run-action",
                 "--queue", $actionQueueJson,
-                "--out", (Join-Path $outRoot "operator-action-run-report.json"),
+                "--out", $actionRunJson,
                 "--execute",
                 "--json"
             )
@@ -235,8 +315,17 @@ try {
     } elseif ($RunTopAction) {
         throw "run-top-action requested, but top action is not safe for local execute. Regenerate the queue and resolve partner-required items first."
     }
+    Write-MaintenanceReport
+    if ($Json) {
+        $script:maintenanceReport | ConvertTo-Json -Depth 20
+    }
 }
 catch {
+    if ($null -ne $script:maintenanceReport) {
+        $script:maintenanceReport.status = "fail"
+        $script:maintenanceReport["error"] = "$_"
+        Write-MaintenanceReport
+    }
     Write-Error $_
     exit 1
 }
