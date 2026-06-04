@@ -58,6 +58,7 @@ from .chat_smoke import (
     format_funded_chat_smoke_summary,
     run_funded_chat_smoke,
 )
+from .chat_request import ChatAskConfig, format_chat_ask_summary, run_chat_ask
 from .client import CoordinatorClient
 from .coordinator import Coordinator
 from .crypto import NodeIdentity
@@ -404,6 +405,40 @@ def run_chat_smoke_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_funded_chat_smoke_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def run_chat_ask_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_chat_ask(
+            ChatAskConfig(
+                out_dir=Path(args.out),
+                coordinator_url=args.coordinator,
+                invite_path=Path(args.invite) if args.invite else None,
+                admission_token=args.admission_token,
+                model=args.model,
+                prompt=args.prompt,
+                system=args.system,
+                requester_account_id=args.requester_account_id,
+                job_cost=args.job_cost,
+                reward=args.reward,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                ttl_seconds=args.ttl_seconds,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval=args.poll_interval,
+                no_wait=args.no_wait,
+                client_timeout_seconds=args.client_timeout_seconds,
+            )
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_chat_ask_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -2767,6 +2802,47 @@ def build_parser() -> argparse.ArgumentParser:
 
     chat_parser = subcommands.add_parser("chat", help="Local chat product-loop proofs")
     chat_subcommands = chat_parser.add_subparsers(dest="chat_command", required=True)
+    chat_ask_parser = chat_subcommands.add_parser(
+        "ask",
+        help="Create a funded chat job and wait for the worker answer",
+    )
+    chat_ask_parser.add_argument(
+        "--out",
+        default=".mesh/chat-ask",
+        help="Output directory for chat-ask.json and .md",
+    )
+    chat_ask_parser.add_argument(
+        "--coordinator",
+        default=None,
+        help="Coordinator base URL. Defaults to invite coordinator or http://127.0.0.1:8765",
+    )
+    chat_ask_parser.add_argument("--invite", default=None, help="Optional alpha invite JSON for coordinator/auth")
+    chat_ask_parser.add_argument("--admission-token", default=None, help="Admission token for public alpha coordinators")
+    chat_ask_parser.add_argument("--model", required=True, help="Ollama model name, such as llama3.2:3b")
+    chat_ask_parser.add_argument("--prompt", required=True, help="User message to send to the chat model")
+    chat_ask_parser.add_argument("--system", default="Be concise.", help="Optional system message")
+    chat_ask_parser.add_argument(
+        "--requester-account-id",
+        required=True,
+        help="Requester account to reserve credits from",
+    )
+    chat_ask_parser.add_argument("--job-cost", default=1, type=int, help="Credits to reserve from requester account")
+    chat_ask_parser.add_argument("--reward", default=1, type=int, help="Credits awarded to the worker")
+    chat_ask_parser.add_argument("--temperature", default=0.2, type=float, help="Optional model temperature")
+    chat_ask_parser.add_argument("--max-tokens", default=256, type=int, help="Optional max token hint")
+    chat_ask_parser.add_argument("--ttl-seconds", default=300, type=int, help="Job lifetime in seconds")
+    chat_ask_parser.add_argument("--timeout-seconds", default=60.0, type=float, help="Seconds to wait for the result")
+    chat_ask_parser.add_argument("--poll-interval", default=0.5, type=float, help="Seconds between result checks")
+    chat_ask_parser.add_argument(
+        "--client-timeout-seconds",
+        default=10.0,
+        type=float,
+        help="Seconds to wait for each coordinator HTTP request",
+    )
+    chat_ask_parser.add_argument("--no-wait", action="store_true", help="Create the job and skip result polling")
+    chat_ask_parser.add_argument("--json", action="store_true", help="Print the full JSON ask report")
+    chat_ask_parser.set_defaults(func=run_chat_ask_command)
+
     chat_smoke_parser = chat_subcommands.add_parser(
         "smoke",
         help="Run a local requester-funded chat job and write a smoke report",

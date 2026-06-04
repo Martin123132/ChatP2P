@@ -321,6 +321,20 @@ python -m chatp2p.cli chat smoke `
 
 Use `--mode ollama --model <local-model>` when you deliberately want the smoke to hit a real local Ollama model. The report schema is `chatp2p.funded-chat-smoke-report.v1`.
 
+To ask a running coordinator for a funded chat answer, use `chat ask`. This creates a real `inference.chat.v1` job, reserves credits from the requester account, waits for a worker result, then writes `chat-ask.json` and `chat-ask.md`:
+
+```powershell
+python -m chatp2p.cli chat ask `
+  --invite D:\ChatP2PData\alpha-invite.json `
+  --out D:\ChatP2PData\chat-ask `
+  --model llama3.2:3b `
+  --prompt "Explain ChatP2P" `
+  --requester-account-id requester_demo `
+  --job-cost 1
+```
+
+The command reads the invite token for job creation but does not print it or write it into the report. Use `--no-wait` when you only want to submit the job and check the result later.
+
 Open the coordinator dashboard:
 
 ```text

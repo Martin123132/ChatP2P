@@ -70,6 +70,8 @@ Chat Inference V1 uses `inference.chat.v1` as the first real product loop for cr
 
 Funded Chat Smoke V1 turns that loop into one repeatable operator proof. In default fake-Ollama mode it needs no partner node and no model download: grant requester credits, reserve job cost, lease a signed chat job, submit a signed answer, reward the worker, and write `chatp2p.funded-chat-smoke-report.v1`. Real local Ollama mode is available when the operator wants to test an installed open model.
 
+Chat Ask V1 is the requester-facing counterpart. It submits a funded `inference.chat.v1` job to a running coordinator, waits for a worker answer, and writes a local transcript/report without exposing invite tokens. This is still CLI-first, but it is the first shape of the future chat app: one prompt, one reserved credit spend, one contributed-compute answer.
+
 ## Future Lane: ISP Edge / Broadband Bundle
 
 Keep a second product architecture lane for an ISP-edge simulation, but do not let it interrupt the current alpha path. The idea is not "AI inside fibre"; it is a broadband-provider-style deployment model where a provider runs a coordinator, subscribers run light gateway/device nodes, regional edge workers provide stronger capacity, and policy routes work through local, provider-edge, trusted-peer, then placeholder fallback paths.

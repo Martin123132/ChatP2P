@@ -16,6 +16,7 @@ DEFAULT_ALLOWED_JOB_TYPES = (
     "eval.deterministic.v1",
     "inference.echo.v1",
     "inference.ollama.v1",
+    "inference.chat.v1",
 )
 DEFAULT_MAX_REQUEST_BYTES = 256 * 1024
 DEFAULT_MAX_JOB_PAYLOAD_BYTES = 16 * 1024
