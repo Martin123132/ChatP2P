@@ -53,6 +53,11 @@ from .alpha import (
     run_node_watchdog,
 )
 from .benchmark import CAPABILITY_PROFILE_NAME, load_node_capabilities, run_node_benchmark, save_node_benchmark
+from .chat_smoke import (
+    FundedChatSmokeConfig,
+    format_funded_chat_smoke_summary,
+    run_funded_chat_smoke,
+)
 from .client import CoordinatorClient
 from .coordinator import Coordinator
 from .crypto import NodeIdentity
@@ -367,6 +372,38 @@ def run_quickstart_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_quickstart_report(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def run_chat_smoke_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_funded_chat_smoke(
+            FundedChatSmokeConfig(
+                out_dir=Path(args.out),
+                model=args.model,
+                prompt=args.prompt,
+                system=args.system,
+                requester_account_id=args.requester_account_id,
+                starting_credits=args.starting_credits,
+                job_cost=args.job_cost,
+                reward=args.reward,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                ttl_seconds=args.ttl_seconds,
+                mode=args.mode,
+                fake_answer=args.fake_answer,
+                ollama_base_url=args.ollama_base_url,
+                ollama_timeout_seconds=args.ollama_timeout_seconds,
+            )
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_funded_chat_smoke_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -2727,6 +2764,65 @@ def build_parser() -> argparse.ArgumentParser:
     )
     quickstart_parser.add_argument("--json", action="store_true", help="Print the full JSON quickstart report")
     quickstart_parser.set_defaults(func=run_quickstart_command)
+
+    chat_parser = subcommands.add_parser("chat", help="Local chat product-loop proofs")
+    chat_subcommands = chat_parser.add_subparsers(dest="chat_command", required=True)
+    chat_smoke_parser = chat_subcommands.add_parser(
+        "smoke",
+        help="Run a local requester-funded chat job and write a smoke report",
+    )
+    chat_smoke_parser.add_argument(
+        "--out",
+        default=".mesh/chat-smoke",
+        help="Output directory for funded-chat-smoke.json and .md",
+    )
+    chat_smoke_parser.add_argument("--model", default="tiny-test-model", help="Model name for the chat job")
+    chat_smoke_parser.add_argument(
+        "--prompt",
+        default="Explain ChatP2P in one sentence.",
+        help="User message for the chat job",
+    )
+    chat_smoke_parser.add_argument("--system", default="Be concise.", help="Optional system message")
+    chat_smoke_parser.add_argument(
+        "--requester-account-id",
+        default="requester_demo",
+        help="Requester account to grant and reserve credits from",
+    )
+    chat_smoke_parser.add_argument(
+        "--starting-credits",
+        default=3,
+        type=int,
+        help="Credits granted to the requester before creating the job",
+    )
+    chat_smoke_parser.add_argument("--job-cost", default=2, type=int, help="Credits reserved for the chat job")
+    chat_smoke_parser.add_argument("--reward", default=1, type=int, help="Credits awarded to the worker")
+    chat_smoke_parser.add_argument("--temperature", default=0.2, type=float, help="Optional model temperature")
+    chat_smoke_parser.add_argument("--max-tokens", default=96, type=int, help="Optional max token hint")
+    chat_smoke_parser.add_argument("--ttl-seconds", default=300, type=int, help="Job lifetime in seconds")
+    chat_smoke_parser.add_argument(
+        "--mode",
+        choices=["fake", "ollama"],
+        default="fake",
+        help="Use deterministic fake Ollama or a real local Ollama endpoint",
+    )
+    chat_smoke_parser.add_argument(
+        "--fake-answer",
+        default="ChatP2P lets contributors earn credits by running signed AI jobs for requesters.",
+        help="Answer returned by fake mode",
+    )
+    chat_smoke_parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="Local Ollama base URL when --mode ollama is used",
+    )
+    chat_smoke_parser.add_argument(
+        "--ollama-timeout-seconds",
+        default=30.0,
+        type=float,
+        help="Seconds to wait for local Ollama requests",
+    )
+    chat_smoke_parser.add_argument("--json", action="store_true", help="Print the full JSON smoke report")
+    chat_smoke_parser.set_defaults(func=run_chat_smoke_command)
 
     node_parser = subcommands.add_parser("node", help="Local node commands")
     node_subcommands = node_parser.add_subparsers(dest="node_command", required=True)

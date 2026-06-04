@@ -307,6 +307,20 @@ Chat Inference V1 uses the funded-job path with `inference.chat.v1`. It is Ollam
 chatp2p job create-chat --model llama3.2:3b --system "Be concise." --prompt "Explain ChatP2P" --requester-account-id requester_demo --job-cost 1
 ```
 
+To prove the whole credit-backed chat loop locally without a partner node or model download, run the funded chat smoke. The default `fake` mode starts a temporary local Ollama-compatible endpoint, grants requester credits, reserves the job cost, leases the chat job to a local worker, verifies the signed result, rewards the worker, and writes JSON/Markdown evidence:
+
+```powershell
+python -m chatp2p.cli chat smoke `
+  --out D:\ChatP2PData\chat-smoke `
+  --prompt "Explain ChatP2P" `
+  --requester-account-id requester_demo `
+  --starting-credits 3 `
+  --job-cost 2 `
+  --reward 1
+```
+
+Use `--mode ollama --model <local-model>` when you deliberately want the smoke to hit a real local Ollama model. The report schema is `chatp2p.funded-chat-smoke-report.v1`.
+
 Open the coordinator dashboard:
 
 ```text
