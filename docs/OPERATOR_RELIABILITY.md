@@ -84,6 +84,17 @@ Use `summary.can_continue_without_partner`, `summary.recommended_next_action`, a
 
 Revision sync compares live node-advertised software metadata with the local public repo HEAD by default. Pass `--expected-public-revision <sha>` to pin the comparison to a release commit. Nodes that have not refreshed since revision metadata shipped are reported as `unknown`, not failed; a live node with a different revision produces `wait_for_partner_autopull`, and synced live nodes produce `partner_synced_continue` once the rest of the gate is clear.
 
+When the queue says `wait_for_partner_autopull`, use `operator sync-status` to confirm the state from the latest console snapshot without contacting the partner machine or restarting anything:
+
+```powershell
+python -m chatp2p.cli operator sync-status `
+  --repo D:\Projects\ChatP2P `
+  --console-report D:\ChatP2PData\operator-console\operator-console.json `
+  --out D:\ChatP2PData\operator-console\sync-status
+```
+
+The report writes `sync-status.json` and `sync-status.md`. Its main state is `synced`, `waiting_for_autopull`, `unknown_old_worker`, or `blocked`, so the operator can tell whether to continue, wait for scheduled autopull, or regenerate Operator Console with network checks.
+
 ## Self-Heal
 
 Self-Heal V1 is a report-first local repair planner. It does not execute repairs, restart coordinators, restart workers, or contact partner machines. Generate it from the current console, daily, and action queue reports:

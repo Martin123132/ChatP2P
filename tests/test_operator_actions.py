@@ -74,7 +74,9 @@ def test_action_queue_sync_actions_are_local_and_allowlisted(tmp_path):
     wait_action = wait_queue["next_action"]
     synced_action = synced_queue["next_action"]
     assert wait_action["partner_required"] is False
-    assert wait_action["suggested_commands"][0]["argv"][2:5] == ["chatp2p.cli", "operator", "console"]
+    assert wait_action["suggested_commands"][0]["argv"][2:5] == ["chatp2p.cli", "operator", "sync-status"]
+    assert "operator sync-status" in wait_action["suggested_commands"][0]["command"]
+    assert wait_action["suggested_commands"][1]["argv"][2:5] == ["chatp2p.cli", "operator", "console"]
     assert synced_action["partner_required"] is False
     assert synced_action["suggested_commands"][0]["argv"][2:5] == ["chatp2p.cli", "operator", "privacy-scan"]
 
@@ -249,6 +251,28 @@ def test_run_action_allows_action_queue_command(tmp_path):
 
     assert report["status"] == "dry_run"
     assert "action-queue" in report["command"]["allowlist"]
+
+
+def test_run_action_allows_sync_status_command(tmp_path):
+    queue = build_operator_action_queue(
+        _daily_report(
+            status="warn",
+            can_continue=True,
+            recommended_next_action="wait_for_partner_autopull",
+            privacy_ok=True,
+        )
+    )
+
+    report = run_operator_action(
+        queue,
+        queue_path=tmp_path / "action-queue.json",
+        action_id="wait_for_partner_autopull",
+        dry_run=True,
+    )
+
+    assert report["status"] == "dry_run"
+    assert report["command"]["argv"][2:5] == ["chatp2p.cli", "operator", "sync-status"]
+    assert "sync-status" in report["command"]["allowlist"]
 
 
 def test_run_action_refuses_non_python_executable(tmp_path):

@@ -82,6 +82,7 @@ from .operator_self_heal import (
     format_operator_self_heal_summary,
     run_operator_self_heal,
 )
+from .operator_sync import OperatorSyncStatusConfig, format_operator_sync_status_summary, run_operator_sync_status
 from .packets import JobLeaseRenewal, NodeRegistration
 from .proof import OllamaProofConfig, SwarmProofConfig, proof_summary, run_ollama_proof, run_swarm_proof
 from .privacy import PrivacyScanConfig, run_public_privacy_scan
@@ -517,6 +518,28 @@ def operator_self_heal_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_operator_self_heal_summary(report))
+    if report["status"] == "fail":
+        raise SystemExit(1)
+
+
+def operator_sync_status_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_operator_sync_status(
+            OperatorSyncStatusConfig(
+                repo=Path(args.repo),
+                console_report_path=Path(args.console_report),
+                out_dir=Path(args.out),
+                expected_public_revision=args.expected_public_revision,
+                autopull_stale_minutes=args.autopull_stale_minutes,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_operator_sync_status_summary(report))
     if report["status"] == "fail":
         raise SystemExit(1)
 
@@ -3464,6 +3487,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     operator_self_heal_parser.add_argument("--json", action="store_true", help="Print the full JSON self-heal report")
     operator_self_heal_parser.set_defaults(func=operator_self_heal_command)
+
+    operator_sync_status_parser = operator_subcommands.add_parser(
+        "sync-status",
+        help="Confirm whether live nodes have advertised the expected public revision",
+    )
+    operator_sync_status_parser.add_argument("--repo", default=".", help="Public repository root to inspect")
+    operator_sync_status_parser.add_argument(
+        "--console-report",
+        required=True,
+        help="Path to operator-console.json containing the latest bounded software snapshot",
+    )
+    operator_sync_status_parser.add_argument("--out", required=True, help="Output directory for sync-status artifacts")
+    operator_sync_status_parser.add_argument(
+        "--expected-public-revision",
+        default=None,
+        help="Public repo revision expected on live nodes. Defaults to the console report value, then local HEAD.",
+    )
+    operator_sync_status_parser.add_argument(
+        "--autopull-stale-minutes",
+        default=45.0,
+        type=float,
+        help="Warn when the console report is older than this many minutes while waiting for autopull",
+    )
+    operator_sync_status_parser.add_argument("--json", action="store_true", help="Print the full JSON sync report")
+    operator_sync_status_parser.set_defaults(func=operator_sync_status_command)
 
     operator_maintenance_parser = operator_subcommands.add_parser(
         "maintenance",

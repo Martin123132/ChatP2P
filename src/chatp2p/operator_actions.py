@@ -18,6 +18,7 @@ ALLOWED_RUN_ACTION_OPERATOR_COMMANDS = {
     "daily-check",
     "privacy-scan",
     "reliability-pack",
+    "sync-status",
 }
 
 
@@ -131,7 +132,7 @@ _RECOMMENDED_ACTIONS: dict[str, dict[str, Any]] = {
         "severity": "warning",
         "category": "sync",
         "title": "Wait for partner autopull",
-        "detail": "A live node is advertising an older or different public revision; wait for autopull, then rerun the console.",
+        "detail": "A live node is advertising an older or different public revision; wait for autopull, then confirm sync status.",
         "partner_required": False,
     },
     "partner_synced_continue": {
@@ -449,10 +450,14 @@ def _suggested_commands_for_action(action_id: str, report: dict[str, Any]) -> li
         if command:
             commands.append(_command("Create action-run report with privacy scan", command, argv=argv))
     elif action_id == "wait_for_partner_autopull":
+        command = _sync_status_command(report)
+        argv = _sync_status_argv(report)
+        if command:
+            commands.append(_command("Confirm partner autopull status", command, argv=argv))
         command = _operator_console_command(report, include_skip_network_checks=False)
         argv = _operator_console_argv(report, include_skip_network_checks=False)
         if command:
-            commands.append(_command("Rerun Operator Console after autopull", command, argv=argv))
+            commands.append(_command("Refresh Operator Console with network checks", command, argv=argv))
     elif action_id in {"continue_development", "partner_synced_continue"}:
         command = _privacy_scan_command(report)
         argv = _privacy_scan_argv(report)
@@ -766,6 +771,74 @@ def _action_queue_argv(report: dict[str, Any]) -> list[str] | None:
         "--out",
         str(out_dir),
     ]
+
+
+def _sync_status_command(report: dict[str, Any]) -> str | None:
+    repo = _config_value(report, "repo")
+    console_report = _console_report_path(report)
+    out_dir = _sync_status_out_dir(report)
+    if not repo or not console_report or not out_dir:
+        return None
+    lines = [
+        "python -m chatp2p.cli operator sync-status `",
+        f"  --repo {_ps(repo)} `",
+        f"  --console-report {_ps(console_report)} `",
+    ]
+    expected_revision = _config_value(report, "expected_public_revision")
+    if expected_revision:
+        lines.append(f"  --expected-public-revision {_ps(expected_revision)} `")
+    lines.append(f"  --out {_ps(out_dir)}")
+    return "\n".join(lines)
+
+
+def _sync_status_argv(report: dict[str, Any]) -> list[str] | None:
+    repo = _config_value(report, "repo")
+    console_report = _console_report_path(report)
+    out_dir = _sync_status_out_dir(report)
+    if not repo or not console_report or not out_dir:
+        return None
+    argv = [
+        "python",
+        "-m",
+        "chatp2p.cli",
+        "operator",
+        "sync-status",
+        "--repo",
+        str(repo),
+        "--console-report",
+        str(console_report),
+    ]
+    expected_revision = _config_value(report, "expected_public_revision")
+    if expected_revision:
+        argv.extend(["--expected-public-revision", str(expected_revision)])
+    argv.extend(["--out", str(out_dir)])
+    return argv
+
+
+def _console_report_path(report: dict[str, Any]) -> Any:
+    artifacts = report.get("artifacts") if isinstance(report.get("artifacts"), dict) else {}
+    if report.get("schema") == "chatp2p.operator-console-report.v1":
+        if artifacts.get("json"):
+            return artifacts.get("json")
+        out_dir = _config_value(report, "out_dir")
+        return str(Path(str(out_dir)) / "operator-console.json") if out_dir else None
+    if artifacts.get("operator_console_json"):
+        return artifacts.get("operator_console_json")
+    console_out = _config_value(report, "console_out_dir")
+    if console_out:
+        return str(Path(str(console_out)) / "operator-console.json")
+    operator_console = (report.get("steps") or {}).get("operator_console") if isinstance(report.get("steps"), dict) else {}
+    html_path = operator_console.get("html") or artifacts.get("operator_console_html")
+    if html_path:
+        return str(Path(str(html_path)).with_name("operator-console.json"))
+    return None
+
+
+def _sync_status_out_dir(report: dict[str, Any]) -> Any:
+    console_report = _console_report_path(report)
+    if console_report:
+        return str(Path(str(console_report)).parent / "sync-status")
+    return None
 
 
 def _daily_report_path(report: dict[str, Any]) -> Any:

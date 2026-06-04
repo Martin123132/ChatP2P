@@ -66,6 +66,17 @@ The console writes `operator-console.json`, `operator-console.md`, `operator-con
 
 Revision sync compares live node-advertised software metadata with the local public repo HEAD by default. Use `--expected-public-revision <sha>` when you want to pin the comparison to a specific release commit. Nodes that have not refreshed since this feature shipped show `unknown` rather than failing the report.
 
+To turn the latest console snapshot into one focused answer while a partner autopull catches up, run:
+
+```powershell
+python -m chatp2p.cli operator sync-status `
+  --repo D:\Projects\ChatP2P `
+  --console-report D:\ChatP2PData\operator-console\operator-console.json `
+  --out D:\ChatP2PData\operator-console\sync-status
+```
+
+`sync-status` is read-only and uses the bounded revision metadata already written by Operator Console. It writes `sync-status.json` and `sync-status.md` with one of `synced`, `waiting_for_autopull`, `unknown_old_worker`, or `blocked`, plus the next local recommendation.
+
 For the daily operator gate, run:
 
 ```powershell
