@@ -45,12 +45,18 @@ function Resolve-PathOrDefault {
 function Invoke-Command-Strict {
     param(
         [string]$Name,
-        [string[]]$CommandArgs
+        [string[]]$CommandArgs,
+        [switch]$AllowFailure
     )
     & $python @CommandArgs
     if ($LASTEXITCODE -ne 0) {
+        if ($AllowFailure) {
+            Write-Warning "$Name returned exit code $LASTEXITCODE (continuing maintenance loop for report review)."
+            return $LASTEXITCODE
+        }
         throw "$Name failed with exit code $LASTEXITCODE"
     }
+    return 0
 }
 
 try {
@@ -96,7 +102,7 @@ try {
             $consoleArgs += @("--partner-report", $report)
         }
     }
-    Invoke-Command-Strict -Name "operator console" -CommandArgs $consoleArgs
+    $consoleExitCode = Invoke-Command-Strict -Name "operator console" -CommandArgs $consoleArgs -AllowFailure
 
     Write-Host "[2/4] operator daily-check..."
     $dailyArgs = @(
@@ -120,7 +126,7 @@ try {
     if ($SkipNetworkChecks) {
         $dailyArgs += "--skip-network-checks"
     }
-    Invoke-Command-Strict -Name "operator daily-check" -CommandArgs $dailyArgs
+    $dailyCheckExitCode = Invoke-Command-Strict -Name "operator daily-check" -CommandArgs $dailyArgs -AllowFailure
 
     Write-Host "[3/4] rebuild action-queue..."
     $dailyCheckJson = Join-Path $dailyCheckDir "daily-check.json"
@@ -133,7 +139,7 @@ try {
         "--out", $dailyCheckDir,
         "--json"
     )
-    Invoke-Command-Strict -Name "operator action-queue" -CommandArgs $queueArgs
+    $actionQueueExitCode = Invoke-Command-Strict -Name "operator action-queue" -CommandArgs $queueArgs -AllowFailure
 
     Write-Host "[4/4] operator self-heal..."
     $actionQueueJson = Join-Path $dailyCheckDir "action-queue.json"
@@ -152,7 +158,7 @@ try {
         "--out", $selfHealDir,
         "--json"
     )
-    Invoke-Command-Strict -Name "operator self-heal" -CommandArgs $selfHealArgs
+    $selfHealExitCode = Invoke-Command-Strict -Name "operator self-heal" -CommandArgs $selfHealArgs -AllowFailure
 
     $selfHealJson = Join-Path $selfHealDir "operator-self-heal-report.json"
     $action = $null

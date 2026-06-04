@@ -508,6 +508,79 @@ def test_operator_maintenance_fallback_reports_json(monkeypatch, tmp_path, capsy
     assert captured_steps[3][2:5] == ["chatp2p.cli", "operator", "self-heal"]
 
 
+def test_operator_maintenance_fallback_treats_console_fail_as_report_only(monkeypatch, tmp_path, capsys):
+    parser = build_parser()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    args = parser.parse_args(
+        [
+            "operator",
+            "maintenance",
+            "--repo",
+            str(repo),
+            "--primary-invite",
+            str(tmp_path / "alpha-invite.json"),
+            "--out",
+            str(tmp_path / "maintenance"),
+            "--skip-network-checks",
+            "--json",
+        ]
+    )
+
+    captured_steps: list[list[str]] = []
+
+    def fake_runner(command: list[str], *, label: str, cwd: Path) -> int:
+        captured_steps.append(command.copy())
+        if label in {"operator console", "operator daily-check"}:
+            return 1
+        return 0
+
+    def fake_read_json_file(path: Path, description: str = "JSON file"):
+        path_text = str(path)
+        if path_text.endswith("operator-console.json"):
+            return {
+                "summary": {
+                    "can_continue_without_partner": False,
+                    "recommended_next_action": "fix_public_privacy_findings",
+                    "status": "fail",
+                },
+                "artifacts": {"json": str(path)},
+            }
+        if path_text.endswith("operator-self-heal-report.json"):
+            return {"summary": {"repairable_issue_count": 2}}
+        if path_text.endswith("action-queue.json"):
+            return {
+                "next_action": {
+                    "action_id": "fix_public_privacy_findings",
+                    "partner_required": False,
+                    "can_run_without_partner": True,
+                    "suggested_commands": [{"argv": ["python"]}],
+                }
+            }
+        raise ValueError(f"unexpected JSON read: {path_text}")
+
+    monkeypatch.setattr(cli_module, "_run_operator_maintenance_command", fake_runner)
+    monkeypatch.setattr(cli_module, "read_json_file", fake_read_json_file)
+
+    cli_module.operator_maintenance_command(args)
+    output = capsys.readouterr().out
+    marker = output.find("{\n")
+    assert marker >= 0
+    report = json.loads(output[marker:])
+
+    assert report["schema"] == "chatp2p.operator-maintenance-report.v1"
+    assert report["status"] == "fail"
+    assert len(report["steps"]) == 4
+    console_step = next(step for step in report["steps"] if step["label"] == "operator console")
+    daily_step = next(step for step in report["steps"] if step["label"] == "operator daily-check")
+    assert console_step["returncode"] == 1
+    assert console_step["status"] == "fail"
+    assert daily_step["returncode"] == 1
+    assert daily_step["status"] == "fail"
+    assert report["summary"]["top_action_status"] == "safe_local"
+
+
 def test_operator_maintenance_skips_top_action_run_when_partner_required(monkeypatch, tmp_path):
     parser = build_parser()
     repo = tmp_path / "repo"

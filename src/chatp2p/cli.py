@@ -524,7 +524,20 @@ def _run_operator_maintenance_command(
     *,
     label: str,
     cwd: Path,
-) -> None:
+) -> int:
+    """Run an operator maintenance subcommand.
+
+    Returns the subprocess exit code; command failures are converted to
+    `SystemExit` for report-critical steps unless the label is in the
+    known report-first allowlist.
+    """
+    allow_failure = label in {
+        "operator console",
+        "operator daily-check",
+        "operator action-queue",
+        "operator self-heal",
+    }
+
     result = subprocess.run(
         command,
         check=False,
@@ -532,14 +545,16 @@ def _run_operator_maintenance_command(
         capture_output=True,
         cwd=str(cwd),
     )
+    returncode = getattr(result, "returncode", 0) or 0
     stdout = getattr(result, "stdout", "")
     stderr = getattr(result, "stderr", "")
     if stdout:
         print(stdout.rstrip())
     if stderr:
         print(stderr.rstrip())
-    if result.returncode:
-        raise SystemExit(f"{label} failed with exit code {result.returncode}")
+    if returncode and not allow_failure:
+        raise SystemExit(f"{label} failed with exit code {returncode}")
+    return returncode
 
 
 def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path) -> None:
@@ -695,7 +710,8 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
         }
         maintenance_report["steps"].append(step_report)
         try:
-            _run_operator_maintenance_command(command, label=label, cwd=repo_root)
+            returncode = _run_operator_maintenance_command(command, label=label, cwd=repo_root)
+            step_report["returncode"] = returncode
         except SystemExit as exc:
             step_report["status"] = "fail"
             step_report["returncode"] = 1
@@ -710,6 +726,10 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
             else:
                 print(f"\nOperator maintenance failed during {label}: {str(exc)}")
             raise
+        if step_report["returncode"]:
+            step_report["status"] = "fail"
+            step_report["error"] = f"{label} completed with exit code {step_report['returncode']}"
+            maintenance_report["status"] = "fail"
 
     console_report = read_json_file(console_json, description="operator console report")
     self_heal_report = read_json_file(self_heal_json, description="operator self-heal report")
