@@ -184,6 +184,7 @@ try {
         "--primary-invite", $PrimaryInvite,
         "--out", $dailyCheckDir,
         "--console-out", $consoleDir,
+        "--reliability-dir", $reliabilityPath,
         "--json"
     )
     if (-not [string]::IsNullOrWhiteSpace($BackupInvite)) {

@@ -479,6 +479,8 @@ exit 0
             str(tmp_path / "alpha-invite.json"),
             "-OutRoot",
             str(out_root),
+            "-ReliabilityDir",
+            str(tmp_path / "reliability-pack-live"),
             "-PreviewTopAction",
             "-Json",
             "-Python",
@@ -498,7 +500,10 @@ exit 0
     assert report["summary"]["top_action_partner_required"] is True
     assert len(report["steps"]) == 4
     assert {step["report_mode"] for step in report["steps"]} == {"report_only"}
-    assert "operator run-action" not in fake_log.read_text(encoding="utf-8")
+    fake_calls = fake_log.read_text(encoding="utf-8")
+    assert "operator daily-check" in fake_calls
+    assert "--reliability-dir " + str(tmp_path / "reliability-pack-live") in fake_calls
+    assert "operator run-action" not in fake_calls
 
 
 def test_operator_maintenance_command_falls_back_to_python_when_script_missing(monkeypatch, tmp_path):
