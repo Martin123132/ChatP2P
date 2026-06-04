@@ -299,6 +299,8 @@ Leases expire after 30 seconds by default and can be tuned with `--lease-timeout
 
 Credit Ledger V1 records why credits moved, not just each node's current balance. Accepted worker results create `worker_result_reward` ledger entries with the job id, node id, output hash, delta, and balance after the transaction. The legacy `credits` map remains for compatibility, while snapshots include `credit_ledger.summary` and recent entries for auditability. Credits are prototype usage accounting, not money, crypto, or a cash-out promise.
 
+Requester-funded jobs can include `requester_account_id` and `job_cost` when created through `POST /jobs` or `CoordinatorClient.create_job(...)`. The coordinator reserves the job cost before the job enters the queue; if the requester account lacks credits, creation fails and no worker can lease the job. Worker rewards are still recorded separately when an accepted result is submitted.
+
 Open the coordinator dashboard:
 
 ```text

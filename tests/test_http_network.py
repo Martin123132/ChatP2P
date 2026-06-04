@@ -126,6 +126,13 @@ def test_http_worker_renews_short_lease_while_job_runs():
 def test_http_producer_creates_job_after_coordinator_start():
     coordinator_identity = NodeIdentity.generate(prefix="coordinator")
     coordinator = Coordinator(identity=coordinator_identity)
+    requester_id = "requester_http_account"
+    coordinator.apply_credit_delta(
+        account_id=requester_id,
+        account_type="requester",
+        delta=4,
+        reason="operator_credit_grant",
+    )
     server = create_coordinator_http_server(coordinator, host="127.0.0.1", port=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -141,8 +148,13 @@ def test_http_producer_creates_job_after_coordinator_start():
                 "operands": [7, 8],
                 "expected": 15,
             },
+            requester_account_id=requester_id,
+            job_cost=2,
         )
         assert created_job.verify_signature()
+        assert created_job.resource_requirements["requester_account_id"] == requester_id
+        assert created_job.resource_requirements["job_cost"] == 2
+        assert coordinator.credits[requester_id] == 2
 
         worker_identity = NodeIdentity.generate(prefix="worker")
         worker = WorkerNode(identity=worker_identity)
@@ -158,6 +170,13 @@ def test_http_producer_creates_job_after_coordinator_start():
         snapshot = client.snapshot()
         assert snapshot["status"]["pending_jobs"] == 1
         assert snapshot["jobs"][0]["payload"]["operands"] == [7, 8]
+        ledger = client.ledger()["credit_ledger"]
+        assert ledger["summary"]["negative_credits"] == 2
+        assert [entry["reason"] for entry in ledger["recent_entries"]] == [
+            "operator_credit_grant",
+            "job_cost_reserved",
+            "worker_result_reward",
+        ]
     finally:
         server.shutdown()
         server.server_close()

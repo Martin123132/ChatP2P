@@ -64,6 +64,8 @@ V1 records auditable ledger entries for accepted worker results:
 
 The current node `credits` balance remains available for old clients, but the ledger is the source to build future spend, reserve, refund, and dispute flows. The next inference marketplace milestone should add requester accounts and job-cost reservation before a chat job is leased.
 
+Requester Reservation V1 adds that first spend path: a job may declare `requester_account_id` and `job_cost`, the coordinator debits `job_cost_reserved` before the job is queued, and accepted worker output still earns a separate `worker_result_reward`. Refunds and dispute settlement remain future work.
+
 ## Future Lane: ISP Edge / Broadband Bundle
 
 Keep a second product architecture lane for an ISP-edge simulation, but do not let it interrupt the current alpha path. The idea is not "AI inside fibre"; it is a broadband-provider-style deployment model where a provider runs a coordinator, subscribers run light gateway/device nodes, regional edge workers provide stronger capacity, and policy routes work through local, provider-edge, trusted-peer, then placeholder fallback paths.

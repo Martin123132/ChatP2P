@@ -254,18 +254,32 @@ class Coordinator:
         verification_strategy: str | None = None,
         reward: int = 1,
         ttl_seconds: int = 300,
+        requester_account_id: str | None = None,
+        job_cost: int | None = None,
     ) -> JobPacket:
         if reward < 1:
             raise ValueError("reward must be at least 1")
+        if job_cost is not None and job_cost < 1:
+            raise ValueError("job_cost must be at least 1")
+        if job_cost is not None and not requester_account_id:
+            raise ValueError("requester_account_id is required when job_cost is set")
 
         normalized_payload = self._validate_payload(job_type, payload)
         defaults = self._job_defaults(job_type, normalized_payload)
+        effective_job_cost = int(job_cost if job_cost is not None else reward)
 
         effective_resource_requirements = (
             dict(defaults["resource_requirements"])
             if resource_requirements is None
             else {**defaults["resource_requirements"], **resource_requirements}
         )
+        if requester_account_id:
+            requester = requester_account_id.strip()
+            if not requester:
+                raise ValueError("requester_account_id must not be blank")
+            effective_resource_requirements["requester_account_id"] = requester
+            effective_resource_requirements["job_cost"] = effective_job_cost
+            effective_resource_requirements["credit_policy"] = "reserve_on_create"
         if job_type == "inference.ollama.v1":
             effective_resource_requirements["ollama_model"] = normalized_payload["model"]
 
@@ -280,6 +294,8 @@ class Coordinator:
             reward=reward,
             ttl_seconds=ttl_seconds,
         )
+        if requester_account_id:
+            self._reserve_job_cost(job, requester_account_id.strip(), effective_job_cost)
         self.jobs[job.job_id] = job
         if self.store is not None:
             self.store.save_job(job)
@@ -642,6 +658,23 @@ class Coordinator:
             },
         )
 
+    def _reserve_job_cost(self, job: JobPacket, requester_account_id: str, job_cost: int) -> CreditLedgerEntry:
+        return self.apply_credit_delta(
+            account_id=requester_account_id,
+            account_type="requester",
+            delta=-job_cost,
+            reason="job_cost_reserved",
+            transaction_id=f"credit_txn_job_cost_reserved_{job.job_id}_{requester_account_id}",
+            job_id=job.job_id,
+            counterparty_id=job.coordinator_id,
+            metadata={
+                "job_type": job.job_type,
+                "model_id": job.model_id,
+                "reward": job.reward,
+                "job_cost": job_cost,
+            },
+        )
+
     def touch_node(self, node_id: str, seen_at: float | None = None) -> bool:
         if node_id not in self.known_nodes:
             return False
@@ -784,6 +817,9 @@ class Coordinator:
                     "expired_lease_count": sum(1 for lease in leases if lease["status"] == "expired"),
                     "leases": leases,
                     "reward": job.reward,
+                    "requester_account_id": job.resource_requirements.get("requester_account_id"),
+                    "job_cost": job.resource_requirements.get("job_cost"),
+                    "credit_policy": job.resource_requirements.get("credit_policy"),
                     "deadline": job.deadline,
                     "result_count": result_count,
                     "required_results": verification["required_results"],

@@ -751,6 +751,12 @@ def create_coordinator_http_server(
                             verification_strategy=request.get("verification_strategy"),
                             reward=int(request.get("reward", 1)),
                             ttl_seconds=int(request.get("ttl_seconds", 300)),
+                            requester_account_id=request.get("requester_account_id"),
+                            job_cost=(
+                                int(request["job_cost"])
+                                if request.get("job_cost") is not None
+                                else None
+                            ),
                         )
                 except (KeyError, TypeError, ValueError) as exc:
                     _json_response(self, 400, {"created": False, "error": str(exc)})

@@ -95,6 +95,8 @@ class CoordinatorClient:
         verification_strategy: str | None = None,
         reward: int = 1,
         ttl_seconds: int = 300,
+        requester_account_id: str | None = None,
+        job_cost: int | None = None,
     ) -> JobPacket:
         request = {
             "job_type": job_type,
@@ -110,6 +112,10 @@ class CoordinatorClient:
             request["expected_output_schema"] = expected_output_schema
         if verification_strategy is not None:
             request["verification_strategy"] = verification_strategy
+        if requester_account_id is not None:
+            request["requester_account_id"] = requester_account_id
+        if job_cost is not None:
+            request["job_cost"] = job_cost
         response = self._request("POST", "/jobs", request)
         return JobPacket.from_dict(response["job"])
 
