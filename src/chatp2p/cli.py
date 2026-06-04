@@ -519,6 +519,18 @@ def operator_self_heal_command(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+_OPERATOR_REPORT_ONLY_COMMANDS: set[str] = {
+    "operator console",
+    "operator daily-check",
+    "operator action-queue",
+    "operator self-heal",
+}
+
+
+def _is_report_only_maintenance_step(label: str) -> bool:
+    return label in _OPERATOR_REPORT_ONLY_COMMANDS
+
+
 def _run_operator_maintenance_command(
     command: list[str],
     *,
@@ -531,12 +543,7 @@ def _run_operator_maintenance_command(
     `SystemExit` for report-critical steps unless the label is in the
     known report-first allowlist.
     """
-    allow_failure = label in {
-        "operator console",
-        "operator daily-check",
-        "operator action-queue",
-        "operator self-heal",
-    }
+    allow_failure = _is_report_only_maintenance_step(label)
 
     result = subprocess.run(
         command,
@@ -702,11 +709,13 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
 
     for index, (label, command) in enumerate(steps, start=1):
         print(f"[{index}/{len(steps)}] {label}...")
+        report_mode = "report_only" if _is_report_only_maintenance_step(label) else "strict"
         step_report = {
             "label": label,
             "command": [str(piece) for piece in command],
             "returncode": 0,
             "status": "pass",
+            "report_mode": report_mode,
         }
         maintenance_report["steps"].append(step_report)
         try:
@@ -728,7 +737,13 @@ def _run_operator_maintenance_fallback(args: argparse.Namespace, repo_root: Path
             raise
         if step_report["returncode"]:
             step_report["status"] = "fail"
-            step_report["error"] = f"{label} completed with exit code {step_report['returncode']}"
+            if report_mode == "report_only":
+                step_report["error"] = (
+                    f"{label} completed with exit code {step_report['returncode']} "
+                    "(non-blocking report step)"
+                )
+            else:
+                step_report["error"] = f"{label} completed with exit code {step_report['returncode']}"
             maintenance_report["status"] = "fail"
 
     console_report = read_json_file(console_json, description="operator console report")

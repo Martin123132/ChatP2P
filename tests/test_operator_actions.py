@@ -574,10 +574,16 @@ def test_operator_maintenance_fallback_treats_console_fail_as_report_only(monkey
     assert len(report["steps"]) == 4
     console_step = next(step for step in report["steps"] if step["label"] == "operator console")
     daily_step = next(step for step in report["steps"] if step["label"] == "operator daily-check")
+    action_queue_step = next(step for step in report["steps"] if step["label"] == "operator action-queue")
     assert console_step["returncode"] == 1
     assert console_step["status"] == "fail"
+    assert console_step["report_mode"] == "report_only"
+    assert "non-blocking report step" in console_step["error"]
     assert daily_step["returncode"] == 1
     assert daily_step["status"] == "fail"
+    assert daily_step["report_mode"] == "report_only"
+    assert "non-blocking report step" in daily_step["error"]
+    assert action_queue_step["report_mode"] == "report_only"
     assert report["summary"]["top_action_status"] == "safe_local"
 
 
