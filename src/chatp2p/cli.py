@@ -87,6 +87,11 @@ from .operator_release import (
     format_operator_release_check_summary,
     run_operator_release_check,
 )
+from .operator_autopull import (
+    OperatorAutopullHealthConfig,
+    format_operator_autopull_health_summary,
+    run_operator_autopull_health,
+)
 from .operator_sync import OperatorSyncStatusConfig, format_operator_sync_status_summary, run_operator_sync_status
 from .packets import JobLeaseRenewal, NodeRegistration
 from .proof import OllamaProofConfig, SwarmProofConfig, proof_summary, run_ollama_proof, run_swarm_proof
@@ -545,6 +550,29 @@ def operator_sync_status_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_operator_sync_status_summary(report))
+    if report["status"] == "fail":
+        raise SystemExit(1)
+
+
+def operator_autopull_health_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_operator_autopull_health(
+            OperatorAutopullHealthConfig(
+                repo=Path(args.repo),
+                out_dir=Path(args.out),
+                console_report_path=Path(args.console_report) if args.console_report else None,
+                sync_status_report_path=Path(args.sync_status_report) if args.sync_status_report else None,
+                partner_report_paths=tuple(Path(path) for path in (args.partner_report or [])),
+                freshness_seconds=args.freshness_seconds,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_operator_autopull_health_summary(report))
     if report["status"] == "fail":
         raise SystemExit(1)
 
@@ -3578,6 +3606,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     operator_sync_status_parser.add_argument("--json", action="store_true", help="Print the full JSON sync report")
     operator_sync_status_parser.set_defaults(func=operator_sync_status_command)
+
+    operator_autopull_health_parser = operator_subcommands.add_parser(
+        "autopull-health",
+        help="Summarize whether partner autopull has refreshed live nodes from local reports",
+    )
+    operator_autopull_health_parser.add_argument("--repo", default=".", help="Public repository root to reference")
+    operator_autopull_health_parser.add_argument("--out", required=True, help="Output directory for autopull-health artifacts")
+    operator_autopull_health_parser.add_argument(
+        "--console-report",
+        default=None,
+        help="Optional operator-console.json containing bounded live node revision metadata",
+    )
+    operator_autopull_health_parser.add_argument(
+        "--sync-status-report",
+        default=None,
+        help="Optional sync-status.json produced from the latest Operator Console snapshot",
+    )
+    operator_autopull_health_parser.add_argument(
+        "--partner-report",
+        action="append",
+        default=None,
+        help="Optional partner/autopilot report JSON. Can be passed more than once",
+    )
+    operator_autopull_health_parser.add_argument(
+        "--freshness-seconds",
+        default=3600.0,
+        type=float,
+        help="Maximum report age before partner/autopull evidence is marked stale",
+    )
+    operator_autopull_health_parser.add_argument("--json", action="store_true", help="Print the full JSON autopull report")
+    operator_autopull_health_parser.set_defaults(func=operator_autopull_health_command)
 
     operator_release_check_parser = operator_subcommands.add_parser(
         "release-check",

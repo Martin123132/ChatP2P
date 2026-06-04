@@ -95,6 +95,19 @@ python -m chatp2p.cli operator sync-status `
 
 The report writes `sync-status.json` and `sync-status.md`. Its main state is `synced`, `waiting_for_autopull`, `unknown_old_worker`, or `blocked`, so the operator can tell whether to continue, wait for scheduled autopull, or regenerate Operator Console with network checks.
 
+For a direct read on scheduled autopull health from existing evidence, run:
+
+```powershell
+python -m chatp2p.cli operator autopull-health `
+  --repo D:\Projects\ChatP2P `
+  --console-report D:\ChatP2PData\operator-console\operator-console.json `
+  --sync-status-report D:\ChatP2PData\operator-console\sync-status\sync-status.json `
+  --partner-report D:\ChatP2PData\partner-autopilot-report.json `
+  --out D:\ChatP2PData\autopull-health
+```
+
+It writes `autopull-health.json` and `autopull-health.md` with one of `autopull_working`, `autopull_pending`, `autopull_stale`, `partner_offline`, or `unknown`. The report is local and `partner_required: false`; it only summarizes console, sync-status, and optional partner/autopilot reports.
+
 ## Release Check
 
 Before pushing public repo changes, generate the read-only release report:

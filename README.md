@@ -89,6 +89,19 @@ python -m chatp2p.cli operator sync-status `
 
 `sync-status` is read-only and uses the bounded revision metadata already written by Operator Console. It writes `sync-status.json` and `sync-status.md` with one of `synced`, `waiting_for_autopull`, `unknown_old_worker`, or `blocked`, plus the next local recommendation.
 
+To check whether scheduled partner autopull is healthy from existing local evidence, run:
+
+```powershell
+python -m chatp2p.cli operator autopull-health `
+  --repo D:\Projects\ChatP2P `
+  --console-report D:\ChatP2PData\operator-console\operator-console.json `
+  --sync-status-report D:\ChatP2PData\operator-console\sync-status\sync-status.json `
+  --partner-report D:\ChatP2PData\partner-autopilot-report.json `
+  --out D:\ChatP2PData\autopull-health
+```
+
+`autopull-health` is read-only and writes `autopull-health.json` and `autopull-health.md`. It classifies the state as `autopull_working`, `autopull_pending`, `autopull_stale`, `partner_offline`, or `unknown`, and keeps `partner_required: false` so it remains a local operator answer rather than a phone-call trigger.
+
 For the daily operator gate, run:
 
 ```powershell
