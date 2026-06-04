@@ -29,6 +29,7 @@ DEFAULT_OPERATOR_CONSOLE_FRESHNESS_SECONDS = 3600.0
 DEFAULT_OPERATOR_CONSOLE_HISTORY_LIMIT = 20
 DEFAULT_STALE_REPORT_DAYS = 2.0
 DEFAULT_STALE_REPORT_MAX_ITEMS = 50
+DEFAULT_SNAPSHOT_SAMPLE_LIMIT = 5
 _REPORT_SUFFIXES = {".json", ".md", ".zip", ".log", ".txt"}
 _REPORT_NAME_HINTS = (
     "report",
@@ -731,8 +732,8 @@ def _lane_status(
         return lane
 
     snapshot_result = _client_call(lambda: client.snapshot(), url=f"{invite.coordinator.rstrip('/')}/api/snapshot")
-    lane["snapshot"] = snapshot_result
     snapshot = snapshot_result.get("payload") if snapshot_result.get("ok") else None
+    lane["snapshot"] = _bounded_snapshot_result(snapshot_result)
     if not snapshot_result.get("ok"):
         lane["status"] = "fail"
         lane["errors"].append("coordinator snapshot unreachable")
@@ -800,6 +801,117 @@ def _snapshot_summary(snapshot: dict[str, Any] | None) -> dict[str, Any]:
         "queued_jobs": _int_or_zero(status.get("queued_jobs")),
         "pending_jobs": _int_or_zero(status.get("pending_jobs")),
         "leased_jobs": _int_or_zero(status.get("leased_jobs")),
+    }
+
+
+def _bounded_snapshot_result(
+    snapshot_result: dict[str, Any],
+    *,
+    sample_limit: int = DEFAULT_SNAPSHOT_SAMPLE_LIMIT,
+) -> dict[str, Any]:
+    if not snapshot_result.get("ok") or not isinstance(snapshot_result.get("payload"), dict):
+        return snapshot_result
+    bounded = {
+        key: value
+        for key, value in snapshot_result.items()
+        if key != "payload"
+    }
+    bounded["payload"] = _bounded_snapshot_payload(snapshot_result["payload"], sample_limit=sample_limit)
+    return bounded
+
+
+def _bounded_snapshot_payload(snapshot: dict[str, Any], *, sample_limit: int) -> dict[str, Any]:
+    nodes = [item for item in snapshot.get("nodes", []) if isinstance(item, dict)]
+    jobs = [item for item in snapshot.get("jobs", []) if isinstance(item, dict)]
+    results = [item for item in snapshot.get("results", []) if isinstance(item, dict)]
+    reputation = [item for item in snapshot.get("reputation", []) if isinstance(item, dict)]
+    return {
+        "status": snapshot.get("status", {}),
+        "provider": snapshot.get("provider", {}),
+        "counts": {
+            "nodes": len(nodes),
+            "jobs": len(jobs),
+            "results": len(results),
+            "reputation": len(reputation),
+        },
+        "nodes": [_node_snapshot_digest(item) for item in _sample_nodes(nodes, sample_limit)],
+        "jobs": [_job_snapshot_digest(item) for item in _tail_sample(jobs, sample_limit)],
+        "results": [_result_snapshot_digest(item) for item in _tail_sample(results, sample_limit)],
+        "truncated": {
+            "nodes": len(nodes) > sample_limit,
+            "jobs": len(jobs) > sample_limit,
+            "results": len(results) > sample_limit,
+            "reputation": len(reputation) > 0,
+        },
+        "sample_limit": sample_limit,
+    }
+
+
+def _sample_nodes(nodes: list[dict[str, Any]], sample_limit: int) -> list[dict[str, Any]]:
+    return sorted(
+        nodes,
+        key=lambda item: (
+            0 if item.get("liveness_status") == "live" else 1,
+            str(item.get("node_id", "")),
+        ),
+    )[:sample_limit]
+
+
+def _tail_sample(items: list[dict[str, Any]], sample_limit: int) -> list[dict[str, Any]]:
+    if sample_limit <= 0:
+        return []
+    return items[-sample_limit:]
+
+
+def _node_snapshot_digest(node: dict[str, Any]) -> dict[str, Any]:
+    model_runtimes = node.get("model_runtimes") if isinstance(node.get("model_runtimes"), dict) else {}
+    ollama = model_runtimes.get("ollama") if isinstance(model_runtimes.get("ollama"), dict) else {}
+    reputation = node.get("reputation") if isinstance(node.get("reputation"), dict) else {}
+    return {
+        "node_id": node.get("node_id"),
+        "node_role": node.get("node_role"),
+        "provider_id": node.get("provider_id"),
+        "subscriber_id": node.get("subscriber_id"),
+        "capability_tier": node.get("capability_tier"),
+        "liveness_status": node.get("liveness_status"),
+        "last_seen_seconds_ago": node.get("last_seen_seconds_ago"),
+        "credits": node.get("credits"),
+        "supported_job_types": node.get("supported_job_types", []),
+        "ollama_available": ollama.get("available"),
+        "ollama_models": node.get("ollama_models", []),
+        "reputation_status": reputation.get("status"),
+    }
+
+
+def _job_snapshot_digest(job: dict[str, Any]) -> dict[str, Any]:
+    routing = job.get("routing") if isinstance(job.get("routing"), dict) else {}
+    return {
+        "job_id": job.get("job_id"),
+        "job_type": job.get("job_type"),
+        "status": job.get("status"),
+        "model_id": job.get("model_id"),
+        "required_results": job.get("required_results"),
+        "max_results": job.get("max_results"),
+        "result_count": job.get("result_count"),
+        "lease_count": job.get("lease_count"),
+        "leased_to": job.get("leased_to", []),
+        "verification_strategy": job.get("verification_strategy"),
+        "routing": {
+            "eligible_node_count": routing.get("eligible_node_count"),
+            "live_eligible_node_count": routing.get("live_eligible_node_count"),
+            "policy": routing.get("policy"),
+            "required_ollama_model": routing.get("required_ollama_model"),
+        },
+    }
+
+
+def _result_snapshot_digest(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "job_id": result.get("job_id"),
+        "job_type": result.get("job_type"),
+        "node_id": result.get("node_id"),
+        "created_at": result.get("created_at"),
+        "runtime_seconds": result.get("runtime_seconds"),
     }
 
 

@@ -140,6 +140,99 @@ def test_operator_console_can_continue_on_backup_lane(monkeypatch, tmp_path):
     assert report["action_queue"]["next_action"]["partner_required"] is False
 
 
+def test_operator_console_bounds_live_snapshot_payload(monkeypatch, tmp_path):
+    repo = _clean_repo(tmp_path)
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    invite_path = private_dir / "primary-alpha-invite.json"
+    write_alpha_invite(
+        invite_path,
+        AlphaInvite.create(coordinator="http://127.0.0.1:8765", admission_token="secret-token-123456"),
+    )
+
+    nodes = [
+        {
+            "node_id": f"worker_{index:016x}",
+            "node_role": "worker",
+            "liveness_status": "live" if index < 2 else "offline",
+            "public_key": "must-not-appear",
+            "hardware": {"processor": "too much detail"},
+            "supported_job_types": ["inference.echo.v1"],
+        }
+        for index in range(8)
+    ]
+    jobs = [
+        {
+            "job_id": f"job_{index}",
+            "job_type": "inference.echo.v1",
+            "status": "verified",
+            "payload": {"prompt": "large private prompt must not appear"},
+            "leases": [{"grant_hash": "must-not-appear"}],
+            "routing": {"eligible_node_count": 1, "live_eligible_node_count": 1},
+        }
+        for index in range(12)
+    ]
+    results = [
+        {
+            "job_id": f"job_{index}",
+            "job_type": "inference.echo.v1",
+            "node_id": "worker_0000000000000000",
+            "output": {"answer": "large model output must not appear"},
+        }
+        for index in range(12)
+    ]
+
+    def fake_client_call(call, *, url):
+        if url.endswith("/api/snapshot"):
+            return {
+                "ok": True,
+                "status": "pass",
+                "url": url,
+                "payload": {
+                    "status": {
+                        "known_nodes": len(nodes),
+                        "live_nodes": 2,
+                        "offline_nodes": 6,
+                        "disputed_jobs": 0,
+                        "jobs": len(jobs),
+                        "verified_jobs": len(jobs),
+                    },
+                    "nodes": nodes,
+                    "jobs": jobs,
+                    "results": results,
+                    "reputation": [{"node_id": "worker_0000000000000000"}],
+                },
+            }
+        return {"ok": True, "status": "pass", "url": url, "payload": {"ok": True}}
+
+    monkeypatch.setattr("chatp2p.operator_console._client_call", fake_client_call)
+
+    report = run_operator_console(
+        OperatorConsoleConfig(
+            repo=repo,
+            home=tmp_path / ".mesh",
+            primary_invite_path=invite_path,
+            out_dir=tmp_path / "operator-console",
+            query_daily_check_task=False,
+        )
+    )
+
+    snapshot = report["lanes"]["primary"]["snapshot"]["payload"]
+    assert report["lanes"]["primary"]["snapshot_summary"]["jobs"] == 12
+    assert snapshot["counts"] == {"nodes": 8, "jobs": 12, "results": 12, "reputation": 1}
+    assert len(snapshot["nodes"]) == 5
+    assert len(snapshot["jobs"]) == 5
+    assert len(snapshot["results"]) == 5
+    assert snapshot["truncated"] == {"nodes": True, "jobs": True, "results": True, "reputation": True}
+
+    serialized = json.dumps(report)
+    assert "large private prompt must not appear" not in serialized
+    assert "large model output must not appear" not in serialized
+    assert "grant_hash" not in serialized
+    assert "public_key" not in serialized
+    assert "too much detail" not in serialized
+
+
 def test_operator_console_reports_daily_check_automation(monkeypatch, tmp_path):
     repo = _clean_repo(tmp_path)
     private_dir = tmp_path / "private"
