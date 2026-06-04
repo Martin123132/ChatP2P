@@ -57,6 +57,7 @@ class ReliabilityTaskConfig:
     task_name: str = DEFAULT_RELIABILITY_TASK_NAME
     interval_minutes: int = 30
     force: bool = True
+    startup_fallback: bool = False
     expected_primary_worker_id: str | None = None
     expected_backup_worker_id: str | None = None
     include_deterministic_smoke: bool = False
@@ -173,7 +174,7 @@ def install_reliability_task(config: ReliabilityTaskConfig, *, dry_run: bool = F
     launcher_path.parent.mkdir(parents=True, exist_ok=True)
     launcher_path.write_text(plan["launcher"], encoding="utf-8", newline="\r\n")
     result = subprocess.run(plan["create_command"], capture_output=True, text=True, timeout=30)
-    return _task_report(
+    report = _task_report(
         schema=WINDOWS_TASK_INSTALL_REPORT_SCHEMA,
         task_name=config.task_name,
         dry_run=False,
@@ -183,6 +184,15 @@ def install_reliability_task(config: ReliabilityTaskConfig, *, dry_run: bool = F
         stdout=result.stdout,
         stderr=result.stderr,
     )
+    if result.returncode != 0 and config.startup_fallback and _is_access_denied(result.stderr):
+        fallback = _install_startup_fallback(plan)
+        report["fallback"] = fallback
+        if fallback["ok"]:
+            report["ok"] = True
+            report["status"] = "pass"
+            report["install_method"] = "startup-folder"
+            report["errors"] = []
+    return report
 
 
 def install_daily_check_task(config: DailyCheckTaskConfig, *, dry_run: bool = False) -> dict[str, Any]:
@@ -353,7 +363,7 @@ def build_reliability_task_plan(config: ReliabilityTaskConfig) -> dict[str, Any]
         "task_action": task_action,
         "create_command": create_command,
         "startup_launcher_path": str(_default_startup_launcher_path(config.task_name)),
-        "startup_fallback": False,
+        "startup_fallback": bool(config.startup_fallback),
         "launcher": launcher,
     }
 

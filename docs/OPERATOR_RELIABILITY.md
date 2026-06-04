@@ -211,6 +211,21 @@ python -m chatp2p.cli operator pause `
 
 This removes both scheduled operator tasks so the workstation stays quiet while your focus is elsewhere.
 
+Resume both automation lanes when you are ready to work again:
+
+```powershell
+python -m chatp2p.cli operator resume `
+  --repo D:\Projects\ChatP2P `
+  --home D:\ChatP2PData\.mesh `
+  --primary-invite D:\ChatP2PData\alpha-invite.json `
+  --backup-invite D:\ChatP2PData\backup-alpha-invite.json `
+  --out-root D:\ChatP2PData `
+  --allow-startup-folder-fallback `
+  --json
+```
+
+Use `--dry-run` to inspect the task plans first. Resume reinstalls Daily Check and Reliability Pack automation only; it does not restart coordinators/workers or contact a partner machine. Follow it with `operator maintenance --skip-network-checks --preview-top-action` for a fresh local decision report.
+
 ## Recurring Local Check
 
 Install a local Windows Scheduled Task from the operator machine:

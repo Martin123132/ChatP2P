@@ -619,6 +619,220 @@ def test_operator_pause_command_raises_on_non_missing_failure(monkeypatch, tmp_p
         cli_module.operator_pause_command(args)
 
 
+def test_operator_resume_command_parse(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "resume",
+            "--repo",
+            str(tmp_path / "ChatP2P"),
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--primary-invite",
+            str(tmp_path / "alpha-invite.json"),
+            "--backup-invite",
+            str(tmp_path / "backup-alpha-invite.json"),
+            "--out-root",
+            str(tmp_path / "ChatP2PData"),
+            "--daily-interval-minutes",
+            "45",
+            "--reliability-interval-minutes",
+            "20",
+            "--expected-primary-worker-id",
+            "worker_PRIMARY",
+            "--expected-backup-worker-id",
+            "worker_BACKUP",
+            "--skip-network-checks",
+            "--allow-startup-folder-fallback",
+            "--dry-run",
+            "--json",
+        ]
+    )
+
+    assert args.func.__name__ == "operator_resume_command"
+    assert args.daily_interval_minutes == 45
+    assert args.reliability_interval_minutes == 20
+    assert args.allow_startup_folder_fallback is True
+    assert args.skip_network_checks is True
+    assert args.dry_run is True
+    assert args.json is True
+
+
+def test_operator_resume_installs_both_tasks_with_derived_dirs(monkeypatch, tmp_path):
+    parser = build_parser()
+    out_root = tmp_path / "ChatP2PData"
+    args = parser.parse_args(
+        [
+            "operator",
+            "resume",
+            "--repo",
+            str(tmp_path / "ChatP2P"),
+            "--home",
+            str(out_root / ".mesh"),
+            "--primary-invite",
+            str(out_root / "alpha-invite.json"),
+            "--backup-invite",
+            str(out_root / "backup-alpha-invite.json"),
+            "--out-root",
+            str(out_root),
+            "--report",
+            str(out_root / "operator-resume-report.json"),
+            "--expected-primary-worker-id",
+            "worker_PRIMARY",
+            "--expected-backup-worker-id",
+            "worker_BACKUP",
+            "--skip-network-checks",
+            "--allow-startup-folder-fallback",
+            "--json",
+        ]
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_daily(config, *, dry_run: bool) -> dict:
+        captured["daily_config"] = config
+        captured["daily_dry_run"] = dry_run
+        return {"ok": True, "status": "pass", "errors": [], "plan": {"task_name": config.task_name}}
+
+    def fake_reliability(config, *, dry_run: bool) -> dict:
+        captured["reliability_config"] = config
+        captured["reliability_dry_run"] = dry_run
+        return {"ok": True, "status": "pass", "errors": [], "plan": {"task_name": config.task_name}}
+
+    rendered = []
+    monkeypatch.setattr(cli_module, "install_daily_check_task", fake_daily)
+    monkeypatch.setattr(cli_module, "install_reliability_task", fake_reliability)
+    monkeypatch.setattr(builtins, "print", lambda *a, **k: rendered.append(str(a[0])) if a else None)
+
+    cli_module.operator_resume_command(args)
+
+    report = json.loads("".join(rendered))
+    file_report = json.loads((out_root / "operator-resume-report.json").read_text(encoding="utf-8"))
+    daily_config = captured["daily_config"]
+    reliability_config = captured["reliability_config"]
+    assert report["schema"] == "chatp2p.operator-resume-report.v1"
+    assert file_report["schema"] == "chatp2p.operator-resume-report.v1"
+    assert report["status"] == "pass"
+    assert report["ok"] is True
+    assert daily_config.out_dir == (out_root / "daily-check").resolve()
+    assert daily_config.console_out_dir == (out_root / "operator-console").resolve()
+    assert daily_config.reliability_dir == (out_root / "reliability-pack-live").resolve()
+    assert daily_config.skip_network_checks is True
+    assert daily_config.startup_fallback is True
+    assert reliability_config.out_dir == (out_root / "reliability-pack-live").resolve()
+    assert reliability_config.startup_fallback is True
+    assert reliability_config.include_deterministic_smoke is False
+    assert captured["daily_dry_run"] is False
+    assert captured["reliability_dry_run"] is False
+    assert "operator maintenance" in report["recommended_next_command"]
+    assert "admission_token" not in json.dumps(report)
+    assert "private_key" not in json.dumps(report)
+
+
+def test_operator_resume_dry_run_and_skip_steps(monkeypatch, tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "resume",
+            "--repo",
+            str(tmp_path / "ChatP2P"),
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--primary-invite",
+            str(tmp_path / "alpha-invite.json"),
+            "--out-root",
+            str(tmp_path / "ChatP2PData"),
+            "--skip-reliability-task",
+            "--dry-run",
+            "--json",
+        ]
+    )
+
+    captured = {}
+
+    def fake_daily(config, *, dry_run: bool) -> dict:
+        captured["daily_dry_run"] = dry_run
+        return {"ok": True, "status": "pass", "errors": [], "plan": {}}
+
+    def fail_reliability(*args, **kwargs):
+        raise AssertionError("reliability installer should be skipped")
+
+    rendered = []
+    monkeypatch.setattr(cli_module, "install_daily_check_task", fake_daily)
+    monkeypatch.setattr(cli_module, "install_reliability_task", fail_reliability)
+    monkeypatch.setattr(builtins, "print", lambda *a, **k: rendered.append(str(a[0])) if a else None)
+
+    cli_module.operator_resume_command(args)
+
+    report = json.loads("".join(rendered))
+    assert captured["daily_dry_run"] is True
+    assert report["steps"][0]["name"] == "daily_check"
+    assert report["steps"][1]["name"] == "reliability_pack"
+    assert report["steps"][1]["status"] == "skipped"
+
+
+def test_operator_resume_requires_backup_unless_reliability_skipped(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "resume",
+            "--repo",
+            str(tmp_path / "ChatP2P"),
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--primary-invite",
+            str(tmp_path / "alpha-invite.json"),
+            "--out-root",
+            str(tmp_path / "ChatP2PData"),
+        ]
+    )
+
+    with pytest.raises(SystemExit, match="backup-invite"):
+        cli_module.operator_resume_command(args)
+
+
+def test_operator_resume_raises_on_install_failure(monkeypatch, tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "operator",
+            "resume",
+            "--repo",
+            str(tmp_path / "ChatP2P"),
+            "--home",
+            str(tmp_path / ".mesh"),
+            "--primary-invite",
+            str(tmp_path / "alpha-invite.json"),
+            "--backup-invite",
+            str(tmp_path / "backup-alpha-invite.json"),
+            "--out-root",
+            str(tmp_path / "ChatP2PData"),
+            "--json",
+        ]
+    )
+
+    def fake_daily(config, *, dry_run: bool) -> dict:
+        return {"ok": False, "status": "fail", "errors": ["daily failed"], "plan": {}}
+
+    def fake_reliability(config, *, dry_run: bool) -> dict:
+        return {"ok": True, "status": "pass", "errors": [], "plan": {}}
+
+    rendered = []
+    monkeypatch.setattr(cli_module, "install_daily_check_task", fake_daily)
+    monkeypatch.setattr(cli_module, "install_reliability_task", fake_reliability)
+    monkeypatch.setattr(builtins, "print", lambda *a, **k: rendered.append(str(a[0])) if a else None)
+
+    with pytest.raises(SystemExit):
+        cli_module.operator_resume_command(args)
+
+    report = json.loads("".join(rendered))
+    assert report["status"] == "fail"
+    assert "daily failed" in report["errors"]
+
+
 def test_node_status_can_derive_coordinator_from_invite(tmp_path):
     parser = build_parser()
     invite_path = tmp_path / "alpha-invite.json"

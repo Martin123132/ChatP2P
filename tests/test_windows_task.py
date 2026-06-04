@@ -170,6 +170,45 @@ def test_reliability_task_install_dry_run_does_not_touch_windows(tmp_path):
     assert install["plan"]["interval_minutes"] == 30
 
 
+def test_reliability_task_falls_back_to_startup_folder_on_access_denied(tmp_path, monkeypatch):
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    monkeypatch.setattr(windows_task, "_is_windows", lambda: True)
+    monkeypatch.setattr(
+        windows_task.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="ERROR: Access is denied.\n"),
+    )
+
+    report = install_reliability_task(
+        ReliabilityTaskConfig(
+            primary_invite_path=tmp_path / "alpha-invite.json",
+            backup_invite_path=tmp_path / "backup-alpha-invite.json",
+            out_dir=tmp_path / "reliability-pack-live",
+            task_name="ChatP2P Test Reliability Pack",
+            python_executable=tmp_path / "python.exe",
+            source_root=tmp_path / "src",
+            work_dir=tmp_path,
+            startup_fallback=True,
+        )
+    )
+
+    startup_launcher = (
+        tmp_path
+        / "AppData"
+        / "Roaming"
+        / "Microsoft"
+        / "Windows"
+        / "Start Menu"
+        / "Programs"
+        / "Startup"
+        / "chatp2p-test-reliability-pack.vbs"
+    )
+    assert report["ok"] is True
+    assert report["install_method"] == "startup-folder"
+    assert report["fallback"]["startup_launcher_path"] == str(startup_launcher)
+    assert startup_launcher.exists()
+
+
 def test_daily_check_task_plan_builds_tokenless_launcher(tmp_path):
     source_root = tmp_path / "ChatP2P" / "src"
     work_dir = tmp_path / "ChatP2P"

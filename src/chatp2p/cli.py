@@ -1062,6 +1062,182 @@ def operator_pause_command(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def _resume_skipped_step(name: str, reason: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "ok": True,
+        "status": "skipped",
+        "reason": reason,
+        "report": {
+            "ok": True,
+            "status": "skipped",
+            "reason": reason,
+        },
+    }
+
+
+def _resume_recommended_command(
+    *,
+    repo: Path,
+    home: Path,
+    primary_invite: Path,
+    backup_invite: Path | None,
+    out_root: Path,
+    skip_network_checks: bool,
+) -> str:
+    parts = [
+        "python -m chatp2p.cli operator maintenance `",
+        f"  --repo {repo} `",
+        f"  --home {home} `",
+        f"  --primary-invite {primary_invite} `",
+    ]
+    if backup_invite is not None:
+        parts.append(f"  --backup-invite {backup_invite} `")
+    parts.extend(
+        [
+            f"  --out {out_root / 'maintenance'} `",
+            "  --preview-top-action `",
+        ]
+    )
+    if skip_network_checks:
+        parts.append("  --skip-network-checks `")
+    parts.append("  --json")
+    return "\n".join(parts)
+
+
+def operator_resume_command(args: argparse.Namespace) -> None:
+    if not args.backup_invite and not args.skip_reliability_task:
+        raise SystemExit("--backup-invite is required unless --skip-reliability-task is used")
+
+    repo = Path(args.repo).expanduser().resolve()
+    home = Path(args.home).expanduser().resolve()
+    primary_invite = Path(args.primary_invite).expanduser().resolve()
+    backup_invite = Path(args.backup_invite).expanduser().resolve() if args.backup_invite else None
+    out_root = Path(args.out_root).expanduser().resolve()
+    daily_out = out_root / "daily-check"
+    reliability_out = out_root / "reliability-pack-live"
+    console_out = out_root / "operator-console"
+    report_path = Path(args.report).expanduser().resolve() if args.report else None
+
+    report: dict[str, Any] = {
+        "schema": "chatp2p.operator-resume-report.v1",
+        "ok": True,
+        "status": "pass",
+        "dry_run": bool(args.dry_run),
+        "config": {
+            "repo": str(repo),
+            "home": str(home),
+            "primary_invite": str(primary_invite),
+            "backup_invite": str(backup_invite) if backup_invite else None,
+            "out_root": str(out_root),
+            "daily_out": str(daily_out),
+            "reliability_out": str(reliability_out),
+            "console_out": str(console_out),
+            "daily_task_name": args.daily_task_name,
+            "reliability_task_name": args.reliability_task_name,
+            "daily_interval_minutes": args.daily_interval_minutes,
+            "reliability_interval_minutes": args.reliability_interval_minutes,
+            "expected_primary_worker_id": args.expected_primary_worker_id,
+            "expected_backup_worker_id": args.expected_backup_worker_id,
+            "skip_network_checks": bool(args.skip_network_checks),
+            "allow_startup_folder_fallback": bool(args.allow_startup_folder_fallback),
+            "skip_daily_task": bool(args.skip_daily_task),
+            "skip_reliability_task": bool(args.skip_reliability_task),
+            "report_path": str(report_path) if report_path else None,
+        },
+        "steps": [],
+        "warnings": [],
+        "errors": [],
+        "recommended_next_command": _resume_recommended_command(
+            repo=repo,
+            home=home,
+            primary_invite=primary_invite,
+            backup_invite=backup_invite,
+            out_root=out_root,
+            skip_network_checks=bool(args.skip_network_checks),
+        ),
+    }
+
+    def add_install_step(name: str, install_report: dict[str, Any]) -> None:
+        step_ok = bool(install_report.get("ok"))
+        report["steps"].append({"name": name, "ok": step_ok, "status": install_report.get("status"), "report": install_report})
+        if not step_ok:
+            report["ok"] = False
+            report["status"] = "fail"
+            report["errors"].extend(str(error) for error in install_report.get("errors", []) or [])
+            if install_report.get("error"):
+                report["errors"].append(str(install_report.get("error")))
+
+    try:
+        if args.skip_daily_task:
+            report["steps"].append(_resume_skipped_step("daily_check", "--skip-daily-task was set"))
+        else:
+            daily_report = install_daily_check_task(
+                DailyCheckTaskConfig(
+                    repo=repo,
+                    home=home,
+                    primary_invite_path=primary_invite,
+                    backup_invite_path=backup_invite,
+                    reliability_dir=reliability_out if not args.skip_reliability_task else None,
+                    out_dir=daily_out,
+                    console_out_dir=console_out,
+                    task_name=args.daily_task_name,
+                    interval_minutes=args.daily_interval_minutes,
+                    startup_fallback=args.allow_startup_folder_fallback,
+                    expected_primary_worker_id=args.expected_primary_worker_id,
+                    expected_backup_worker_id=args.expected_backup_worker_id,
+                    skip_network_checks=args.skip_network_checks,
+                    include_deterministic_smoke=False,
+                    work_dir=repo,
+                ),
+                dry_run=args.dry_run,
+            )
+            add_install_step("daily_check", daily_report)
+
+        if args.skip_reliability_task:
+            report["steps"].append(_resume_skipped_step("reliability_pack", "--skip-reliability-task was set"))
+        else:
+            assert backup_invite is not None
+            reliability_report = install_reliability_task(
+                ReliabilityTaskConfig(
+                    primary_invite_path=primary_invite,
+                    backup_invite_path=backup_invite,
+                    out_dir=reliability_out,
+                    task_name=args.reliability_task_name,
+                    interval_minutes=args.reliability_interval_minutes,
+                    startup_fallback=args.allow_startup_folder_fallback,
+                    expected_primary_worker_id=args.expected_primary_worker_id,
+                    expected_backup_worker_id=args.expected_backup_worker_id,
+                    include_deterministic_smoke=False,
+                    work_dir=repo,
+                ),
+                dry_run=args.dry_run,
+            )
+            add_install_step("reliability_pack", reliability_report)
+    except (OSError, ValueError) as exc:
+        report["ok"] = False
+        report["status"] = "fail"
+        report["errors"].append(str(exc))
+
+    if args.skip_daily_task and args.skip_reliability_task and report["status"] == "pass":
+        report["status"] = "warn"
+        report["warnings"].append("Both resume tasks were skipped; no automation was installed.")
+
+    if report_path is not None:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(f"operator resume complete: {report['status']}")
+        print(f"  daily task: {report['steps'][0]['status'] if report['steps'] else 'unknown'}")
+        print(f"  reliability task: {report['steps'][1]['status'] if len(report['steps']) > 1 else 'unknown'}")
+        print("  next: operator maintenance --skip-network-checks --preview-top-action")
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
 def serve_coordinator(args: argparse.Namespace) -> None:
     home = Path(args.home)
     identity = _load_or_create_identity(home, "coordinator")
@@ -3589,6 +3765,80 @@ def build_parser() -> argparse.ArgumentParser:
     )
     operator_pause_parser.add_argument("--json", action="store_true", help="Print full JSON pause report")
     operator_pause_parser.set_defaults(func=operator_pause_command)
+
+    operator_resume_parser = operator_subcommands.add_parser(
+        "resume",
+        help="Resume local operator automation by reinstalling daily-check and reliability tasks",
+    )
+    operator_resume_parser.add_argument("--repo", default=".", help="Public repository root")
+    operator_resume_parser.add_argument("--home", default=".mesh", help="Local runtime home to inspect")
+    operator_resume_parser.add_argument("--primary-invite", required=True, help="Path to primary alpha invite JSON")
+    operator_resume_parser.add_argument(
+        "--backup-invite",
+        default=None,
+        help="Path to backup alpha invite JSON. Required unless --skip-reliability-task is used",
+    )
+    operator_resume_parser.add_argument(
+        "--out-root",
+        required=True,
+        help="Root directory for daily-check, reliability-pack-live, operator-console, and maintenance artifacts",
+    )
+    operator_resume_parser.add_argument(
+        "--report",
+        default=None,
+        help="Optional path for the operator-resume-report JSON file",
+    )
+    operator_resume_parser.add_argument("--dry-run", action="store_true", help="Print install plans without creating tasks")
+    operator_resume_parser.add_argument("--skip-daily-task", action="store_true", help="Do not install daily-check task")
+    operator_resume_parser.add_argument(
+        "--skip-reliability-task",
+        action="store_true",
+        help="Do not install reliability-pack task",
+    )
+    operator_resume_parser.add_argument(
+        "--daily-task-name",
+        default=DEFAULT_DAILY_CHECK_TASK_NAME,
+        help="Name of the daily-check Scheduled Task",
+    )
+    operator_resume_parser.add_argument(
+        "--reliability-task-name",
+        default=DEFAULT_RELIABILITY_TASK_NAME,
+        help="Name of the reliability-pack Scheduled Task",
+    )
+    operator_resume_parser.add_argument(
+        "--daily-interval-minutes",
+        default=60,
+        type=int,
+        help="Minutes between daily-check task runs",
+    )
+    operator_resume_parser.add_argument(
+        "--reliability-interval-minutes",
+        default=30,
+        type=int,
+        help="Minutes between reliability-pack task runs",
+    )
+    operator_resume_parser.add_argument(
+        "--expected-primary-worker-id",
+        default=None,
+        help="Primary-lane worker ID expected to be live",
+    )
+    operator_resume_parser.add_argument(
+        "--expected-backup-worker-id",
+        default=None,
+        help="Backup-lane worker ID expected to be live",
+    )
+    operator_resume_parser.add_argument(
+        "--skip-network-checks",
+        action="store_true",
+        help="Skip coordinator health/snapshot checks in installed daily-check runs",
+    )
+    operator_resume_parser.add_argument(
+        "--allow-startup-folder-fallback",
+        action="store_true",
+        help="If Scheduled Task creation is denied, install per-user Startup folder launchers",
+    )
+    operator_resume_parser.add_argument("--json", action="store_true", help="Print full JSON resume report")
+    operator_resume_parser.set_defaults(func=operator_resume_command)
 
     bootstrap_provider_parser = operator_subcommands.add_parser(
         "bootstrap-provider",

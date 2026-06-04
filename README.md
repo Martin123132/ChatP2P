@@ -196,6 +196,21 @@ python -m chatp2p.cli operator pause `
 
 `operator pause` is read-only in the sense that it only uninstalls automation tasks and optional launchers; it does not touch live coordinator/worker processes.
 
+When you are ready to resume local automation, reinstall both lanes with one command:
+
+```powershell
+python -m chatp2p.cli operator resume `
+  --repo D:\Projects\ChatP2P `
+  --home D:\ChatP2PData\.mesh `
+  --primary-invite D:\ChatP2PData\alpha-invite.json `
+  --backup-invite D:\ChatP2PData\backup-alpha-invite.json `
+  --out-root D:\ChatP2PData `
+  --allow-startup-folder-fallback `
+  --json
+```
+
+Use `--dry-run` first to inspect both task plans. Resume reinstalls the Daily Check and Reliability Pack tasks only; it does not restart live nodes, create proof jobs, or require partner action. After resume, run `operator maintenance --skip-network-checks --preview-top-action` for the first fresh local answer.
+
 ## Network Smoke Test
 
 Terminal 1:
