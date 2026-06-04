@@ -49,6 +49,18 @@ python -m chatp2p.cli operator privacy-scan --root D:\Projects\ChatP2P --report 
 
 The scan fails on committed invite/operator files, real-looking credentials, exact worker IDs, live tailnet IPs, hostnames, and private partner paths in public docs. Matches for credential-shaped values are redacted in the report.
 
+For a fuller pre-push answer, run the read-only release check:
+
+```powershell
+python -m chatp2p.cli operator release-check `
+  --repo D:\Projects\ChatP2P `
+  --out D:\ChatP2PData\release-check `
+  --console-report D:\ChatP2PData\operator-console\operator-console.json `
+  --sync-status-report D:\ChatP2PData\maintenance\sync-status\sync-status.json
+```
+
+Release check writes `release-check.json` and `release-check.md`. It compares local `HEAD` with local `origin/main`, runs the public privacy scan, reports dirty/ahead/behind state, and recommends `push_origin_main`, `continue_development`, or a blocking fix. It does not fetch from GitHub or mutate the repo.
+
 To get a static operator view without starting jobs or another dashboard process, generate the Operator Console report:
 
 ```powershell

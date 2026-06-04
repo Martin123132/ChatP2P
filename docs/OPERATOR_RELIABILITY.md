@@ -95,6 +95,20 @@ python -m chatp2p.cli operator sync-status `
 
 The report writes `sync-status.json` and `sync-status.md`. Its main state is `synced`, `waiting_for_autopull`, `unknown_old_worker`, or `blocked`, so the operator can tell whether to continue, wait for scheduled autopull, or regenerate Operator Console with network checks.
 
+## Release Check
+
+Before pushing public repo changes, generate the read-only release report:
+
+```powershell
+python -m chatp2p.cli operator release-check `
+  --repo D:\Projects\ChatP2P `
+  --out D:\ChatP2PData\release-check `
+  --console-report D:\ChatP2PData\operator-console\operator-console.json `
+  --sync-status-report D:\ChatP2PData\maintenance\sync-status\sync-status.json
+```
+
+Release check writes `release-check.json` and `release-check.md`. It compares local `HEAD` with local `origin/main`, runs the public privacy scan, reports dirty/ahead/behind state, and recommends `push_origin_main`, `continue_development`, or a blocking fix. It is local and report-only; it does not fetch, push, restart nodes, or contact partner machines.
+
 ## Self-Heal
 
 Self-Heal V1 is a report-first local repair planner. It does not execute repairs, restart coordinators, restart workers, or contact partner machines. Generate it from the current console, daily, and action queue reports:

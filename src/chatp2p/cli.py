@@ -82,6 +82,11 @@ from .operator_self_heal import (
     format_operator_self_heal_summary,
     run_operator_self_heal,
 )
+from .operator_release import (
+    OperatorReleaseCheckConfig,
+    format_operator_release_check_summary,
+    run_operator_release_check,
+)
 from .operator_sync import OperatorSyncStatusConfig, format_operator_sync_status_summary, run_operator_sync_status
 from .packets import JobLeaseRenewal, NodeRegistration
 from .proof import OllamaProofConfig, SwarmProofConfig, proof_summary, run_ollama_proof, run_swarm_proof
@@ -540,6 +545,28 @@ def operator_sync_status_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_operator_sync_status_summary(report))
+    if report["status"] == "fail":
+        raise SystemExit(1)
+
+
+def operator_release_check_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_operator_release_check(
+            OperatorReleaseCheckConfig(
+                repo=Path(args.repo),
+                out_dir=Path(args.out),
+                console_report_path=Path(args.console_report) if args.console_report else None,
+                sync_status_report_path=Path(args.sync_status_report) if args.sync_status_report else None,
+                include_provider_config_filenames=not args.allow_provider_config_filenames,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_operator_release_check_summary(report))
     if report["status"] == "fail":
         raise SystemExit(1)
 
@@ -3551,6 +3578,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     operator_sync_status_parser.add_argument("--json", action="store_true", help="Print the full JSON sync report")
     operator_sync_status_parser.set_defaults(func=operator_sync_status_command)
+
+    operator_release_check_parser = operator_subcommands.add_parser(
+        "release-check",
+        help="Write a read-only release readiness report for pushing public repo changes",
+    )
+    operator_release_check_parser.add_argument("--repo", default=".", help="Public repository root to inspect")
+    operator_release_check_parser.add_argument("--out", required=True, help="Output directory for release-check artifacts")
+    operator_release_check_parser.add_argument(
+        "--console-report",
+        default=None,
+        help="Optional operator-console.json to include as context",
+    )
+    operator_release_check_parser.add_argument(
+        "--sync-status-report",
+        default=None,
+        help="Optional sync-status.json to include as context",
+    )
+    operator_release_check_parser.add_argument(
+        "--allow-provider-config-filenames",
+        action="store_true",
+        help="Do not fail the privacy scan solely on tracked provider-config JSON filenames",
+    )
+    operator_release_check_parser.add_argument("--json", action="store_true", help="Print the full JSON release report")
+    operator_release_check_parser.set_defaults(func=operator_release_check_command)
 
     operator_maintenance_parser = operator_subcommands.add_parser(
         "maintenance",
