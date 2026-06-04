@@ -68,6 +68,11 @@ def test_http_worker_registers_leases_job_and_submits_result():
         assert leased_snapshot_job["acknowledged_lease_count"] == 1
         assert leased_snapshot_job["leases"][0]["lease_id"].startswith("lease_")
         assert leased_snapshot_job["leases"][0]["grant_hash"]
+        assert snapshot["credit_ledger"]["summary"]["entries"] == 1
+
+        ledger = client.ledger()["credit_ledger"]
+        assert ledger["summary"]["entries"] == 1
+        assert ledger["recent_entries"][0]["reason"] == "worker_result_reward"
 
         with urlopen(f"http://{host}:{port}/dashboard", timeout=10) as response:
             dashboard = response.read().decode("utf-8")

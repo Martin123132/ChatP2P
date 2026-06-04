@@ -574,6 +574,11 @@ def create_coordinator_http_server(
                     _json_response(self, 200, {"reputation": list(coordinator.reputation_summaries().values())})
                 return
 
+            if parsed.path == "/api/ledger":
+                with lock:
+                    _json_response(self, 200, {"credit_ledger": coordinator.credit_ledger_snapshot()})
+                return
+
             if parsed.path == "/api/provider":
                 with lock:
                     _json_response(self, 200, {"provider": coordinator.provider_summary()})

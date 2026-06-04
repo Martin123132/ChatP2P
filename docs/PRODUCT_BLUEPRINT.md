@@ -50,6 +50,20 @@ MVP scope:
 
 Do not begin with full decentralized pretraining. Begin with useful work the network can verify.
 
+## Credit Ledger
+
+Credits are the usage accounting layer for the MVP. They are not money, crypto, or a cash-out promise.
+
+V1 records auditable ledger entries for accepted worker results:
+
+- account id and account type
+- positive or negative credit delta
+- balance after the transaction
+- reason, such as `worker_result_reward`
+- job id, node id, output hash, and small safe metadata
+
+The current node `credits` balance remains available for old clients, but the ledger is the source to build future spend, reserve, refund, and dispute flows. The next inference marketplace milestone should add requester accounts and job-cost reservation before a chat job is leased.
+
 ## Future Lane: ISP Edge / Broadband Bundle
 
 Keep a second product architecture lane for an ISP-edge simulation, but do not let it interrupt the current alpha path. The idea is not "AI inside fibre"; it is a broadband-provider-style deployment model where a provider runs a coordinator, subscribers run light gateway/device nodes, regional edge workers provide stronger capacity, and policy routes work through local, provider-edge, trusted-peer, then placeholder fallback paths.

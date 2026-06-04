@@ -297,6 +297,8 @@ chatp2p node status --home E:\ChatP2P-partner\.runtime\.mesh --invite E:\ChatP2P
 The coordinator stores state in `.mesh/coordinator.sqlite3` by default, so registered nodes, jobs, leases, results, and credits survive restarts.
 Leases expire after 30 seconds by default and can be tuned with `--lease-timeout-seconds`.
 
+Credit Ledger V1 records why credits moved, not just each node's current balance. Accepted worker results create `worker_result_reward` ledger entries with the job id, node id, output hash, delta, and balance after the transaction. The legacy `credits` map remains for compatibility, while snapshots include `credit_ledger.summary` and recent entries for auditability. Credits are prototype usage accounting, not money, crypto, or a cash-out promise.
+
 Open the coordinator dashboard:
 
 ```text
@@ -310,6 +312,7 @@ Useful local API endpoints:
 - `GET /api/jobs`
 - `GET /api/results`
 - `GET /api/reputation`
+- `GET /api/ledger`
 
 Drain a seeded queue with one worker:
 

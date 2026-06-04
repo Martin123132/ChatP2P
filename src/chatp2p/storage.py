@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .crypto import NodeIdentity
+from .ledger import CreditLedgerEntry
 from .packets import JobLeaseAcknowledgement, JobLeaseGrant, JobPacket, JobResult, NodeRegistration
 
 
@@ -75,6 +76,20 @@ class SQLiteCoordinatorStore:
                 CREATE TABLE IF NOT EXISTS credits (
                     node_id TEXT PRIMARY KEY,
                     credits INTEGER NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS credit_ledger (
+                    transaction_id TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    account_type TEXT NOT NULL,
+                    delta INTEGER NOT NULL,
+                    balance_after INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    job_id TEXT,
+                    node_id TEXT,
+                    counterparty_id TEXT,
+                    metadata_json TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS seen_packets (
@@ -384,6 +399,28 @@ class SQLiteCoordinatorStore:
             rows = connection.execute("SELECT * FROM credits").fetchall()
         return {row["node_id"]: int(row["credits"]) for row in rows}
 
+    def load_credit_ledger(self) -> list[CreditLedgerEntry]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM credit_ledger ORDER BY created_at, transaction_id"
+            ).fetchall()
+        return [
+            CreditLedgerEntry.create(
+                transaction_id=row["transaction_id"],
+                account_id=row["account_id"],
+                account_type=row["account_type"],
+                delta=int(row["delta"]),
+                balance_after=int(row["balance_after"]),
+                reason=row["reason"],
+                created_at=float(row["created_at"]),
+                job_id=row["job_id"],
+                node_id=row["node_id"],
+                counterparty_id=row["counterparty_id"],
+                metadata=json.loads(row["metadata_json"]),
+            )
+            for row in rows
+        ]
+
     def load_seen_packet_ids(self) -> set[str]:
         with self.connect() as connection:
             rows = connection.execute("SELECT packet_id FROM seen_packets").fetchall()
@@ -416,3 +453,38 @@ class SQLiteCoordinatorStore:
                 """,
                 (node_id, credits),
             )
+
+    def append_credit_ledger_entry(self, entry: CreditLedgerEntry) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO credit_ledger (
+                    transaction_id,
+                    account_id,
+                    account_type,
+                    delta,
+                    balance_after,
+                    reason,
+                    created_at,
+                    job_id,
+                    node_id,
+                    counterparty_id,
+                    metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry.transaction_id,
+                    entry.account_id,
+                    entry.account_type,
+                    entry.delta,
+                    entry.balance_after,
+                    entry.reason,
+                    entry.created_at,
+                    entry.job_id,
+                    entry.node_id,
+                    entry.counterparty_id,
+                    json.dumps(entry.metadata, sort_keys=True),
+                ),
+            )
+        return cursor.rowcount == 1

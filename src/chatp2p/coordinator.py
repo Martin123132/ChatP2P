@@ -8,6 +8,7 @@ from typing import Any
 
 from .benchmark import tier_meets_requirement
 from .crypto import NodeIdentity
+from .ledger import CreditLedgerEntry
 from .packets import (
     JobLeaseAcknowledgement,
     JobLeaseGrant,
@@ -49,6 +50,7 @@ class Coordinator:
     seen_packet_ids: set[str] = field(default_factory=set)
     results: dict[str, list[JobResult]] = field(default_factory=dict)
     credits: dict[str, int] = field(default_factory=dict)
+    credit_ledger: list[CreditLedgerEntry] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.store is None:
@@ -67,6 +69,7 @@ class Coordinator:
         ) = self.store.load_jobs(default_lease_timeout_seconds=self.lease_timeout_seconds)
         stored_results = self.store.load_results()
         stored_credits = self.store.load_credits()
+        stored_credit_ledger = self.store.load_credit_ledger()
         stored_seen_packet_ids = self.store.load_seen_packet_ids()
 
         self.known_nodes.update(stored_nodes)
@@ -82,6 +85,7 @@ class Coordinator:
         self.expired_leases.extend(stored_expired_leases)
         self.results.update(stored_results)
         self.credits.update(stored_credits)
+        self.credit_ledger.extend(stored_credit_ledger)
         self.seen_packet_ids.update(stored_seen_packet_ids)
         self.reap_expired_leases()
 
@@ -569,12 +573,74 @@ class Coordinator:
         if not result.verify_output_hash():
             return False
 
+        job = self.jobs[result.job_id]
         self.results.setdefault(result.job_id, []).append(result)
-        self.credits[result.node_id] = self.credits.get(result.node_id, 0) + self.jobs[result.job_id].reward
+        self._record_worker_result_reward(result, job)
         if self.store is not None:
             self.store.save_result(result)
-            self.store.set_credit(result.node_id, self.credits[result.node_id])
         return True
+
+    def apply_credit_delta(
+        self,
+        *,
+        account_id: str,
+        delta: int,
+        reason: str,
+        account_type: str = "node",
+        transaction_id: str | None = None,
+        job_id: str | None = None,
+        node_id: str | None = None,
+        counterparty_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        allow_negative_balance: bool = False,
+    ) -> CreditLedgerEntry:
+        if not account_id:
+            raise ValueError("account_id is required")
+        if not reason:
+            raise ValueError("reason is required")
+        if delta == 0:
+            raise ValueError("credit delta must not be zero")
+        if transaction_id and any(entry.transaction_id == transaction_id for entry in self.credit_ledger):
+            return next(entry for entry in self.credit_ledger if entry.transaction_id == transaction_id)
+
+        balance_after = int(self.credits.get(account_id, 0)) + int(delta)
+        if balance_after < 0 and not allow_negative_balance:
+            raise ValueError("credit balance would become negative")
+        entry = CreditLedgerEntry.create(
+            transaction_id=transaction_id,
+            account_id=account_id,
+            account_type=account_type,
+            delta=int(delta),
+            balance_after=balance_after,
+            reason=reason,
+            job_id=job_id,
+            node_id=node_id,
+            counterparty_id=counterparty_id,
+            metadata=metadata,
+        )
+        self.credits[account_id] = balance_after
+        self.credit_ledger.append(entry)
+        if self.store is not None:
+            self.store.set_credit(account_id, balance_after)
+            self.store.append_credit_ledger_entry(entry)
+        return entry
+
+    def _record_worker_result_reward(self, result: JobResult, job: JobPacket) -> CreditLedgerEntry:
+        return self.apply_credit_delta(
+            account_id=result.node_id,
+            account_type="node",
+            delta=job.reward,
+            reason="worker_result_reward",
+            transaction_id=f"credit_txn_worker_result_reward_{job.job_id}_{result.node_id}",
+            job_id=job.job_id,
+            node_id=result.node_id,
+            metadata={
+                "job_type": job.job_type,
+                "model_id": job.model_id,
+                "output_hash": result.output_hash,
+                "runtime_seconds": result.runtime_seconds,
+            },
+        )
 
     def touch_node(self, node_id: str, seen_at: float | None = None) -> bool:
         if node_id not in self.known_nodes:
@@ -654,6 +720,7 @@ class Coordinator:
             "disputed_jobs": disputed_jobs,
             "expired_jobs": expired_jobs,
             "credits": dict(self.credits),
+            "credit_ledger": self.credit_ledger_summary(),
             "leasing_policy": self.leasing_policy(),
         }
 
@@ -797,7 +864,42 @@ class Coordinator:
             "results": self.result_summaries(),
             "reputation": list(self.reputation_summaries().values()),
             "leasing_policy": self.leasing_policy(),
+            "credit_ledger": self.credit_ledger_snapshot(),
             "provider": self.provider_summary(),
+        }
+
+    def credit_ledger_entries(self, limit: int | None = 50) -> list[dict[str, Any]]:
+        entries = self.credit_ledger if limit is None else self.credit_ledger[-max(0, limit):]
+        return [entry.to_dict() for entry in entries]
+
+    def credit_ledger_summary(self) -> dict[str, Any]:
+        total_positive = sum(entry.delta for entry in self.credit_ledger if entry.delta > 0)
+        total_negative = sum(abs(entry.delta) for entry in self.credit_ledger if entry.delta < 0)
+        by_reason: dict[str, dict[str, int]] = {}
+        by_account_type: dict[str, dict[str, int]] = {}
+        for entry in self.credit_ledger:
+            reason = by_reason.setdefault(entry.reason, {"entries": 0, "net_delta": 0})
+            reason["entries"] += 1
+            reason["net_delta"] += entry.delta
+            account_type = by_account_type.setdefault(entry.account_type, {"entries": 0, "net_delta": 0})
+            account_type["entries"] += 1
+            account_type["net_delta"] += entry.delta
+        return {
+            "schema": "chatp2p.credit-ledger-summary.v1",
+            "entries": len(self.credit_ledger),
+            "accounts": len(self.credits),
+            "positive_credits": total_positive,
+            "negative_credits": total_negative,
+            "net_credits": total_positive - total_negative,
+            "balances": dict(self.credits),
+            "by_reason": by_reason,
+            "by_account_type": by_account_type,
+        }
+
+    def credit_ledger_snapshot(self, limit: int = 50) -> dict[str, Any]:
+        return {
+            "summary": self.credit_ledger_summary(),
+            "recent_entries": self.credit_ledger_entries(limit=limit),
         }
 
     def provider_summary(self) -> dict[str, Any]:
