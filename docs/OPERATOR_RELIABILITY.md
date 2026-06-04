@@ -80,7 +80,9 @@ The console is read-only. It does not create jobs, restart workers, or require p
 - `D:\ChatP2PData\operator-console\operator-console-history.json`
 - `D:\ChatP2PData\operator-console\operator-console-cleanup-plan.ps1`
 
-Use `summary.can_continue_without_partner`, `summary.recommended_next_action`, and `action_queue.next_action` as the quick decision fields. The HTML report includes the ranked action queue, scheduled daily-check health, dry-run/execute commands for the next local action, latest self-heal status, and the latest action-run report status so ordinary warnings do not become accidental blockers. The history file records previous console summaries so the report can show what changed since the last run. The cleanup plan lists stale report/proof artifacts for review only; it never deletes files automatically.
+Use `summary.can_continue_without_partner`, `summary.recommended_next_action`, and `action_queue.next_action` as the quick decision fields. The HTML report includes the ranked action queue, scheduled daily-check health, public-repo revision sync, dry-run/execute commands for the next local action, latest self-heal status, and the latest action-run report status so ordinary warnings do not become accidental blockers. The history file records previous console summaries so the report can show what changed since the last run. The cleanup plan lists stale report/proof artifacts for review only; it never deletes files automatically.
+
+Revision sync compares live node-advertised software metadata with the local public repo HEAD by default. Pass `--expected-public-revision <sha>` to pin the comparison to a release commit. Nodes that have not refreshed since revision metadata shipped are reported as `unknown`, not failed; a live node with a different revision produces `wait_for_partner_autopull`, and synced live nodes produce `partner_synced_continue` once the rest of the gate is clear.
 
 ## Self-Heal
 

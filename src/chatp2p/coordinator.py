@@ -18,6 +18,7 @@ from .packets import (
     NodeHeartbeat,
     NodeRegistration,
 )
+from .runtime_metadata import software_metadata_public_view
 from .storage import SQLiteCoordinatorStore
 
 DEFAULT_LEASE_TIMEOUT_SECONDS = 30.0
@@ -689,6 +690,7 @@ class Coordinator:
                     "benchmark": capabilities.get("benchmark", {}),
                     "gpu": capabilities.get("gpu", {}),
                     "model_runtimes": capabilities.get("model_runtimes", {}),
+                    "software": software_metadata_public_view(capabilities.get("software")),
                 }
             )
         return sorted(summaries, key=lambda item: item["node_id"])

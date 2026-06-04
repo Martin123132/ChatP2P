@@ -44,6 +44,15 @@ def _benchmark_report(
                 "models": ollama_models,
             }
         },
+        "software": {
+            "chatp2p_version": "0.1.0",
+            "source_revision": "a" * 40,
+            "source_branch": "main",
+            "source_dirty": False,
+            "source_remote_url_redacted": "https://github.com/Martin123132/ChatP2P.git",
+            "source_status": "git",
+            "collected_at": "2026-06-04T00:00:00+00:00",
+        },
     }
     report["capability_tier"] = classify_capability_tier(report)
     return report
@@ -82,6 +91,7 @@ def test_node_benchmark_report_is_json_serializable():
     assert report["schema"] == "chatp2p.node-benchmark.v1"
     assert report["capability_tier"] in {"light", "standard", "gaming_laptop", "gpu_worker"}
     assert report["capabilities"]["capability_tier"] == report["capability_tier"]
+    assert report["capabilities"]["software"]["source_status"] in {"git", "not_git", "git_unavailable"}
     json.dumps(report)
 
 
@@ -125,3 +135,23 @@ def test_coordinator_respects_min_capability_tier_requirement():
     assert leased.job_id == job.job_id
     assert tier_meets_requirement("gaming_laptop", "standard") is True
     assert tier_meets_requirement("light", "standard") is False
+
+
+def test_coordinator_snapshot_exposes_safe_software_metadata():
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    identity = NodeIdentity.generate(prefix="worker")
+    capabilities = capabilities_from_benchmark(_benchmark_report(cpu_count=8, ram_total_mb=16_000))
+    capabilities["software"]["private_extra"] = "must-not-appear"
+
+    coordinator.register_node(identity.public(), capabilities=capabilities)
+
+    summary = coordinator.node_summaries()[0]
+    assert summary["software"] == {
+        "chatp2p_version": "0.1.0",
+        "source_revision": "a" * 40,
+        "source_branch": "main",
+        "source_dirty": False,
+        "source_remote_url_redacted": "https://github.com/Martin123132/ChatP2P.git",
+        "source_status": "git",
+        "collected_at": "2026-06-04T00:00:00+00:00",
+    }

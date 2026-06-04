@@ -62,7 +62,9 @@ python -m chatp2p.cli operator console `
   --out D:\ChatP2PData\operator-console
 ```
 
-The console writes `operator-console.json`, `operator-console.md`, `operator-console.html`, `action-queue.json`, `action-queue.md`, `operator-console-history.json`, and a review-only cleanup plan. It summarizes primary and backup lane health, local managed processes, privacy-scan status, latest reliability-pack evidence, scheduled daily-check health, the ranked action queue, self-heal status, what changed since the previous console run, stale report candidates, and whether the operator can continue without partner action. The HTML also shows the dry-run and execute commands for the next local action, plus the latest `operator-action-run-report.json` and `operator-self-heal-report.json` status when present.
+The console writes `operator-console.json`, `operator-console.md`, `operator-console.html`, `action-queue.json`, `action-queue.md`, `operator-console-history.json`, and a review-only cleanup plan. It summarizes primary and backup lane health, local managed processes, privacy-scan status, latest reliability-pack evidence, scheduled daily-check health, the ranked action queue, self-heal status, public-repo revision sync, what changed since the previous console run, stale report candidates, and whether the operator can continue without partner action. The HTML also shows the dry-run and execute commands for the next local action, plus the latest `operator-action-run-report.json` and `operator-self-heal-report.json` status when present.
+
+Revision sync compares live node-advertised software metadata with the local public repo HEAD by default. Use `--expected-public-revision <sha>` when you want to pin the comparison to a specific release commit. Nodes that have not refreshed since this feature shipped show `unknown` rather than failing the report.
 
 For the daily operator gate, run:
 
@@ -231,7 +233,7 @@ Benchmark a worker machine before registering it:
 chatp2p node benchmark
 ```
 
-This saves `.mesh/node-capabilities.json`. Worker commands automatically advertise the saved capability profile, including hardware, CPU score, GPU detection, local model runtime detection, downloaded Ollama models, and a capability tier such as `light`, `standard`, `gaming_laptop`, or `gpu_worker`.
+This saves `.mesh/node-capabilities.json`. Worker commands automatically advertise the saved capability profile, including hardware, CPU score, GPU detection, local model runtime detection, downloaded Ollama models, software revision metadata, and a capability tier such as `light`, `standard`, `gaming_laptop`, or `gpu_worker`.
 
 Check whether this machine is ready to contribute work:
 
@@ -291,7 +293,7 @@ chatp2p job create-ollama --model llama3.2:3b --prompt "Explain peer-to-peer AI 
 
 `inference.ollama.v1` jobs are leased only to workers that advertised Ollama support and the requested local model from `chatp2p node benchmark`.
 Coordinator snapshots include each job's `resource_requirements` and routing summary, including the required Ollama model and the currently eligible live nodes.
-After installing Ollama or pulling a new model, refresh the profile and restart the managed worker so the coordinator sees the new capability:
+After installing Ollama, pulling a new model, or pulling a new public repo commit, refresh the profile and restart the managed worker so the coordinator sees the new capability and revision:
 
 ```bash
 chatp2p node refresh-capabilities --home D:\ChatP2PData\.mesh --invite D:\ChatP2PData\alpha-invite.json --restart-worker --report D:\ChatP2PData\capability-refresh-report.json
@@ -391,7 +393,7 @@ Troubleshooting:
 - token rejected: ask the operator for a fresh invite file
 - coordinator unreachable: confirm the `coordinator` URL in the invite is reachable from your machine
 - missing Ollama: deterministic and echo jobs still work, but Ollama jobs need Ollama running locally
-- stale capabilities: run `chatp2p node refresh-capabilities --home .mesh --invite alpha-invite.json --restart-worker` after installing Ollama or pulling models
+- stale capabilities or revision metadata: run `chatp2p node refresh-capabilities --home .mesh --invite alpha-invite.json --restart-worker` after installing Ollama, pulling models, or pulling repo updates
 
 Workers and job producers can still pass the token manually when needed:
 

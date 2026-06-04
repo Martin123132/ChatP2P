@@ -30,6 +30,7 @@ class OperatorDailyCheckConfig:
     partner_report_paths: tuple[Path, ...] = ()
     expected_primary_worker_id: str | None = None
     expected_backup_worker_id: str | None = None
+    expected_public_revision: str | None = None
     skip_network_checks: bool = False
     refresh_reliability_pack: bool = False
     include_deterministic_smoke: bool = False
@@ -74,6 +75,7 @@ def run_operator_daily_check(config: OperatorDailyCheckConfig) -> dict[str, Any]
             partner_report_paths=config.partner_report_paths,
             expected_primary_worker_id=config.expected_primary_worker_id,
             expected_backup_worker_id=config.expected_backup_worker_id,
+            expected_public_revision=config.expected_public_revision,
             skip_network_checks=config.skip_network_checks,
             timeout_seconds=config.status_timeout_seconds,
             freshness_seconds=config.freshness_seconds,
@@ -112,6 +114,7 @@ def run_operator_daily_check(config: OperatorDailyCheckConfig) -> dict[str, Any]
             "refresh_reliability_pack": config.refresh_reliability_pack,
             "include_deterministic_smoke": config.include_deterministic_smoke,
             "skip_network_checks": config.skip_network_checks,
+            "expected_public_revision": config.expected_public_revision,
         },
         "summary": summary,
         "steps": {

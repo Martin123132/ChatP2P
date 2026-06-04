@@ -386,6 +386,7 @@ def operator_console_command(args: argparse.Namespace) -> None:
                 partner_report_paths=tuple(Path(path) for path in (args.partner_report or [])),
                 expected_primary_worker_id=args.expected_primary_worker_id,
                 expected_backup_worker_id=args.expected_backup_worker_id,
+                expected_public_revision=args.expected_public_revision,
                 skip_network_checks=args.skip_network_checks,
                 timeout_seconds=args.timeout_seconds,
                 freshness_seconds=args.freshness_seconds,
@@ -423,6 +424,7 @@ def operator_daily_check_command(args: argparse.Namespace) -> None:
                 partner_report_paths=tuple(Path(path) for path in (args.partner_report or [])),
                 expected_primary_worker_id=args.expected_primary_worker_id,
                 expected_backup_worker_id=args.expected_backup_worker_id,
+                expected_public_revision=args.expected_public_revision,
                 skip_network_checks=args.skip_network_checks,
                 refresh_reliability_pack=args.refresh_reliability_pack,
                 include_deterministic_smoke=args.include_deterministic_smoke,
@@ -3193,6 +3195,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Backup-lane worker ID expected to be live",
     )
     operator_console_parser.add_argument(
+        "--expected-public-revision",
+        default=None,
+        help="Public repo revision expected on live nodes. Defaults to local repo HEAD when available.",
+    )
+    operator_console_parser.add_argument(
         "--skip-network-checks",
         action="store_true",
         help="Skip coordinator health/snapshot HTTP checks and build an offline report",
@@ -3284,6 +3291,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--expected-backup-worker-id",
         default=None,
         help="Backup-lane worker ID expected to be live",
+    )
+    operator_daily_check_parser.add_argument(
+        "--expected-public-revision",
+        default=None,
+        help="Public repo revision expected on live nodes. Defaults to local repo HEAD when available.",
     )
     operator_daily_check_parser.add_argument(
         "--skip-network-checks",

@@ -126,6 +126,22 @@ _RECOMMENDED_ACTIONS: dict[str, dict[str, Any]] = {
         "detail": "The operator gate is clear and no partner action is required.",
         "partner_required": False,
     },
+    "wait_for_partner_autopull": {
+        "priority": 58,
+        "severity": "warning",
+        "category": "sync",
+        "title": "Wait for partner autopull",
+        "detail": "A live node is advertising an older or different public revision; wait for autopull, then rerun the console.",
+        "partner_required": False,
+    },
+    "partner_synced_continue": {
+        "priority": 88,
+        "severity": "info",
+        "category": "sync",
+        "title": "Partner synced, continue",
+        "detail": "Live nodes that advertise revision metadata are synced with the expected public revision.",
+        "partner_required": False,
+    },
 }
 
 
@@ -432,7 +448,12 @@ def _suggested_commands_for_action(action_id: str, report: dict[str, Any]) -> li
         argv = _privacy_scan_argv(report)
         if command:
             commands.append(_command("Create action-run report with privacy scan", command, argv=argv))
-    elif action_id == "continue_development":
+    elif action_id == "wait_for_partner_autopull":
+        command = _operator_console_command(report, include_skip_network_checks=False)
+        argv = _operator_console_argv(report, include_skip_network_checks=False)
+        if command:
+            commands.append(_command("Rerun Operator Console after autopull", command, argv=argv))
+    elif action_id in {"continue_development", "partner_synced_continue"}:
         command = _privacy_scan_command(report)
         argv = _privacy_scan_argv(report)
         if command:
@@ -581,12 +602,15 @@ def _operator_console_command(report: dict[str, Any], *, include_skip_network_ch
     daily_check_dir = _config_value(report, "daily_check_dir") or _daily_out_dir(report)
     primary_worker = _config_value(report, "expected_primary_worker_id")
     backup_worker = _config_value(report, "expected_backup_worker_id")
+    expected_revision = _config_value(report, "expected_public_revision")
     if backup_invite:
         lines.append(f"  --backup-invite {_ps(backup_invite)} `")
     if primary_worker:
         lines.append(f"  --expected-primary-worker-id {_ps(primary_worker)} `")
     if backup_worker:
         lines.append(f"  --expected-backup-worker-id {_ps(backup_worker)} `")
+    if expected_revision:
+        lines.append(f"  --expected-public-revision {_ps(expected_revision)} `")
     if reliability_dir:
         lines.append(f"  --reliability-dir {_ps(reliability_dir)} `")
     if daily_check_dir:
@@ -622,12 +646,15 @@ def _operator_console_argv(report: dict[str, Any], *, include_skip_network_check
     daily_check_dir = _config_value(report, "daily_check_dir") or _daily_out_dir(report)
     primary_worker = _config_value(report, "expected_primary_worker_id")
     backup_worker = _config_value(report, "expected_backup_worker_id")
+    expected_revision = _config_value(report, "expected_public_revision")
     if backup_invite:
         argv.extend(["--backup-invite", str(backup_invite)])
     if primary_worker:
         argv.extend(["--expected-primary-worker-id", str(primary_worker)])
     if backup_worker:
         argv.extend(["--expected-backup-worker-id", str(backup_worker)])
+    if expected_revision:
+        argv.extend(["--expected-public-revision", str(expected_revision)])
     if reliability_dir:
         argv.extend(["--reliability-dir", str(reliability_dir)])
     if daily_check_dir:
@@ -653,6 +680,7 @@ def _daily_check_command(report: dict[str, Any]) -> str | None:
     ]
     backup_invite = _config_value(report, "backup_invite_path")
     reliability_dir = _config_value(report, "reliability_dir")
+    expected_revision = _config_value(report, "expected_public_revision")
     console_out = _config_value(report, "console_out_dir") or (
         _config_value(report, "out_dir") if report.get("schema") == "chatp2p.operator-console-report.v1" else None
     )
@@ -660,6 +688,8 @@ def _daily_check_command(report: dict[str, Any]) -> str | None:
         lines.append(f"  --backup-invite {_ps(backup_invite)} `")
     if reliability_dir:
         lines.append(f"  --reliability-dir {_ps(reliability_dir)} `")
+    if expected_revision:
+        lines.append(f"  --expected-public-revision {_ps(expected_revision)} `")
     lines.append(f"  --out {_ps(out_dir)} `")
     if console_out:
         lines.append(f"  --console-out {_ps(console_out)}")
@@ -690,6 +720,7 @@ def _daily_check_argv(report: dict[str, Any]) -> list[str] | None:
     ]
     backup_invite = _config_value(report, "backup_invite_path")
     reliability_dir = _config_value(report, "reliability_dir")
+    expected_revision = _config_value(report, "expected_public_revision")
     console_out = _config_value(report, "console_out_dir") or (
         _config_value(report, "out_dir") if report.get("schema") == "chatp2p.operator-console-report.v1" else None
     )
@@ -697,6 +728,8 @@ def _daily_check_argv(report: dict[str, Any]) -> list[str] | None:
         argv.extend(["--backup-invite", str(backup_invite)])
     if reliability_dir:
         argv.extend(["--reliability-dir", str(reliability_dir)])
+    if expected_revision:
+        argv.extend(["--expected-public-revision", str(expected_revision)])
     argv.extend(["--out", str(out_dir)])
     if console_out:
         argv.extend(["--console-out", str(console_out)])

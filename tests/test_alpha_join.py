@@ -93,6 +93,15 @@ def _benchmark_report():
             "llama_cpp": {"available": False, "path": None, "command": None},
             "vllm": {"available": False},
         },
+        "software": {
+            "chatp2p_version": "0.1.0",
+            "source_revision": "1" * 40,
+            "source_branch": "main",
+            "source_dirty": False,
+            "source_remote_url_redacted": "https://github.com/Martin123132/ChatP2P.git",
+            "source_status": "git",
+            "collected_at": "2026-06-04T00:00:00+00:00",
+        },
     }
     report["capability_tier"] = "standard"
     report["capabilities"] = capabilities_from_benchmark(report)
@@ -105,6 +114,7 @@ def _ollama_benchmark_report(models=("llama3.2:3b",)):
     report["model_runtimes"]["ollama"]["path"] = "ollama"
     report["model_runtimes"]["ollama"]["models"] = list(models)
     report["model_runtimes"]["ollama"]["model_discovery_error"] = None
+    report["software"]["source_revision"] = "2" * 40
     report["capabilities"] = capabilities_from_benchmark(report)
     return report
 
@@ -1350,8 +1360,10 @@ def test_refresh_node_capabilities_saves_new_profile(tmp_path, monkeypatch):
     assert report["ok"] is True
     assert report["status"] == "pass"
     assert report["current_capabilities"]["ollama_models"] == ["llama3.2:3b"]
+    assert report["current_capabilities"]["software"]["source_revision"] == "2" * 40
     assert "inference.ollama.v1" in report["changes"]["supported_job_types_added"]
     assert report["changes"]["ollama_models_added"] == ["llama3.2:3b"]
+    assert report["changes"]["source_revision_changed"] is True
     assert saved["capabilities"]["ollama_models"] == ["llama3.2:3b"]
     assert report_path.exists()
 

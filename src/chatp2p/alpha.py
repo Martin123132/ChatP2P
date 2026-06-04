@@ -26,6 +26,7 @@ from .node_runtime import managed_process_status, start_managed_process, stop_ma
 from .ollama import DEFAULT_OLLAMA_BASE_URL
 from .operator_config import DEFAULT_ALLOWED_JOB_TYPES, OperatorConfig, write_operator_config
 from .provider import apply_provider_metadata, load_provider_config
+from .runtime_metadata import software_metadata_public_view
 
 
 ALPHA_INVITE_SCHEMA = "chatp2p.alpha-invite.v1"
@@ -2879,6 +2880,7 @@ def _capability_refresh_summary(capabilities: dict[str, Any] | None) -> dict[str
         "region": capabilities.get("region"),
         "gpu": capabilities.get("gpu", {}),
         "benchmark": capabilities.get("benchmark", {}),
+        "software": software_metadata_public_view(capabilities.get("software")),
     }
 
 
@@ -2890,6 +2892,8 @@ def _capability_refresh_changes(
     current_supported = set(current.get("supported_job_types", []))
     previous_models = set((previous or {}).get("ollama_models", []))
     current_models = set(current.get("ollama_models", []))
+    previous_software = software_metadata_public_view((previous or {}).get("software"))
+    current_software = software_metadata_public_view(current.get("software"))
     return {
         "supported_job_types_added": sorted(current_supported - previous_supported),
         "supported_job_types_removed": sorted(previous_supported - current_supported),
@@ -2900,6 +2904,9 @@ def _capability_refresh_changes(
         "provider_id_changed": (previous or {}).get("provider_id") != current.get("provider_id"),
         "node_role_changed": (previous or {}).get("node_role") != current.get("node_role"),
         "subscriber_id_changed": (previous or {}).get("subscriber_id") != current.get("subscriber_id"),
+        "source_revision_changed": previous_software.get("source_revision") != current_software.get("source_revision"),
+        "source_branch_changed": previous_software.get("source_branch") != current_software.get("source_branch"),
+        "source_dirty_changed": previous_software.get("source_dirty") != current_software.get("source_dirty"),
     }
 
 

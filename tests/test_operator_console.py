@@ -140,6 +140,115 @@ def test_operator_console_can_continue_on_backup_lane(monkeypatch, tmp_path):
     assert report["action_queue"]["next_action"]["partner_required"] is False
 
 
+def test_operator_console_marks_live_node_revision_states(monkeypatch, tmp_path):
+    repo = _clean_repo(tmp_path)
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    invite_path = private_dir / "primary-alpha-invite.json"
+    write_alpha_invite(
+        invite_path,
+        AlphaInvite.create(coordinator="http://127.0.0.1:8765", admission_token="secret-token-123456"),
+    )
+    reliability_dir = tmp_path / "reliability-pack"
+    reliability_dir.mkdir()
+    _write_reliability_summary(reliability_dir, can_continue=True)
+    expected_revision = "b" * 40
+
+    monkeypatch.setattr(
+        "chatp2p.operator_console.collect_software_metadata",
+        lambda repo: _software_metadata(expected_revision, dirty=False),
+    )
+    monkeypatch.setattr(
+        "chatp2p.operator_console._lane_status",
+        lambda **kwargs: {
+            "label": kwargs["label"],
+            "configured": True,
+            "network_checked": True,
+            "ready": True,
+            "status": "pass",
+            "snapshot_summary": {"live_nodes": 4, "disputed_jobs": 0},
+            "software_nodes": [
+                _software_node("worker_synced", expected_revision),
+                _software_node("worker_behind", "a" * 40),
+                _software_node("worker_unknown", None),
+                _software_node("worker_dirty", expected_revision, dirty=True),
+            ],
+            "errors": [],
+            "warnings": [],
+        },
+    )
+
+    report = run_operator_console(
+        OperatorConsoleConfig(
+            repo=repo,
+            home=tmp_path / ".mesh",
+            primary_invite_path=invite_path,
+            reliability_dir=reliability_dir,
+            out_dir=tmp_path / "operator-console",
+        )
+    )
+
+    primary_sync = report["software"]["lanes"]["primary"]
+    assert report["summary"]["recommended_next_action"] == "wait_for_partner_autopull"
+    assert report["action_queue"]["next_action"]["action_id"] == "wait_for_partner_autopull"
+    assert report["action_queue"]["next_action"]["partner_required"] is False
+    assert primary_sync["synced_live_nodes"] == 1
+    assert primary_sync["behind_live_nodes"] == 1
+    assert primary_sync["unknown_live_nodes"] == 1
+    assert primary_sync["dirty_live_nodes"] == 1
+    assert "older or different public revision" in " ".join(report["summary"]["warnings"])
+    assert "software revision metadata" in " ".join(report["summary"]["warnings"])
+    assert "dirty source checkout" in " ".join(report["summary"]["warnings"])
+
+
+def test_operator_console_recommends_synced_continue(monkeypatch, tmp_path):
+    repo = _clean_repo(tmp_path)
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    invite_path = private_dir / "primary-alpha-invite.json"
+    write_alpha_invite(
+        invite_path,
+        AlphaInvite.create(coordinator="http://127.0.0.1:8765", admission_token="secret-token-123456"),
+    )
+    reliability_dir = tmp_path / "reliability-pack"
+    reliability_dir.mkdir()
+    _write_reliability_summary(reliability_dir, can_continue=True)
+    expected_revision = "c" * 40
+
+    monkeypatch.setattr(
+        "chatp2p.operator_console.collect_software_metadata",
+        lambda repo: _software_metadata(expected_revision, dirty=False),
+    )
+    monkeypatch.setattr(
+        "chatp2p.operator_console._lane_status",
+        lambda **kwargs: {
+            "label": kwargs["label"],
+            "configured": True,
+            "network_checked": True,
+            "ready": True,
+            "status": "pass",
+            "snapshot_summary": {"live_nodes": 1, "disputed_jobs": 0},
+            "software_nodes": [_software_node("worker_synced", expected_revision)],
+            "errors": [],
+            "warnings": [],
+        },
+    )
+
+    report = run_operator_console(
+        OperatorConsoleConfig(
+            repo=repo,
+            home=tmp_path / ".mesh",
+            primary_invite_path=invite_path,
+            reliability_dir=reliability_dir,
+            out_dir=tmp_path / "operator-console",
+        )
+    )
+
+    assert report["software"]["all_live_nodes_synced"] is True
+    assert report["summary"]["recommended_next_action"] == "partner_synced_continue"
+    assert report["action_queue"]["next_action"]["action_id"] == "partner_synced_continue"
+
+
 def test_operator_console_bounds_live_snapshot_payload(monkeypatch, tmp_path):
     repo = _clean_repo(tmp_path)
     private_dir = tmp_path / "private"
@@ -158,6 +267,13 @@ def test_operator_console_bounds_live_snapshot_payload(monkeypatch, tmp_path):
             "public_key": "must-not-appear",
             "hardware": {"processor": "too much detail"},
             "supported_job_types": ["inference.echo.v1"],
+            "software": {
+                "source_revision": "d" * 40,
+                "source_branch": "main",
+                "source_dirty": False,
+                "source_remote_url_redacted": "https://github.com/Martin123132/ChatP2P.git",
+                "private_extra": "must-not-appear",
+            },
         }
         for index in range(8)
     ]
@@ -231,6 +347,8 @@ def test_operator_console_bounds_live_snapshot_payload(monkeypatch, tmp_path):
     assert "grant_hash" not in serialized
     assert "public_key" not in serialized
     assert "too much detail" not in serialized
+    assert "must-not-appear" not in serialized
+    assert snapshot["nodes"][0]["software"]["source_revision"] == "d" * 40
 
 
 def test_operator_console_reports_daily_check_automation(monkeypatch, tmp_path):
@@ -474,6 +592,8 @@ def test_operator_console_cli_parses(tmp_path):
             "worker_PRIMARY",
             "--expected-backup-worker-id",
             "worker_BACKUP",
+            "--expected-public-revision",
+            "abc123",
             "--skip-network-checks",
             "--history-limit",
             "5",
@@ -495,6 +615,7 @@ def test_operator_console_cli_parses(tmp_path):
     assert args.func.__name__ == "operator_console_command"
     assert args.skip_network_checks is True
     assert args.expected_primary_worker_id == "worker_PRIMARY"
+    assert args.expected_public_revision == "abc123"
     assert args.history_limit == 5
     assert args.stale_report_days == 7
     assert args.stale_report_max_items == 12
@@ -551,6 +672,27 @@ def _write_daily_check_report(path):
         },
     }
     (path / "daily-check.json").write_text(json.dumps(report), encoding="utf-8")
+
+
+def _software_metadata(revision, *, dirty):
+    return {
+        "chatp2p_version": "0.1.0",
+        "source_revision": revision,
+        "source_branch": "main",
+        "source_dirty": dirty,
+        "source_remote_url_redacted": "https://github.com/Martin123132/ChatP2P.git",
+        "source_status": "git",
+        "collected_at": "2026-06-04T00:00:00+00:00",
+    }
+
+
+def _software_node(node_id, revision, *, dirty=False):
+    software = _software_metadata(revision, dirty=dirty) if revision is not None else {}
+    return {
+        "node_id": node_id,
+        "liveness_status": "live",
+        "software": software,
+    }
 
 
 def _write_action_run_report(path):

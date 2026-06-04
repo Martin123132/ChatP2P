@@ -16,6 +16,7 @@ from typing import Any
 from .jsonio import read_json_file
 
 from .ollama import DEFAULT_OLLAMA_BASE_URL, OllamaError, list_ollama_models
+from .runtime_metadata import collect_software_metadata
 
 CAPABILITY_PROFILE_NAME = "node-capabilities.json"
 CAPABILITY_TIERS = ["light", "standard", "gaming_laptop", "gpu_worker"]
@@ -36,6 +37,7 @@ def run_node_benchmark(
     }
     gpu = detect_gpu_profile()
     model_runtimes = detect_model_runtimes(ollama_base_url=ollama_base_url)
+    software = collect_software_metadata()
     report = {
         "schema": "chatp2p.node-benchmark.v1",
         "created_at": round(time.time(), 3),
@@ -43,6 +45,7 @@ def run_node_benchmark(
         "gpu": gpu,
         "benchmark": benchmark,
         "model_runtimes": model_runtimes,
+        "software": software,
     }
     report["capability_tier"] = classify_capability_tier(report)
     report["capabilities"] = capabilities_from_benchmark(report)
@@ -191,6 +194,7 @@ def capabilities_from_benchmark(report: dict[str, Any]) -> dict[str, Any]:
         "benchmark": dict(report.get("benchmark", {})),
         "gpu": dict(report.get("gpu", {})),
         "model_runtimes": model_runtimes,
+        "software": dict(report.get("software", {})),
     }
 
 

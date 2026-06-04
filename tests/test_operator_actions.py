@@ -53,6 +53,32 @@ def test_action_queue_allows_local_development_without_partner(tmp_path):
     assert queue["next_action"]["partner_required"] is False
 
 
+def test_action_queue_sync_actions_are_local_and_allowlisted(tmp_path):
+    wait_queue = build_operator_action_queue(
+        _daily_report(
+            status="warn",
+            can_continue=True,
+            recommended_next_action="wait_for_partner_autopull",
+            privacy_ok=True,
+        )
+    )
+    synced_queue = build_operator_action_queue(
+        _daily_report(
+            status="pass",
+            can_continue=True,
+            recommended_next_action="partner_synced_continue",
+            privacy_ok=True,
+        )
+    )
+
+    wait_action = wait_queue["next_action"]
+    synced_action = synced_queue["next_action"]
+    assert wait_action["partner_required"] is False
+    assert wait_action["suggested_commands"][0]["argv"][2:5] == ["chatp2p.cli", "operator", "console"]
+    assert synced_action["partner_required"] is False
+    assert synced_action["suggested_commands"][0]["argv"][2:5] == ["chatp2p.cli", "operator", "privacy-scan"]
+
+
 def test_action_queue_prioritizes_reliability_refresh_failure(tmp_path):
     report = _daily_report(
         status="fail",

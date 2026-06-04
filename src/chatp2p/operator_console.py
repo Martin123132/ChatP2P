@@ -20,6 +20,7 @@ from .node_runtime import managed_processes_status
 from .operator_actions import build_operator_action_queue, write_operator_action_queue
 from .operator_self_heal import latest_self_heal_summary
 from .privacy import PrivacyScanConfig, run_public_privacy_scan
+from .runtime_metadata import collect_software_metadata, software_metadata_public_view
 from .windows_task import DEFAULT_DAILY_CHECK_TASK_NAME
 
 
@@ -61,6 +62,7 @@ class OperatorConsoleConfig:
     partner_report_paths: tuple[Path, ...] = ()
     expected_primary_worker_id: str | None = None
     expected_backup_worker_id: str | None = None
+    expected_public_revision: str | None = None
     skip_network_checks: bool = False
     timeout_seconds: float = 5.0
     freshness_seconds: float = DEFAULT_OPERATOR_CONSOLE_FRESHNESS_SECONDS
@@ -130,6 +132,12 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
         now=now,
         freshness_seconds=config.freshness_seconds,
     )
+    software = _software_visibility_summary(
+        repo=config.repo,
+        expected_public_revision=config.expected_public_revision,
+        primary=primary,
+        backup=backup,
+    )
     summary = _operator_summary(
         primary=primary,
         backup=backup,
@@ -137,6 +145,7 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
         privacy_scan=privacy_scan,
         partner_autopilot=partner_autopilot,
         daily_check=daily_check,
+        software=software,
         skip_network_checks=config.skip_network_checks,
     )
 
@@ -182,6 +191,7 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
             "out_dir": str(out_dir),
             "expected_primary_worker_id": config.expected_primary_worker_id,
             "expected_backup_worker_id": config.expected_backup_worker_id,
+            "expected_public_revision": config.expected_public_revision,
             "skip_network_checks": config.skip_network_checks,
             "timeout_seconds": config.timeout_seconds,
             "freshness_seconds": config.freshness_seconds,
@@ -201,6 +211,7 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
         },
         "reliability": reliability,
         "privacy_scan": _privacy_summary(privacy_scan),
+        "software": software,
         "partner_autopilot": partner_autopilot,
         "daily_check_automation": daily_check,
         "action_runner": {
@@ -247,6 +258,7 @@ def format_operator_console_summary(report: dict[str, Any]) -> str:
     top_action = ((report.get("action_queue") or {}).get("next_action") or {})
     daily_check = report.get("daily_check_automation") or {}
     self_heal = report.get("self_heal") or {}
+    software = report.get("software") or {}
     lines = [
         f"ChatP2P operator console: {str(report.get('status', 'unknown')).upper()}",
         f"Can continue without partner: {_yes_no(summary.get('can_continue_without_partner'))}",
@@ -255,6 +267,7 @@ def format_operator_console_summary(report: dict[str, Any]) -> str:
         f"Partner required: {_yes_no(top_action.get('partner_required'))}",
         f"Daily check automation: {daily_check.get('status', 'unknown')}",
         f"Self-heal: {self_heal.get('status', 'missing')} issues={self_heal.get('repairable_issue_count', 0)}",
+        f"Software sync: {software.get('status', 'unknown')} expected={_short_revision(software.get('expected_public_revision'))}",
         f"Primary lane: {_lane_brief((report.get('lanes') or {}).get('primary', {}))}",
         f"Backup lane: {_lane_brief((report.get('lanes') or {}).get('backup', {}))}",
         f"Privacy scan: {str((report.get('privacy_scan') or {}).get('status', 'unknown')).upper()}",
@@ -280,6 +293,7 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
     daily_check = report.get("daily_check_automation") or {}
     action_runner = report.get("action_runner") or {}
     self_heal = report.get("self_heal") or {}
+    software = report.get("software") or {}
     top_action = action_queue.get("next_action") or {}
     next_runner = action_runner.get("next_action") or {}
     last_action_run = action_runner.get("last_run") or {}
@@ -294,6 +308,7 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
         f"- Partner required: **{_yes_no(top_action.get('partner_required'))}**",
         f"- Daily check automation: `{daily_check.get('status', 'unknown')}`",
         f"- Self-heal: `{self_heal.get('status', 'missing')}` ({self_heal.get('repairable_issue_count', 0)} repairable issue(s))",
+        f"- Software sync: `{software.get('status', 'unknown')}`",
         f"- Last action run: `{last_action_run.get('status', 'missing')}`",
         f"- Generated at: `{report.get('generated_at')}`",
         "",
@@ -355,13 +370,14 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
             )
             + " |"
         )
+    lines.extend(_software_sync_markdown_section(software))
     lines.extend(
         [
             "",
             "## Lanes",
             "",
-            "| Lane | Ready | Health | Live workers | Expected worker | Disputes |",
-            "| --- | --- | --- | --- | --- | --- |",
+            "| Lane | Ready | Health | Live workers | Revision sync | Expected worker | Disputes |",
+            "| --- | --- | --- | --- | --- | --- | --- |",
         ]
     )
     for label in ("primary", "backup"):
@@ -378,6 +394,7 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
                     _yes_no(lane.get("ready")),
                     str(lane.get("status", "unknown")),
                     str((lane.get("snapshot_summary") or {}).get("live_nodes", "-")),
+                    str(((software.get("lanes") or {}).get(label) or {}).get("status", "unknown")),
                     expected_text,
                     str((lane.get("snapshot_summary") or {}).get("disputed_jobs", "-")),
                 ]
@@ -505,6 +522,7 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
     daily_check = report.get("daily_check_automation") or {}
     action_runner = report.get("action_runner") or {}
     self_heal = report.get("self_heal") or {}
+    software = report.get("software") or {}
     top_action = action_queue.get("next_action") or {}
     status = str(report.get("status", "unknown"))
     status_class = "ok" if status == "pass" else ("warn" if status == "warn" else "fail")
@@ -651,6 +669,10 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
           <p class="value">{html.escape(str(self_heal.get("status", "missing")).upper())}</p>
         </div>
         <div class="panel">
+          <p class="label">Software sync</p>
+          <p class="value">{html.escape(str(software.get("status", "unknown")).upper())}</p>
+        </div>
+        <div class="panel">
       <p class="label">Generated</p>
           <p class="value">{html.escape(str(report.get("generated_at", "-")))}</p>
         </div>
@@ -676,6 +698,10 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
     <section>
       <h2>Scheduled Automation</h2>
       {_daily_check_automation_table(daily_check)}
+    </section>
+    <section>
+      <h2>Software Sync</h2>
+      {_software_sync_table(software)}
     </section>
     <section>
       <h2>Lanes</h2>
@@ -746,6 +772,7 @@ def _lane_status(
         {
             "snapshot_summary": snapshot_summary,
             "expected_worker": expected_worker,
+            "software_nodes": _software_nodes_from_snapshot(snapshot),
             "criteria": criteria,
             "ready": all(item["passed"] for item in criteria.values()),
             "status": "pass" if all(item["passed"] for item in criteria.values()) else "fail",
@@ -765,6 +792,7 @@ def _unconfigured_lane(label: str) -> dict[str, Any]:
         "network_checked": False,
         "ready": False,
         "status": "not_configured",
+        "software_nodes": [],
         "errors": [],
         "warnings": [],
     }
@@ -880,6 +908,7 @@ def _node_snapshot_digest(node: dict[str, Any]) -> dict[str, Any]:
         "ollama_available": ollama.get("available"),
         "ollama_models": node.get("ollama_models", []),
         "reputation_status": reputation.get("status"),
+        "software": software_metadata_public_view(node.get("software")),
     }
 
 
@@ -912,6 +941,119 @@ def _result_snapshot_digest(result: dict[str, Any]) -> dict[str, Any]:
         "node_id": result.get("node_id"),
         "created_at": result.get("created_at"),
         "runtime_seconds": result.get("runtime_seconds"),
+    }
+
+
+def _software_nodes_from_snapshot(snapshot: dict[str, Any] | None) -> list[dict[str, Any]]:
+    nodes = snapshot.get("nodes", []) if isinstance(snapshot, dict) else []
+    result = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        software = software_metadata_public_view(node.get("software"))
+        result.append(
+            {
+                "node_id": node.get("node_id"),
+                "liveness_status": node.get("liveness_status"),
+                "software": software,
+            }
+        )
+    return result
+
+
+def _software_visibility_summary(
+    *,
+    repo: Path,
+    expected_public_revision: str | None,
+    primary: dict[str, Any],
+    backup: dict[str, Any],
+) -> dict[str, Any]:
+    local = software_metadata_public_view(collect_software_metadata(repo))
+    expected = (expected_public_revision or local.get("source_revision") or "").strip() or None
+    lanes = {
+        "primary": _lane_software_sync(primary, expected_revision=expected),
+        "backup": _lane_software_sync(backup, expected_revision=expected),
+    }
+    live_node_count = sum(int(lane.get("live_node_count", 0)) for lane in lanes.values())
+    synced = sum(int(lane.get("synced_live_nodes", 0)) for lane in lanes.values())
+    behind = sum(int(lane.get("behind_live_nodes", 0)) for lane in lanes.values())
+    unknown = sum(int(lane.get("unknown_live_nodes", 0)) for lane in lanes.values())
+    dirty = sum(int(lane.get("dirty_live_nodes", 0)) for lane in lanes.values())
+    local_dirty = local.get("source_dirty") is True
+    if not expected:
+        status = "unknown"
+    elif behind or unknown or dirty or local_dirty:
+        status = "warn"
+    else:
+        status = "pass"
+    return {
+        "status": status,
+        "expected_public_revision": expected,
+        "local": local,
+        "lanes": lanes,
+        "live_node_count": live_node_count,
+        "synced_live_nodes": synced,
+        "behind_live_nodes": behind,
+        "unknown_live_nodes": unknown,
+        "dirty_live_nodes": dirty,
+        "has_local_dirty_checkout": local_dirty,
+        "has_unsynced_live_nodes": behind > 0,
+        "has_unknown_live_nodes": unknown > 0,
+        "has_dirty_live_nodes": dirty > 0,
+        "all_live_nodes_synced": live_node_count > 0 and synced == live_node_count and behind == 0 and unknown == 0 and dirty == 0,
+    }
+
+
+def _lane_software_sync(lane: dict[str, Any], *, expected_revision: str | None) -> dict[str, Any]:
+    nodes = lane.get("software_nodes") if isinstance(lane.get("software_nodes"), list) else []
+    live_nodes = [
+        _node_software_sync(node, expected_revision=expected_revision)
+        for node in nodes
+        if isinstance(node, dict) and node.get("liveness_status") == "live"
+    ]
+    synced = sum(1 for node in live_nodes if node.get("revision_status") == "synced")
+    behind = sum(1 for node in live_nodes if node.get("revision_status") == "behind")
+    unknown = sum(1 for node in live_nodes if node.get("revision_status") == "unknown")
+    dirty = sum(1 for node in live_nodes if node.get("source_dirty") is True)
+    if not expected_revision:
+        status = "unknown"
+    elif behind or unknown or dirty:
+        status = "warn"
+    else:
+        status = "pass"
+    return {
+        "status": status,
+        "expected_public_revision": expected_revision,
+        "live_node_count": len(live_nodes),
+        "synced_live_nodes": synced,
+        "behind_live_nodes": behind,
+        "unknown_live_nodes": unknown,
+        "dirty_live_nodes": dirty,
+        "nodes": live_nodes,
+    }
+
+
+def _node_software_sync(node: dict[str, Any], *, expected_revision: str | None) -> dict[str, Any]:
+    software = software_metadata_public_view(node.get("software"))
+    revision = software.get("source_revision")
+    dirty = bool(software.get("source_dirty")) if software.get("source_dirty") is not None else None
+    if not revision:
+        revision_status = "unknown"
+    elif expected_revision and revision != expected_revision:
+        revision_status = "behind"
+    elif dirty is True:
+        revision_status = "dirty"
+    else:
+        revision_status = "synced"
+    return {
+        "node_id": node.get("node_id"),
+        "revision_status": revision_status,
+        "source_revision": revision,
+        "source_revision_short": _short_revision(revision),
+        "source_branch": software.get("source_branch"),
+        "source_dirty": dirty,
+        "chatp2p_version": software.get("chatp2p_version"),
+        "collected_at": software.get("collected_at"),
     }
 
 
@@ -1574,6 +1716,7 @@ def _operator_summary(
     privacy_scan: dict[str, Any],
     partner_autopilot: dict[str, Any],
     daily_check: dict[str, Any],
+    software: dict[str, Any],
     skip_network_checks: bool,
 ) -> dict[str, Any]:
     primary_ready = bool(primary.get("ready"))
@@ -1598,6 +1741,14 @@ def _operator_summary(
         warnings.append(f"daily check automation is {daily_check.get('status')}")
     elif daily_check.get("status") in {"warn", "fail"}:
         warnings.append("daily check automation is not healthy")
+    if software.get("has_unsynced_live_nodes"):
+        warnings.append("one or more live nodes are advertising an older or different public revision")
+    if software.get("has_unknown_live_nodes"):
+        warnings.append("one or more live nodes have not advertised software revision metadata yet")
+    if software.get("has_dirty_live_nodes"):
+        warnings.append("one or more live nodes report a dirty source checkout")
+    if software.get("has_local_dirty_checkout"):
+        warnings.append("local public repo checkout has uncommitted changes")
     if not backup.get("configured"):
         warnings.append("backup invite is not configured")
     if not privacy_ok:
@@ -1624,6 +1775,7 @@ def _operator_summary(
             primary_ready=primary_ready,
             backup_ready=backup_ready,
             reliability=reliability,
+            software=software,
             skip_network_checks=skip_network_checks,
         ),
         "warnings": warnings,
@@ -1638,6 +1790,7 @@ def _recommended_next_action(
     primary_ready: bool,
     backup_ready: bool,
     reliability: dict[str, Any],
+    software: dict[str, Any],
     skip_network_checks: bool,
 ) -> str:
     if not privacy_ok:
@@ -1654,6 +1807,10 @@ def _recommended_next_action(
         return "refresh_reliability_pack"
     if reliability.get("exists") and not reliability.get("ok"):
         return "repair_lane_then_rerun_reliability_pack"
+    if software.get("has_unsynced_live_nodes"):
+        return "wait_for_partner_autopull"
+    if software.get("all_live_nodes_synced"):
+        return "partner_synced_continue"
     return "continue_development"
 
 
@@ -1728,6 +1885,66 @@ def _action_queue_rows(action_queue: dict[str, Any]) -> str:
     if rows:
         return "\n".join(rows)
     return '<tr><td colspan="5">No queued actions.</td></tr>'
+
+
+def _software_sync_markdown_section(software: dict[str, Any]) -> list[str]:
+    lines = [
+        "",
+        "## Software Sync",
+        "",
+        f"- Expected public revision: `{_short_revision(software.get('expected_public_revision'))}`",
+        f"- Local repo revision: `{_short_revision(((software.get('local') or {}).get('source_revision')))}`",
+        f"- Local branch: `{(software.get('local') or {}).get('source_branch') or 'unknown'}`",
+        f"- Local dirty: `{(software.get('local') or {}).get('source_dirty')}`",
+        f"- Live nodes: `{software.get('live_node_count', 0)}`",
+        f"- Synced live nodes: `{software.get('synced_live_nodes', 0)}`",
+        f"- Behind/different live nodes: `{software.get('behind_live_nodes', 0)}`",
+        f"- Unknown live nodes: `{software.get('unknown_live_nodes', 0)}`",
+        f"- Dirty live nodes: `{software.get('dirty_live_nodes', 0)}`",
+        "",
+        "| Lane | Status | Live | Synced | Behind/different | Unknown | Dirty |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for label in ("primary", "backup"):
+        sync = ((software.get("lanes") or {}).get(label) or {})
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    label,
+                    str(sync.get("status", "unknown")),
+                    str(sync.get("live_node_count", 0)),
+                    str(sync.get("synced_live_nodes", 0)),
+                    str(sync.get("behind_live_nodes", 0)),
+                    str(sync.get("unknown_live_nodes", 0)),
+                    str(sync.get("dirty_live_nodes", 0)),
+                ]
+            )
+            + " |"
+        )
+    return lines
+
+
+def _software_sync_table(software: dict[str, Any]) -> str:
+    rows = [
+        ("Status", software.get("status", "unknown")),
+        ("Expected revision", _short_revision(software.get("expected_public_revision"))),
+        ("Local revision", _short_revision(((software.get("local") or {}).get("source_revision")))),
+        ("Local branch", (software.get("local") or {}).get("source_branch") or "unknown"),
+        ("Live nodes", software.get("live_node_count", 0)),
+        ("Synced live nodes", software.get("synced_live_nodes", 0)),
+        ("Behind/different live nodes", software.get("behind_live_nodes", 0)),
+        ("Unknown live nodes", software.get("unknown_live_nodes", 0)),
+        ("Dirty live nodes", software.get("dirty_live_nodes", 0)),
+    ]
+    body = "\n".join(
+        "<tr>"
+        f"<th>{html.escape(str(label))}</th>"
+        f"<td>{html.escape(str(value))}</td>"
+        "</tr>"
+        for label, value in rows
+    )
+    return f"<table><tbody>{body}</tbody></table>"
 
 
 def _daily_check_automation_table(daily_check: dict[str, Any]) -> str:
@@ -1862,6 +2079,12 @@ def _yes_no(value: Any) -> str:
     if value is None:
         return "unknown"
     return "yes" if bool(value) else "no"
+
+
+def _short_revision(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return "unknown"
+    return value.strip()[:12]
 
 
 def _error_message(exc: BaseException) -> str:
