@@ -352,6 +352,25 @@ python -m chatp2p.cli chat session `
 
 `--max-context-turns` bounds how many verified prior turns are sent as context. V1 is still CLI-first, but it gives the future chat UI a concrete storage and credit-spend loop to build on.
 
+Inspect a session without creating a job or spending credits:
+
+```powershell
+python -m chatp2p.cli chat session-status `
+  --out D:\ChatP2PData\chat-session `
+  --session-id demo
+```
+
+If a turn failed, preview the retry plan first:
+
+```powershell
+python -m chatp2p.cli chat session-resume `
+  --out D:\ChatP2PData\chat-session `
+  --session-id demo `
+  --dry-run
+```
+
+Rerun without `--dry-run` to append an auditable retry turn. Submitted turns are not retried by default because they may already have reserved credits; use `--include-submitted` only when you deliberately accept possible duplicate spend.
+
 Operator Credit Tools V1 makes requester top-ups explicit and auditable. `bootstrap-alpha` writes an operator-only `credit_grant_token` into the private operator config; this token is not copied into the invite and normal admission tokens cannot grant credits. Inspect balances first:
 
 ```powershell

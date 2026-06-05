@@ -59,7 +59,17 @@ from .chat_smoke import (
     run_funded_chat_smoke,
 )
 from .chat_request import ChatAskConfig, format_chat_ask_summary, run_chat_ask
-from .chat_session import ChatSessionConfig, format_chat_session_summary, run_chat_session
+from .chat_session import (
+    ChatSessionConfig,
+    ChatSessionResumeConfig,
+    ChatSessionStatusConfig,
+    format_chat_session_resume_summary,
+    format_chat_session_status_summary,
+    format_chat_session_summary,
+    run_chat_session,
+    run_chat_session_resume,
+    run_chat_session_status,
+)
 from .client import CoordinatorClient
 from .coordinator import Coordinator
 from .crypto import NodeIdentity
@@ -486,6 +496,61 @@ def run_chat_session_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_chat_session_summary(report))
+    if report["status"] == "fail":
+        raise SystemExit(1)
+
+
+def run_chat_session_status_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_chat_session_status(
+            ChatSessionStatusConfig(
+                out_dir=Path(args.out),
+                session_id=args.session_id,
+            )
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_chat_session_status_summary(report))
+
+
+def run_chat_session_resume_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_chat_session_resume(
+            ChatSessionResumeConfig(
+                out_dir=Path(args.out),
+                session_id=args.session_id,
+                turn_id=args.turn_id,
+                include_submitted=args.include_submitted,
+                dry_run=args.dry_run,
+                coordinator_url=args.coordinator,
+                invite_path=Path(args.invite) if args.invite else None,
+                admission_token=args.admission_token,
+                model=args.model,
+                system=args.system,
+                requester_account_id=args.requester_account_id,
+                job_cost=args.job_cost,
+                reward=args.reward,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                ttl_seconds=args.ttl_seconds,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval=args.poll_interval,
+                no_wait=args.no_wait,
+                client_timeout_seconds=args.client_timeout_seconds,
+                max_context_turns=args.max_context_turns,
+            )
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_chat_session_resume_summary(report))
     if report["status"] == "fail":
         raise SystemExit(1)
 
@@ -2992,6 +3057,69 @@ def build_parser() -> argparse.ArgumentParser:
     chat_session_parser.add_argument("--no-wait", action="store_true", help="Create the job and skip result polling")
     chat_session_parser.add_argument("--json", action="store_true", help="Print the full JSON session report")
     chat_session_parser.set_defaults(func=run_chat_session_command)
+
+    chat_session_status_parser = chat_subcommands.add_parser(
+        "session-status",
+        help="Inspect a local chat session without creating jobs",
+    )
+    chat_session_status_parser.add_argument(
+        "--out",
+        default=".mesh/chat-session",
+        help="Directory containing chat-session.json",
+    )
+    chat_session_status_parser.add_argument("--session-id", default="default", help="Stable local session id")
+    chat_session_status_parser.add_argument("--json", action="store_true", help="Print the full JSON status report")
+    chat_session_status_parser.set_defaults(func=run_chat_session_status_command)
+
+    chat_session_resume_parser = chat_subcommands.add_parser(
+        "session-resume",
+        help="Append a retry turn for the latest failed chat session turn",
+    )
+    chat_session_resume_parser.add_argument(
+        "--out",
+        default=".mesh/chat-session",
+        help="Directory containing chat-session.json",
+    )
+    chat_session_resume_parser.add_argument("--session-id", default="default", help="Stable local session id")
+    chat_session_resume_parser.add_argument("--turn-id", default=None, help="Specific failed/submitted turn id to retry")
+    chat_session_resume_parser.add_argument(
+        "--include-submitted",
+        action="store_true",
+        help="Allow retrying submitted turns, which may create a duplicate spend",
+    )
+    chat_session_resume_parser.add_argument("--dry-run", action="store_true", help="Write a resume plan without creating a job")
+    chat_session_resume_parser.add_argument(
+        "--coordinator",
+        default=None,
+        help="Optional coordinator URL override. Defaults to the session/invite setting.",
+    )
+    chat_session_resume_parser.add_argument("--invite", default=None, help="Optional alpha invite JSON override")
+    chat_session_resume_parser.add_argument("--admission-token", default=None, help="Admission token override")
+    chat_session_resume_parser.add_argument("--model", default=None, help="Optional model override")
+    chat_session_resume_parser.add_argument("--system", default=None, help="Optional system message override")
+    chat_session_resume_parser.add_argument("--requester-account-id", default=None, help="Optional requester account override")
+    chat_session_resume_parser.add_argument("--job-cost", default=None, type=int, help="Optional credit cost override")
+    chat_session_resume_parser.add_argument("--reward", default=None, type=int, help="Optional worker reward override")
+    chat_session_resume_parser.add_argument("--temperature", default=None, type=float, help="Optional model temperature override")
+    chat_session_resume_parser.add_argument("--max-tokens", default=None, type=int, help="Optional max token hint override")
+    chat_session_resume_parser.add_argument("--ttl-seconds", default=None, type=int, help="Optional job lifetime override")
+    chat_session_resume_parser.add_argument("--timeout-seconds", default=None, type=float, help="Optional result wait override")
+    chat_session_resume_parser.add_argument("--poll-interval", default=None, type=float, help="Optional result poll interval override")
+    chat_session_resume_parser.add_argument(
+        "--client-timeout-seconds",
+        default=None,
+        type=float,
+        help="Optional coordinator HTTP timeout override",
+    )
+    chat_session_resume_parser.add_argument(
+        "--max-context-turns",
+        default=None,
+        type=int,
+        help="Optional verified prior turns to include as context",
+    )
+    chat_session_resume_parser.add_argument("--no-wait", action="store_true", help="Create the retry job and skip result polling")
+    chat_session_resume_parser.add_argument("--json", action="store_true", help="Print the full JSON resume report")
+    chat_session_resume_parser.set_defaults(func=run_chat_session_resume_command)
 
     chat_smoke_parser = chat_subcommands.add_parser(
         "smoke",

@@ -76,6 +76,8 @@ Chat Ask V1 is the requester-facing counterpart. It submits a funded `inference.
 
 Chat Session V1 makes that loop persistent. Each CLI run appends one funded turn to a local session transcript, sends recent verified turns as bounded context, preserves per-turn `chat-ask` evidence, and records requester balance after the spend. This is the first concrete bridge from operator proofs into a future chat UI.
 
+Chat Session Status/Resume V1 adds the operator safety loop around that transcript: inspect local session health without spending credits, identify failed turns, and append auditable retry turns only when explicitly requested. Submitted turns remain protected from accidental duplicate spend unless the operator opts in.
+
 Operator Credit Tools V1 adds the missing controlled top-up path. Operators can inspect requester and worker balances with a read-only `operator credits` report, then grant requester credits with `operator grant-requester-credits` through a separate operator-only grant token. The normal alpha invite/admission token can still create jobs, but it cannot mint credits.
 
 ## Future Lane: ISP Edge / Broadband Bundle
