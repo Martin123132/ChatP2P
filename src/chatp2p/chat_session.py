@@ -10,15 +10,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .alpha import load_alpha_invite
 from .chat_request import ChatAskConfig, run_chat_ask
+from .client import CoordinatorClient
 from .jsonio import read_json_file
 
 
 CHAT_SESSION_REPORT_SCHEMA = "chatp2p.chat-session-report.v1"
 CHAT_SESSION_STATUS_REPORT_SCHEMA = "chatp2p.chat-session-status-report.v1"
 CHAT_SESSION_RESUME_REPORT_SCHEMA = "chatp2p.chat-session-resume-report.v1"
+CHAT_SESSION_SYNC_REPORT_SCHEMA = "chatp2p.chat-session-sync-report.v1"
 DEFAULT_SESSION_ID = "default"
 DEFAULT_MAX_CONTEXT_TURNS = 8
+DEFAULT_COORDINATOR_URL = "http://127.0.0.1:8765"
 
 
 @dataclass(frozen=True)
@@ -74,6 +78,17 @@ class ChatSessionResumeConfig:
     no_wait: bool = False
     client_timeout_seconds: float | None = None
     max_context_turns: int | None = None
+
+
+@dataclass(frozen=True)
+class ChatSessionSyncConfig:
+    out_dir: Path = Path(".mesh/chat-session")
+    session_id: str = DEFAULT_SESSION_ID
+    coordinator_url: str | None = None
+    invite_path: Path | None = None
+    admission_token: str | None = None
+    dry_run: bool = False
+    client_timeout_seconds: float = 10.0
 
 
 def run_chat_session(config: ChatSessionConfig) -> dict[str, Any]:
@@ -151,7 +166,7 @@ def run_chat_session_status(config: ChatSessionStatusConfig) -> dict[str, Any]:
     started_at = time.time()
     now = datetime.now(timezone.utc).isoformat()
     out_dir = config.out_dir.expanduser().resolve()
-    session_path, _, status_path, status_markdown_path, _, _ = _session_paths(out_dir)
+    session_path, _, status_path, status_markdown_path, _, _, _, _ = _session_paths(out_dir)
     session = _require_session(session_path=session_path, session_id=config.session_id)
     turns = list(session.get("turns") or [])
     turn_reports = [_turn_report_summary(turn) for turn in turns]
@@ -177,6 +192,117 @@ def run_chat_session_status(config: ChatSessionStatusConfig) -> dict[str, Any]:
     return report
 
 
+def run_chat_session_sync(config: ChatSessionSyncConfig) -> dict[str, Any]:
+    """Reconcile existing session turns against coordinator snapshot evidence."""
+
+    _validate_sync_config(config)
+    started_at = time.time()
+    now = datetime.now(timezone.utc).isoformat()
+    out_dir = config.out_dir.expanduser().resolve()
+    (
+        session_path,
+        markdown_path,
+        _,
+        _,
+        _,
+        _,
+        sync_path,
+        sync_markdown_path,
+    ) = _session_paths(out_dir)
+    session = _require_session(session_path=session_path, session_id=config.session_id)
+    turns = list(session.get("turns") or [])
+    connection = _resolve_sync_connection(config=config, session=session)
+    client = CoordinatorClient(
+        connection["coordinator_url"],
+        admission_token=connection["token"],
+        timeout_seconds=config.client_timeout_seconds,
+    )
+
+    errors: list[str] = []
+    snapshot: dict[str, Any] | None = None
+    try:
+        snapshot = client.snapshot()
+    except Exception as exc:
+        errors.append(_format_sync_exception(exc))
+
+    updates: list[dict[str, Any]] = []
+    changed = False
+    if snapshot is not None:
+        synced_turns = []
+        requester_account_id = str((session.get("config") or {}).get("requester_account_id") or "")
+        for turn in turns:
+            updated_turn, update = _sync_turn_from_snapshot(
+                turn=turn,
+                snapshot=snapshot,
+                requester_account_id=requester_account_id,
+            )
+            synced_turns.append(updated_turn)
+            if update is not None:
+                updates.append(update)
+                changed = changed or update["changed"]
+        if changed and not config.dry_run:
+            session["updated_at"] = now
+            session["turns"] = synced_turns
+            latest_turn = synced_turns[-1] if synced_turns else {}
+            session["summary"] = _session_summary(turns=synced_turns, latest_turn=latest_turn)
+            session["status"] = session["summary"]["status"]
+            session["ok"] = session["status"] in {"pass", "submitted"}
+            session["errors"] = list(latest_turn.get("errors") or [])
+            session["artifacts"] = {
+                "json": str(session_path),
+                "markdown": str(markdown_path),
+            }
+            session_path.write_text(json.dumps(session, indent=2, sort_keys=True), encoding="utf-8")
+            markdown_path.write_text(format_chat_session_markdown(session), encoding="utf-8")
+
+    unresolved = _sync_unresolved_turns(turns if config.dry_run or not changed else session.get("turns") or [])
+    status = _sync_status(errors=errors, updates=updates, unresolved=unresolved, dry_run=config.dry_run)
+    report = {
+        "schema": CHAT_SESSION_SYNC_REPORT_SCHEMA,
+        "ok": status in {"pass", "warn", "dry_run"},
+        "status": status,
+        "dry_run": config.dry_run,
+        "generated_at": now,
+        "duration_seconds": round(time.time() - started_at, 3),
+        "session_id": config.session_id,
+        "config": {
+            "out_dir": str(out_dir),
+            "coordinator": connection["coordinator_url"],
+            "invite_path": str(config.invite_path.expanduser().resolve()) if config.invite_path else None,
+            "auth": {"token_present": bool(connection["token"])},
+            "remote_side_effect": "read_coordinator_snapshot_only",
+        },
+        "summary": {
+            "status": status,
+            "turn_count": len(turns),
+            "checked_turns": len([turn for turn in turns if turn.get("job_id")]),
+            "updated_turns": len([update for update in updates if update["changed"]]),
+            "unresolved_turns": len(unresolved),
+            "snapshot_available": snapshot is not None,
+            "recommended_next_action": _sync_recommended_next_action(
+                status=status,
+                updates=updates,
+                unresolved=unresolved,
+                errors=errors,
+                dry_run=config.dry_run,
+            ),
+        },
+        "updates": updates,
+        "unresolved_turns": unresolved,
+        "snapshot_status": (snapshot or {}).get("status"),
+        "errors": errors,
+        "artifacts": {
+            "json": str(sync_path),
+            "markdown": str(sync_markdown_path),
+            "session_json": str(session_path),
+            "session_markdown": str(markdown_path),
+        },
+    }
+    sync_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+    sync_markdown_path.write_text(format_chat_session_sync_markdown(report), encoding="utf-8")
+    return report
+
+
 def run_chat_session_resume(config: ChatSessionResumeConfig) -> dict[str, Any]:
     """Append a retry turn for the latest failed/submitted session turn."""
 
@@ -184,7 +310,7 @@ def run_chat_session_resume(config: ChatSessionResumeConfig) -> dict[str, Any]:
     started_at = time.time()
     now = datetime.now(timezone.utc).isoformat()
     out_dir = config.out_dir.expanduser().resolve()
-    session_path, markdown_path, _, _, resume_path, resume_markdown_path = _session_paths(out_dir)
+    session_path, markdown_path, _, _, resume_path, resume_markdown_path, _, _ = _session_paths(out_dir)
     session = _require_session(session_path=session_path, session_id=config.session_id)
     turns = list(session.get("turns") or [])
     target_turn = _select_resume_turn(
@@ -399,6 +525,23 @@ def format_chat_session_resume_summary(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_chat_session_sync_summary(report: dict[str, Any]) -> str:
+    summary = report.get("summary") or {}
+    lines = [
+        f"Chat session sync: {str(report.get('status', 'unknown')).upper()}",
+        f"Session: {report.get('session_id')}",
+        f"Checked turns: {summary.get('checked_turns')}",
+        f"Updated turns: {summary.get('updated_turns')}",
+        f"Unresolved turns: {summary.get('unresolved_turns')}",
+        f"Next: {summary.get('recommended_next_action')}",
+        f"Report: {(report.get('artifacts') or {}).get('json')}",
+    ]
+    if report.get("errors"):
+        lines.append("Errors:")
+        lines.extend(f"- {error}" for error in report["errors"])
+    return "\n".join(lines)
+
+
 def format_chat_session_status_markdown(report: dict[str, Any]) -> str:
     summary = report.get("summary") or {}
     lines = [
@@ -419,6 +562,44 @@ def format_chat_session_status_markdown(report: dict[str, Any]) -> str:
             f"- `{turn.get('turn_id')}` status `{turn.get('status')}` "
             f"job `{turn.get('job_id')}` artifact `{turn.get('artifact_status')}`"
         )
+    return "\n".join(lines)
+
+
+def format_chat_session_sync_markdown(report: dict[str, Any]) -> str:
+    summary = report.get("summary") or {}
+    lines = [
+        "# ChatP2P Chat Session Sync",
+        "",
+        f"- Status: **{str(report.get('status', 'unknown')).upper()}**",
+        f"- Session: `{report.get('session_id')}`",
+        f"- Checked turns: `{summary.get('checked_turns')}`",
+        f"- Updated turns: `{summary.get('updated_turns')}`",
+        f"- Unresolved turns: `{summary.get('unresolved_turns')}`",
+        f"- Recommended next action: `{summary.get('recommended_next_action')}`",
+        "",
+        "## Updates",
+        "",
+    ]
+    updates = report.get("updates") or []
+    if updates:
+        for update in updates:
+            lines.append(
+                f"- `{update.get('turn_id')}` job `{update.get('job_id')}` "
+                f"{update.get('previous_status')} -> {update.get('synced_status')} "
+                f"changed `{update.get('changed')}`"
+            )
+    else:
+        lines.append("- No local turn updates were available from the snapshot.")
+    if report.get("unresolved_turns"):
+        lines.extend(["", "## Unresolved Turns", ""])
+        for turn in report["unresolved_turns"]:
+            lines.append(
+                f"- `{turn.get('turn_id')}` status `{turn.get('status')}` "
+                f"job `{turn.get('job_id')}`"
+            )
+    if report.get("errors"):
+        lines.extend(["", "## Errors", ""])
+        lines.extend(f"- {error}" for error in report["errors"])
     return "\n".join(lines)
 
 
@@ -531,6 +712,17 @@ def _validate_resume_config(config: ChatSessionResumeConfig) -> None:
         raise ValueError("--max-context-turns must be at least 0")
 
 
+def _validate_sync_config(config: ChatSessionSyncConfig) -> None:
+    if not config.session_id.strip():
+        raise ValueError("--session-id must be non-empty")
+    if _safe_session_id(config.session_id) != config.session_id:
+        raise ValueError("--session-id may contain only letters, numbers, dot, underscore, and dash")
+    if config.coordinator_url is not None and not config.coordinator_url.strip():
+        raise ValueError("--coordinator must be non-empty")
+    if config.client_timeout_seconds <= 0:
+        raise ValueError("--client-timeout-seconds must be greater than 0")
+
+
 def _load_existing_session(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
@@ -551,7 +743,7 @@ def _require_session(*, session_path: Path, session_id: str) -> dict[str, Any]:
     return session
 
 
-def _session_paths(out_dir: Path) -> tuple[Path, Path, Path, Path, Path, Path]:
+def _session_paths(out_dir: Path) -> tuple[Path, Path, Path, Path, Path, Path, Path, Path]:
     return (
         out_dir / "chat-session.json",
         out_dir / "chat-session.md",
@@ -559,6 +751,8 @@ def _session_paths(out_dir: Path) -> tuple[Path, Path, Path, Path, Path, Path]:
         out_dir / "chat-session-status.md",
         out_dir / "chat-session-resume.json",
         out_dir / "chat-session-resume.md",
+        out_dir / "chat-session-sync.json",
+        out_dir / "chat-session-sync.md",
     )
 
 
@@ -789,11 +983,179 @@ def _status_recommended_action(
 ) -> str:
     if artifact_mismatches:
         return "inspect_turn_artifacts"
+    if any(turn.get("job_id") for turn in failed_turns):
+        return "sync_session_then_resume_failed_turn"
+    if any(turn.get("job_id") for turn in submitted_turns):
+        return "sync_session"
     if failed_turns:
         return "resume_failed_turn"
     if submitted_turns:
         return "wait_or_resume_submitted_turn"
     return "continue_chat_session"
+
+
+def _resolve_sync_connection(*, config: ChatSessionSyncConfig, session: dict[str, Any]) -> dict[str, Any]:
+    invite = load_alpha_invite(config.invite_path.expanduser()) if config.invite_path else None
+    stored = session.get("config") or {}
+    coordinator_url = (
+        config.coordinator_url
+        or (invite.coordinator if invite else None)
+        or stored.get("coordinator")
+        or DEFAULT_COORDINATOR_URL
+    )
+    token = config.admission_token or (invite.admission_token if invite else None)
+    return {
+        "coordinator_url": str(coordinator_url).rstrip("/"),
+        "token": token,
+    }
+
+
+def _sync_turn_from_snapshot(
+    *,
+    turn: dict[str, Any],
+    snapshot: dict[str, Any],
+    requester_account_id: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    job_id = turn.get("job_id")
+    if not job_id:
+        return dict(turn), None
+    job = _snapshot_job(snapshot, str(job_id))
+    result = _snapshot_result(snapshot, str(job_id))
+    previous_status = str(turn.get("status") or "unknown")
+    previous_job_status = turn.get("job_status")
+    new_turn = dict(turn)
+    job_status = str((job or {}).get("status") or previous_job_status or "unknown")
+
+    if result and (job is None or job_status == "verified"):
+        output = result.get("output") or {}
+        balances = ((snapshot.get("credit_ledger") or {}).get("summary") or {}).get("balances") or {}
+        worker_id = result.get("node_id")
+        new_turn.update(
+            {
+                "ok": True,
+                "status": "pass",
+                "answer": output.get("answer"),
+                "model": output.get("model") or turn.get("model"),
+                "job_status": "verified",
+                "worker_node_id": worker_id,
+                "requester_balance_after": balances.get(requester_account_id) if requester_account_id else None,
+                "worker_balance_after": balances.get(worker_id) if worker_id else None,
+                "recommended_next_action": "continue_chat_session",
+                "errors": [],
+            }
+        )
+    elif job_status in {"queued", "leased", "pending"}:
+        new_turn.update(
+            {
+                "ok": True,
+                "status": "submitted",
+                "job_status": job_status,
+                "recommended_next_action": "wait_for_worker_result",
+                "errors": [],
+            }
+        )
+    elif job_status in {"expired", "disputed"}:
+        new_turn.update(
+            {
+                "ok": False,
+                "status": "fail",
+                "job_status": job_status,
+                "recommended_next_action": "resume_failed_turn",
+                "errors": [f"chat job is {job_status}"],
+            }
+        )
+
+    changed = _sync_turn_changed(turn, new_turn)
+    return new_turn, {
+        "turn_id": turn.get("turn_id"),
+        "job_id": job_id,
+        "previous_status": previous_status,
+        "previous_job_status": previous_job_status,
+        "synced_status": new_turn.get("status"),
+        "synced_job_status": new_turn.get("job_status"),
+        "result_found": result is not None,
+        "job_found": job is not None,
+        "changed": changed,
+    }
+
+
+def _sync_turn_changed(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    fields = {
+        "ok",
+        "status",
+        "answer",
+        "model",
+        "job_status",
+        "worker_node_id",
+        "requester_balance_after",
+        "worker_balance_after",
+        "recommended_next_action",
+        "errors",
+    }
+    return any(before.get(field) != after.get(field) for field in fields)
+
+
+def _sync_unresolved_turns(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "turn_id": turn.get("turn_id"),
+            "status": turn.get("status"),
+            "job_id": turn.get("job_id"),
+            "job_status": turn.get("job_status"),
+            "recommended_next_action": turn.get("recommended_next_action"),
+        }
+        for turn in turns
+        if turn.get("status") in {"fail", "submitted"}
+    ]
+
+
+def _sync_status(
+    *,
+    errors: list[str],
+    updates: list[dict[str, Any]],
+    unresolved: list[dict[str, Any]],
+    dry_run: bool,
+) -> str:
+    if errors:
+        return "fail"
+    if dry_run and any(update["changed"] for update in updates):
+        return "dry_run"
+    if unresolved:
+        return "warn"
+    return "pass"
+
+
+def _sync_recommended_next_action(
+    *,
+    status: str,
+    updates: list[dict[str, Any]],
+    unresolved: list[dict[str, Any]],
+    errors: list[str],
+    dry_run: bool,
+) -> str:
+    if errors:
+        return "check_coordinator_reachability"
+    if dry_run and any(update["changed"] for update in updates):
+        return "rerun_session_sync_without_dry_run"
+    if any(turn.get("status") == "fail" for turn in unresolved):
+        return "resume_failed_turn"
+    if any(turn.get("status") == "submitted" for turn in unresolved):
+        return "wait_for_worker_result"
+    if any(update["changed"] for update in updates) or status == "pass":
+        return "continue_chat_session"
+    return "inspect_chat_session_sync_report"
+
+
+def _snapshot_job(snapshot: dict[str, Any], job_id: str) -> dict[str, Any] | None:
+    return next((job for job in snapshot.get("jobs", []) if job.get("job_id") == job_id), None)
+
+
+def _snapshot_result(snapshot: dict[str, Any], job_id: str) -> dict[str, Any] | None:
+    return next((result for result in snapshot.get("results", []) if result.get("job_id") == job_id), None)
+
+
+def _format_sync_exception(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
 
 
 def _select_resume_turn(

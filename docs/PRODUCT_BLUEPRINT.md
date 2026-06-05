@@ -78,6 +78,8 @@ Chat Session V1 makes that loop persistent. Each CLI run appends one funded turn
 
 Chat Session Status/Resume V1 adds the operator safety loop around that transcript: inspect local session health without spending credits, identify failed turns, and append auditable retry turns only when explicitly requested. Submitted turns remain protected from accidental duplicate spend unless the operator opts in.
 
+Chat Session Sync V1 protects that retry path. Before spending credits on a retry, the operator can reconcile existing session turns against the coordinator snapshot: if a timed-out job later verified, the local transcript is updated; if the job is still active, the turn returns to submitted/waiting; if it expired or disputed, resume remains the deliberate next action.
+
 Operator Credit Tools V1 adds the missing controlled top-up path. Operators can inspect requester and worker balances with a read-only `operator credits` report, then grant requester credits with `operator grant-requester-credits` through a separate operator-only grant token. The normal alpha invite/admission token can still create jobs, but it cannot mint credits.
 
 ## Future Lane: ISP Edge / Broadband Bundle

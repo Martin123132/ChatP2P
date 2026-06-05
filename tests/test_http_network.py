@@ -20,6 +20,19 @@ class SlowWorkerNode(WorkerNode):
         return super().run_job(job)
 
 
+def _assert_public_alpha_denied(action):
+    try:
+        action()
+    except HTTPError as exc:
+        assert exc.code == 403
+    except ConnectionAbortedError as exc:
+        # Windows occasionally reports the expected immediate 403 close as
+        # WSAECONNABORTED during this denial-path test.
+        assert getattr(exc, "winerror", None) == 10053
+    else:
+        raise AssertionError("Expected public alpha request without admission token to fail")
+
+
 def test_http_worker_registers_leases_job_and_submits_result():
     coordinator_identity = NodeIdentity.generate(prefix="coordinator")
     coordinator = Coordinator(identity=coordinator_identity)
@@ -260,12 +273,7 @@ def test_public_alpha_requires_admission_token_for_registration_and_job_creation
         worker = WorkerNode(identity=worker_identity)
         registration = NodeRegistration.create(node=worker_identity, capabilities=worker.capabilities())
 
-        try:
-            CoordinatorClient(base_url).register(registration)
-        except HTTPError as exc:
-            assert exc.code == 403
-        else:
-            raise AssertionError("Expected registration without admission token to fail")
+        _assert_public_alpha_denied(lambda: CoordinatorClient(base_url).register(registration))
 
         client = CoordinatorClient(base_url, admission_token="alpha-token-123")
         assert client.register(registration)["accepted"] is True
@@ -276,15 +284,12 @@ def test_public_alpha_requires_admission_token_for_registration_and_job_creation
             "operands": [1, 2],
             "expected": 3,
         }
-        try:
-            CoordinatorClient(base_url).create_job(
+        _assert_public_alpha_denied(
+            lambda: CoordinatorClient(base_url).create_job(
                 job_type="eval.deterministic.v1",
                 payload=job_payload,
             )
-        except HTTPError as exc:
-            assert exc.code == 403
-        else:
-            raise AssertionError("Expected job creation without admission token to fail")
+        )
 
         job = client.create_job(job_type="eval.deterministic.v1", payload=job_payload)
         assert job.verify_signature()

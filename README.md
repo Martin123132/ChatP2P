@@ -363,13 +363,18 @@ python -m chatp2p.cli chat session-status `
 If a turn failed, preview the retry plan first:
 
 ```powershell
+python -m chatp2p.cli chat session-sync `
+  --out D:\ChatP2PData\chat-session `
+  --session-id demo `
+  --invite D:\ChatP2PData\alpha-invite.json
+
 python -m chatp2p.cli chat session-resume `
   --out D:\ChatP2PData\chat-session `
   --session-id demo `
   --dry-run
 ```
 
-Rerun without `--dry-run` to append an auditable retry turn. Submitted turns are not retried by default because they may already have reserved credits; use `--include-submitted` only when you deliberately accept possible duplicate spend.
+`session-sync` reads the coordinator snapshot and updates local turns when an already-created job has since verified, expired, or is still active. It does not create jobs or spend credits. Rerun `session-resume` without `--dry-run` only when sync cannot recover the turn. Submitted turns are not retried by default because they may already have reserved credits; use `--include-submitted` only when you deliberately accept possible duplicate spend.
 
 Operator Credit Tools V1 makes requester top-ups explicit and auditable. `bootstrap-alpha` writes an operator-only `credit_grant_token` into the private operator config; this token is not copied into the invite and normal admission tokens cannot grant credits. Inspect balances first:
 

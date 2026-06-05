@@ -6,12 +6,15 @@ from chatp2p.chat_session import (
     CHAT_SESSION_REPORT_SCHEMA,
     CHAT_SESSION_RESUME_REPORT_SCHEMA,
     CHAT_SESSION_STATUS_REPORT_SCHEMA,
+    CHAT_SESSION_SYNC_REPORT_SCHEMA,
     ChatSessionConfig,
     ChatSessionResumeConfig,
     ChatSessionStatusConfig,
+    ChatSessionSyncConfig,
     run_chat_session,
     run_chat_session_resume,
     run_chat_session_status,
+    run_chat_session_sync,
 )
 from chatp2p.chat_smoke import _ollama_capabilities, _start_fake_ollama
 from chatp2p.client import CoordinatorClient
@@ -188,6 +191,134 @@ def test_chat_session_resume_dry_run_does_not_mutate_session(tmp_path):
     assert after == before
 
 
+def test_chat_session_sync_updates_failed_turn_from_verified_snapshot(tmp_path):
+    fake = _start_fake_ollama(model="tiny-test-model", answer="Recovered answer.")
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    requester_id = "requester_session_sync"
+    coordinator.apply_credit_delta(
+        account_id=requester_id,
+        account_type="requester",
+        delta=2,
+        reason="operator_credit_grant",
+    )
+    server = create_coordinator_http_server(coordinator, host="127.0.0.1", port=0)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    worker_errors = []
+    try:
+        host, port = server.server_address
+        base_url = f"http://{host}:{port}"
+        client = CoordinatorClient(base_url)
+        worker_identity = NodeIdentity.generate(prefix="worker")
+        worker = WorkerNode(
+            identity=worker_identity,
+            capability_profile=_ollama_capabilities(models=["tiny-test-model"], base_url=fake.base_url),
+            ollama_base_url=fake.base_url,
+        )
+        registration = NodeRegistration.create(node=worker_identity, capabilities=worker.capabilities())
+        assert client.register(registration)["accepted"] is True
+        job = client.create_chat_job(
+            model="tiny-test-model",
+            messages=[{"role": "user", "content": "Recover this failed turn"}],
+            requester_account_id=requester_id,
+            job_cost=1,
+            reward=1,
+        )
+        session_path = _write_session_fixture(
+            tmp_path / "chat-session",
+            requester_id=requester_id,
+            failed_job_id=job.job_id,
+        )
+
+        worker_thread = threading.Thread(
+            target=_run_worker_until_jobs,
+            args=(client, worker, worker_errors, 1),
+            daemon=True,
+        )
+        worker_thread.start()
+        worker_thread.join(timeout=2)
+
+        report = run_chat_session_sync(
+            ChatSessionSyncConfig(
+                out_dir=session_path.parent,
+                session_id="demo",
+                coordinator_url=base_url,
+            )
+        )
+    finally:
+        fake.stop()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+    session = json.loads(session_path.read_text(encoding="utf-8"))
+    assert worker_errors == []
+    assert report["schema"] == CHAT_SESSION_SYNC_REPORT_SCHEMA
+    assert report["status"] == "pass"
+    assert report["summary"]["updated_turns"] == 1
+    target_update = next(update for update in report["updates"] if update["turn_id"] == "turn-0002")
+    assert target_update["previous_status"] == "fail"
+    assert target_update["synced_status"] == "pass"
+    assert session["turns"][1]["status"] == "pass"
+    assert session["turns"][1]["answer"] == "Recovered answer."
+    assert session["summary"]["recommended_next_action"] == "continue_chat_session"
+    assert len(fake.requests) == 1
+
+
+def test_chat_session_sync_dry_run_does_not_mutate_session(tmp_path):
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    requester_id = "requester_session_sync_dry_run"
+    coordinator.apply_credit_delta(
+        account_id=requester_id,
+        account_type="requester",
+        delta=2,
+        reason="operator_credit_grant",
+    )
+    server = create_coordinator_http_server(coordinator, host="127.0.0.1", port=0)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    try:
+        host, port = server.server_address
+        base_url = f"http://{host}:{port}"
+        client = CoordinatorClient(base_url)
+        job = client.create_chat_job(
+            model="tiny-test-model",
+            messages=[{"role": "user", "content": "Queued turn"}],
+            requester_account_id=requester_id,
+            job_cost=1,
+            reward=1,
+        )
+        session_path = _write_session_fixture(
+            tmp_path / "chat-session",
+            requester_id=requester_id,
+            failed_job_id=job.job_id,
+        )
+        before = json.loads(session_path.read_text(encoding="utf-8"))
+
+        report = run_chat_session_sync(
+            ChatSessionSyncConfig(
+                out_dir=session_path.parent,
+                session_id="demo",
+                coordinator_url=base_url,
+                dry_run=True,
+            )
+        )
+        after = json.loads(session_path.read_text(encoding="utf-8"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+    assert report["status"] == "dry_run"
+    assert report["summary"]["updated_turns"] == 1
+    target_update = next(update for update in report["updates"] if update["turn_id"] == "turn-0002")
+    assert target_update["synced_status"] == "submitted"
+    assert report["summary"]["recommended_next_action"] == "rerun_session_sync_without_dry_run"
+    assert after == before
+
+
 def test_chat_session_resume_appends_retry_turn(tmp_path):
     fake = _start_fake_ollama(model="tiny-test-model", answer="Retried answer.")
     coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
@@ -269,6 +400,18 @@ def test_chat_session_status_and_resume_cli_parse():
             "--json",
         ]
     )
+    sync_args = parser.parse_args(
+        [
+            "chat",
+            "session-sync",
+            "--out",
+            "D:\\ChatP2PData\\chat-session",
+            "--session-id",
+            "demo",
+            "--dry-run",
+            "--json",
+        ]
+    )
     resume_args = parser.parse_args(
         [
             "chat",
@@ -285,6 +428,9 @@ def test_chat_session_status_and_resume_cli_parse():
 
     assert status_args.func.__name__ == "run_chat_session_status_command"
     assert status_args.chat_command == "session-status"
+    assert sync_args.func.__name__ == "run_chat_session_sync_command"
+    assert sync_args.chat_command == "session-sync"
+    assert sync_args.dry_run is True
     assert resume_args.func.__name__ == "run_chat_session_resume_command"
     assert resume_args.include_submitted is True
     assert resume_args.dry_run is True
@@ -312,7 +458,7 @@ def _run_worker_until_jobs(client, worker, errors, count):
         errors.append(f"worker completed {completed}/{count} jobs")
 
 
-def _write_session_fixture(path, requester_id="requester_session_account"):
+def _write_session_fixture(path, requester_id="requester_session_account", failed_job_id=None):
     path.mkdir(parents=True, exist_ok=True)
     session = {
         "schema": CHAT_SESSION_REPORT_SCHEMA,
@@ -371,7 +517,7 @@ def _write_session_fixture(path, requester_id="requester_session_account"):
                 "prompt": "Failed question?",
                 "answer": None,
                 "model": "tiny-test-model",
-                "job_id": None,
+                "job_id": failed_job_id,
                 "job_status": None,
                 "worker_node_id": None,
                 "requester_balance_after": 1,

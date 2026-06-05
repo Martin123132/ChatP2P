@@ -63,12 +63,15 @@ from .chat_session import (
     ChatSessionConfig,
     ChatSessionResumeConfig,
     ChatSessionStatusConfig,
+    ChatSessionSyncConfig,
     format_chat_session_resume_summary,
     format_chat_session_status_summary,
+    format_chat_session_sync_summary,
     format_chat_session_summary,
     run_chat_session,
     run_chat_session_resume,
     run_chat_session_status,
+    run_chat_session_sync,
 )
 from .client import CoordinatorClient
 from .coordinator import Coordinator
@@ -515,6 +518,30 @@ def run_chat_session_status_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_chat_session_status_summary(report))
+
+
+def run_chat_session_sync_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_chat_session_sync(
+            ChatSessionSyncConfig(
+                out_dir=Path(args.out),
+                session_id=args.session_id,
+                coordinator_url=args.coordinator,
+                invite_path=Path(args.invite) if args.invite else None,
+                admission_token=args.admission_token,
+                dry_run=args.dry_run,
+                client_timeout_seconds=args.client_timeout_seconds,
+            )
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_chat_session_sync_summary(report))
+    if report["status"] == "fail":
+        raise SystemExit(1)
 
 
 def run_chat_session_resume_command(args: argparse.Namespace) -> None:
@@ -3070,6 +3097,37 @@ def build_parser() -> argparse.ArgumentParser:
     chat_session_status_parser.add_argument("--session-id", default="default", help="Stable local session id")
     chat_session_status_parser.add_argument("--json", action="store_true", help="Print the full JSON status report")
     chat_session_status_parser.set_defaults(func=run_chat_session_status_command)
+
+    chat_session_sync_parser = chat_subcommands.add_parser(
+        "session-sync",
+        help="Reconcile existing chat session turns from coordinator snapshot evidence",
+    )
+    chat_session_sync_parser.add_argument(
+        "--out",
+        default=".mesh/chat-session",
+        help="Directory containing chat-session.json",
+    )
+    chat_session_sync_parser.add_argument("--session-id", default="default", help="Stable local session id")
+    chat_session_sync_parser.add_argument(
+        "--coordinator",
+        default=None,
+        help="Optional coordinator URL override. Defaults to the session/invite setting.",
+    )
+    chat_session_sync_parser.add_argument("--invite", default=None, help="Optional alpha invite JSON override")
+    chat_session_sync_parser.add_argument("--admission-token", default=None, help="Admission token override")
+    chat_session_sync_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Write the sync report without updating chat-session.json",
+    )
+    chat_session_sync_parser.add_argument(
+        "--client-timeout-seconds",
+        default=10.0,
+        type=float,
+        help="Coordinator HTTP timeout",
+    )
+    chat_session_sync_parser.add_argument("--json", action="store_true", help="Print the full JSON sync report")
+    chat_session_sync_parser.set_defaults(func=run_chat_session_sync_command)
 
     chat_session_resume_parser = chat_subcommands.add_parser(
         "session-resume",
