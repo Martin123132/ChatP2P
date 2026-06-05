@@ -337,6 +337,21 @@ python -m chatp2p.cli chat ask `
 
 The command reads the invite token for job creation but does not print it or write it into the report. Use `--no-wait` when you only want to submit the job and check the result later.
 
+For a repeatable local transcript, use `chat session`. Each run appends one funded user turn to `chat-session.json` and `chat-session.md`, includes recent verified turns as model context, and writes the underlying per-turn `chat-ask` report in a `turn-000N` folder:
+
+```powershell
+python -m chatp2p.cli chat session `
+  --invite D:\ChatP2PData\alpha-invite.json `
+  --out D:\ChatP2PData\chat-session `
+  --session-id demo `
+  --model llama3.2:3b `
+  --prompt "What did we decide last turn?" `
+  --requester-account-id requester_demo `
+  --job-cost 1
+```
+
+`--max-context-turns` bounds how many verified prior turns are sent as context. V1 is still CLI-first, but it gives the future chat UI a concrete storage and credit-spend loop to build on.
+
 Operator Credit Tools V1 makes requester top-ups explicit and auditable. `bootstrap-alpha` writes an operator-only `credit_grant_token` into the private operator config; this token is not copied into the invite and normal admission tokens cannot grant credits. Inspect balances first:
 
 ```powershell

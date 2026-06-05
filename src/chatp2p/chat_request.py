@@ -26,6 +26,7 @@ class ChatAskConfig:
     model: str = "tiny-test-model"
     prompt: str = "Explain ChatP2P in one sentence."
     system: str | None = "Be concise."
+    context_messages: tuple[dict[str, str], ...] = ()
     requester_account_id: str = "requester_demo"
     job_cost: int = 1
     reward: int = 1
@@ -129,6 +130,7 @@ def run_chat_ask(config: ChatAskConfig) -> dict[str, Any]:
             "invite_path": str(config.invite_path.expanduser().resolve()) if config.invite_path else None,
             "auth": {"token_present": bool(connection["token"])},
             "model": config.model,
+            "context_message_count": len(config.context_messages),
             "requester_account_id": config.requester_account_id,
             "job_cost": config.job_cost,
             "reward": config.reward,
@@ -217,6 +219,13 @@ def _validate_config(config: ChatAskConfig) -> None:
         raise ValueError("--model must be non-empty")
     if not config.prompt.strip():
         raise ValueError("--prompt must be non-empty")
+    for message in config.context_messages:
+        role = message.get("role")
+        content = message.get("content")
+        if role not in {"system", "user", "assistant"}:
+            raise ValueError("context message role must be system, user, or assistant")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("context message content must be non-empty")
     if not config.requester_account_id.strip():
         raise ValueError("--requester-account-id must be non-empty")
     if config.job_cost < 1:
@@ -252,6 +261,10 @@ def _messages_from_config(config: ChatAskConfig) -> list[dict[str, str]]:
     messages = []
     if config.system and config.system.strip():
         messages.append({"role": "system", "content": config.system.strip()})
+    messages.extend(
+        {"role": message["role"].strip(), "content": message["content"].strip()}
+        for message in config.context_messages
+    )
     messages.append({"role": "user", "content": config.prompt.strip()})
     return messages
 
