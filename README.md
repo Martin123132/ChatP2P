@@ -337,10 +337,10 @@ python -m chatp2p.cli chat ask `
 
 The command reads the invite token for job creation but does not print it or write it into the report. Use `--no-wait` when you only want to submit the job and check the result later.
 
-For a repeatable local transcript, use `chat session`. Each run appends one funded user turn to `chat-session.json` and `chat-session.md`, includes recent verified turns as model context, and writes the underlying per-turn `chat-ask` report in a `turn-000N` folder:
+For a repeatable local transcript, use `chat continue`. Each successful run appends one funded user turn to `chat-session.json` and `chat-session.md`, includes recent verified turns as model context, and writes the underlying per-turn `chat-ask` report in a `turn-000N` folder:
 
 ```powershell
-python -m chatp2p.cli chat session `
+python -m chatp2p.cli chat continue `
   --invite D:\ChatP2PData\alpha-invite.json `
   --out D:\ChatP2PData\chat-session `
   --session-id demo `
@@ -350,7 +350,7 @@ python -m chatp2p.cli chat session `
   --job-cost 1
 ```
 
-`--max-context-turns` bounds how many verified prior turns are sent as context. V1 is still CLI-first, but it gives the future chat UI a concrete storage and credit-spend loop to build on.
+`chat continue` is the safer main loop: it checks the local session first, syncs any existing failed/submitted job-backed turns from the coordinator snapshot, refuses to spend credits if a previous turn is still unresolved, and only then appends the new funded turn. `--max-context-turns` bounds how many verified prior turns are sent as context. The lower-level `chat session` command is still available when you deliberately want to append a turn without the preflight guardrail.
 
 Inspect a session without creating a job or spending credits:
 

@@ -61,14 +61,17 @@ from .chat_smoke import (
 from .chat_request import ChatAskConfig, format_chat_ask_summary, run_chat_ask
 from .chat_session import (
     ChatSessionConfig,
+    ChatSessionContinueConfig,
     ChatSessionResumeConfig,
     ChatSessionStatusConfig,
     ChatSessionSyncConfig,
+    format_chat_session_continue_summary,
     format_chat_session_resume_summary,
     format_chat_session_status_summary,
     format_chat_session_sync_summary,
     format_chat_session_summary,
     run_chat_session,
+    run_chat_session_continue,
     run_chat_session_resume,
     run_chat_session_status,
     run_chat_session_sync,
@@ -500,6 +503,43 @@ def run_chat_session_command(args: argparse.Namespace) -> None:
     else:
         print(format_chat_session_summary(report))
     if report["status"] == "fail":
+        raise SystemExit(1)
+
+
+def run_chat_session_continue_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_chat_session_continue(
+            ChatSessionContinueConfig(
+                out_dir=Path(args.out),
+                session_id=args.session_id,
+                title=args.title,
+                coordinator_url=args.coordinator,
+                invite_path=Path(args.invite) if args.invite else None,
+                admission_token=args.admission_token,
+                model=args.model,
+                prompt=args.prompt,
+                system=args.system,
+                requester_account_id=args.requester_account_id,
+                job_cost=args.job_cost,
+                reward=args.reward,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                ttl_seconds=args.ttl_seconds,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval=args.poll_interval,
+                no_wait=args.no_wait,
+                client_timeout_seconds=args.client_timeout_seconds,
+                max_context_turns=args.max_context_turns,
+            )
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_chat_session_continue_summary(report))
+    if report["status"] in {"fail", "blocked"}:
         raise SystemExit(1)
 
 
@@ -3084,6 +3124,55 @@ def build_parser() -> argparse.ArgumentParser:
     chat_session_parser.add_argument("--no-wait", action="store_true", help="Create the job and skip result polling")
     chat_session_parser.add_argument("--json", action="store_true", help="Print the full JSON session report")
     chat_session_parser.set_defaults(func=run_chat_session_command)
+
+    chat_continue_parser = chat_subcommands.add_parser(
+        "continue",
+        help="Safely append a chat turn after session status/sync checks",
+    )
+    chat_continue_parser.add_argument(
+        "--out",
+        default=".mesh/chat-session",
+        help="Output directory for chat-session.json, chat-session.md, and per-turn ask reports",
+    )
+    chat_continue_parser.add_argument("--session-id", default="default", help="Stable local session id")
+    chat_continue_parser.add_argument("--title", default=None, help="Optional session title")
+    chat_continue_parser.add_argument(
+        "--coordinator",
+        default=None,
+        help="Coordinator base URL. Defaults to invite coordinator, session coordinator, or http://127.0.0.1:8765",
+    )
+    chat_continue_parser.add_argument("--invite", default=None, help="Optional alpha invite JSON for coordinator/auth")
+    chat_continue_parser.add_argument("--admission-token", default=None, help="Admission token for public alpha coordinators")
+    chat_continue_parser.add_argument("--model", required=True, help="Ollama model name, such as llama3.2:3b")
+    chat_continue_parser.add_argument("--prompt", required=True, help="User message to append to the session")
+    chat_continue_parser.add_argument("--system", default="Be concise.", help="Optional system message for model context")
+    chat_continue_parser.add_argument(
+        "--requester-account-id",
+        required=True,
+        help="Requester account to reserve credits from",
+    )
+    chat_continue_parser.add_argument("--job-cost", default=1, type=int, help="Credits to reserve from requester account")
+    chat_continue_parser.add_argument("--reward", default=1, type=int, help="Credits awarded to the worker")
+    chat_continue_parser.add_argument("--temperature", default=0.2, type=float, help="Optional model temperature")
+    chat_continue_parser.add_argument("--max-tokens", default=256, type=int, help="Optional max token hint")
+    chat_continue_parser.add_argument("--ttl-seconds", default=300, type=int, help="Job lifetime in seconds")
+    chat_continue_parser.add_argument("--timeout-seconds", default=60.0, type=float, help="Seconds to wait for the result")
+    chat_continue_parser.add_argument("--poll-interval", default=0.5, type=float, help="Seconds between result checks")
+    chat_continue_parser.add_argument(
+        "--client-timeout-seconds",
+        default=10.0,
+        type=float,
+        help="Seconds to wait for each coordinator HTTP request",
+    )
+    chat_continue_parser.add_argument(
+        "--max-context-turns",
+        default=8,
+        type=int,
+        help="Verified prior turns to include as context",
+    )
+    chat_continue_parser.add_argument("--no-wait", action="store_true", help="Create the job and skip result polling")
+    chat_continue_parser.add_argument("--json", action="store_true", help="Print the full JSON continue report")
+    chat_continue_parser.set_defaults(func=run_chat_session_continue_command)
 
     chat_session_status_parser = chat_subcommands.add_parser(
         "session-status",

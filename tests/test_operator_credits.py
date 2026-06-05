@@ -19,6 +19,19 @@ from chatp2p.operator_credits import (
 )
 
 
+def _assert_credit_grant_denied(action):
+    try:
+        action()
+    except HTTPError as exc:
+        assert exc.code == 403
+    except ConnectionAbortedError as exc:
+        # Windows occasionally reports the expected immediate 403 close as
+        # WSAECONNABORTED during this denial-path test.
+        assert getattr(exc, "winerror", None) == 10053
+    else:
+        raise AssertionError("Expected credit grant request to be refused")
+
+
 def test_operator_grant_requires_separate_credit_grant_token():
     admission_token = "alpha-token-123456"
     grant_token = "credit-grant-token-1234567890"
@@ -39,16 +52,13 @@ def test_operator_grant_requires_separate_credit_grant_token():
     try:
         host, port = server.server_address
         base_url = f"http://{host}:{port}"
-        try:
-            CoordinatorClient(base_url, admission_token=admission_token).grant_requester_credits(
+        _assert_credit_grant_denied(
+            lambda: CoordinatorClient(base_url, admission_token=admission_token).grant_requester_credits(
                 credit_grant_token=admission_token,
                 account_id="requester_demo",
                 credits=5,
             )
-        except HTTPError as exc:
-            assert exc.code == 403
-        else:
-            raise AssertionError("Expected admission token to be refused for credit grants")
+        )
 
         response = CoordinatorClient(base_url).grant_requester_credits(
             credit_grant_token=grant_token,
