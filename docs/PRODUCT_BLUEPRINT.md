@@ -82,6 +82,8 @@ Chat Session Sync V1 protects that retry path. Before spending credits on a retr
 
 Chat Continue V1 turns the safe sequence into one product-loop command. It checks local session status, syncs job-backed unresolved turns when useful, blocks new credit spend while any failed/submitted turn remains unresolved, and otherwise appends the next funded chat turn. This is the backend contract a future chat UI should call first.
 
+Chat REPL V0 makes that contract feel like a usable chat surface without adding another daemon. It runs a local terminal loop where ordinary messages call `chat continue`, while `/status`, `/sync`, and `/resume-dry-run` expose the safety loop in-place. This is the smallest interactive bridge toward a real chat app: one prompt, one guarded spend path, one transcript, and no partner-side manual step.
+
 Operator Credit Tools V1 adds the missing controlled top-up path. Operators can inspect requester and worker balances with a read-only `operator credits` report, then grant requester credits with `operator grant-requester-credits` through a separate operator-only grant token. The normal alpha invite/admission token can still create jobs, but it cannot mint credits.
 
 ## Future Lane: ISP Edge / Broadband Bundle

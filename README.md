@@ -352,6 +352,19 @@ python -m chatp2p.cli chat continue `
 
 `chat continue` is the safer main loop: it checks the local session first, syncs any existing failed/submitted job-backed turns from the coordinator snapshot, refuses to spend credits if a previous turn is still unresolved, and only then appends the new funded turn. `--max-context-turns` bounds how many verified prior turns are sent as context. The lower-level `chat session` command is still available when you deliberately want to append a turn without the preflight guardrail.
 
+For an interactive local terminal loop, use `chat repl`. Normal messages call the same guarded `chat continue` path, so unresolved failed/submitted turns still block new credit spend until you sync or resume them deliberately:
+
+```powershell
+python -m chatp2p.cli chat repl `
+  --invite D:\ChatP2PData\alpha-invite.json `
+  --out D:\ChatP2PData\chat-session `
+  --session-id demo `
+  --model llama3.2:3b `
+  --requester-account-id requester_demo
+```
+
+Inside the REPL, `/status` inspects the local transcript, `/sync` reconciles existing job-backed turns from the coordinator snapshot, `/resume-dry-run` previews retry work without spending credits, and `/quit` exits. The REPL writes `chat-repl.json` and `chat-repl.md` next to the session transcript.
+
 Inspect a session without creating a job or spending credits:
 
 ```powershell
