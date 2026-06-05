@@ -74,6 +74,8 @@ Funded Chat Smoke V1 turns that loop into one repeatable operator proof. In defa
 
 Chat Ask V1 is the requester-facing counterpart. It submits a funded `inference.chat.v1` job to a running coordinator, waits for a worker answer, and writes a local transcript/report without exposing invite tokens. This is still CLI-first, but it is the first shape of the future chat app: one prompt, one reserved credit spend, one contributed-compute answer.
 
+Operator Credit Tools V1 adds the missing controlled top-up path. Operators can inspect requester and worker balances with a read-only `operator credits` report, then grant requester credits with `operator grant-requester-credits` through a separate operator-only grant token. The normal alpha invite/admission token can still create jobs, but it cannot mint credits.
+
 ## Future Lane: ISP Edge / Broadband Bundle
 
 Keep a second product architecture lane for an ISP-edge simulation, but do not let it interrupt the current alpha path. The idea is not "AI inside fibre"; it is a broadband-provider-style deployment model where a provider runs a coordinator, subscribers run light gateway/device nodes, regional edge workers provide stronger capacity, and policy routes work through local, provider-edge, trusted-peer, then placeholder fallback paths.

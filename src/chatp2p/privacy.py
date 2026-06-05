@@ -31,6 +31,7 @@ _SECRET_PATTERNS: dict[str, re.Pattern[str]] = {
     "google_oauth_token": re.compile(r"\bya29\.[A-Za-z0-9_-]+\b"),
     "tailscale_auth_key": re.compile(r"\btskey-[A-Za-z0-9_-]+\b"),
     "long_admission_token": re.compile(r"""admission_token["']?\s*[:=]\s*["'][^"']{20,}["']"""),
+    "long_credit_grant_token": re.compile(r"""credit_grant_token["']?\s*[:=]\s*["'][^"']{20,}["']"""),
 }
 
 _PRIVATE_FILENAME_PATTERNS = [

@@ -337,6 +337,28 @@ python -m chatp2p.cli chat ask `
 
 The command reads the invite token for job creation but does not print it or write it into the report. Use `--no-wait` when you only want to submit the job and check the result later.
 
+Operator Credit Tools V1 makes requester top-ups explicit and auditable. `bootstrap-alpha` writes an operator-only `credit_grant_token` into the private operator config; this token is not copied into the invite and normal admission tokens cannot grant credits. Inspect balances first:
+
+```powershell
+python -m chatp2p.cli operator credits `
+  --invite D:\ChatP2PData\alpha-invite.json `
+  --requester-account-id requester_demo `
+  --out D:\ChatP2PData\operator-credits
+```
+
+If the requester needs credits, grant them from the operator machine:
+
+```powershell
+python -m chatp2p.cli operator grant-requester-credits `
+  --invite D:\ChatP2PData\alpha-invite.json `
+  --operator-config D:\ChatP2PData\operator-config.json `
+  --requester-account-id requester_demo `
+  --credits 10 `
+  --out D:\ChatP2PData\operator-credit-grant
+```
+
+The grant report records the ledger transaction id and balance after the grant, but it does not print invite tokens or the credit grant token. Use `--dry-run` to write the plan without contacting the coordinator.
+
 Open the coordinator dashboard:
 
 ```text

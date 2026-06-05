@@ -166,6 +166,36 @@ def test_chat_ask_cli_parses():
     assert args.job_cost == 2
 
 
+def test_chat_ask_recommends_safe_credit_grant_when_requester_is_empty(tmp_path):
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    server = create_coordinator_http_server(coordinator, host="127.0.0.1", port=0)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    try:
+        host, port = server.server_address
+        report = run_chat_ask(
+            ChatAskConfig(
+                out_dir=tmp_path / "chat-ask",
+                coordinator_url=f"http://{host}:{port}",
+                model="tiny-test-model",
+                prompt="Say hello.",
+                requester_account_id="requester_empty_chat",
+                job_cost=2,
+                timeout_seconds=1,
+            )
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=2)
+
+    assert report["status"] == "fail"
+    assert report["summary"]["recommended_next_action"] == "grant_requester_credits"
+    assert "operator grant-requester-credits" in report["summary"]["suggested_commands"][0]
+    assert "--operator-config <operator-config.json>" in report["summary"]["suggested_commands"][0]
+
+
 def _run_worker_until_one_job(client, worker, errors):
     deadline = time.time() + 5
     while time.time() <= deadline:

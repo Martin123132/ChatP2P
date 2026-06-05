@@ -26,6 +26,7 @@ DEFAULT_MAX_JOB_PAYLOAD_BYTES = 16 * 1024
 class OperatorConfig:
     public_alpha: bool = False
     admission_token: str | None = None
+    credit_grant_token: str | None = None
     max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES
     max_job_payload_bytes: int = DEFAULT_MAX_JOB_PAYLOAD_BYTES
     allowed_job_types: tuple[str, ...] = DEFAULT_ALLOWED_JOB_TYPES
@@ -52,7 +53,11 @@ class OperatorConfig:
 
         config = cls(
             public_alpha=bool(data.get("public_alpha", False)),
-            admission_token=_optional_string(data.get("admission_token")),
+            admission_token=_optional_string(data.get("admission_token"), field_name="admission_token"),
+            credit_grant_token=_optional_string(
+                data.get("credit_grant_token"),
+                field_name="credit_grant_token",
+            ),
             max_request_bytes=int(data.get("max_request_bytes", DEFAULT_MAX_REQUEST_BYTES)),
             max_job_payload_bytes=int(
                 data.get("max_job_payload_bytes", DEFAULT_MAX_JOB_PAYLOAD_BYTES)
@@ -67,13 +72,23 @@ class OperatorConfig:
         *,
         public_alpha: bool | None = None,
         admission_token: str | None = None,
+        credit_grant_token: str | None = None,
         max_request_bytes: int | None = None,
         max_job_payload_bytes: int | None = None,
         allowed_job_types: list[str] | None = None,
     ) -> "OperatorConfig":
         config = OperatorConfig(
             public_alpha=self.public_alpha if public_alpha is None else public_alpha,
-            admission_token=self.admission_token if admission_token is None else _optional_string(admission_token),
+            admission_token=(
+                self.admission_token
+                if admission_token is None
+                else _optional_string(admission_token, field_name="admission_token")
+            ),
+            credit_grant_token=(
+                self.credit_grant_token
+                if credit_grant_token is None
+                else _optional_string(credit_grant_token, field_name="credit_grant_token")
+            ),
             max_request_bytes=self.max_request_bytes if max_request_bytes is None else max_request_bytes,
             max_job_payload_bytes=(
                 self.max_job_payload_bytes
@@ -94,6 +109,8 @@ class OperatorConfig:
             raise ValueError("public_alpha requires an admission_token")
         if self.admission_token and len(self.admission_token) < 12:
             raise ValueError("admission_token must be at least 12 characters")
+        if self.credit_grant_token and len(self.credit_grant_token) < 20:
+            raise ValueError("credit_grant_token must be at least 20 characters")
         if self.max_request_bytes < 1024:
             raise ValueError("max_request_bytes must be at least 1024")
         if self.max_job_payload_bytes < 128:
@@ -120,10 +137,18 @@ class OperatorConfig:
             return False
         return secrets.compare_digest(supplied_token, self.admission_token)
 
+    def credit_grant_token_matches(self, supplied_token: str | None) -> bool:
+        if not self.credit_grant_token:
+            return False
+        if supplied_token is None:
+            return False
+        return secrets.compare_digest(supplied_token, self.credit_grant_token)
+
     def public_summary(self) -> dict[str, Any]:
         return {
             "public_alpha": self.public_alpha,
             "admission_token_required": self.public_alpha,
+            "credit_grant_token_required": bool(self.credit_grant_token),
             "max_request_bytes": self.max_request_bytes,
             "max_job_payload_bytes": self.max_job_payload_bytes,
             "allowed_job_types": list(self.allowed_job_types),
@@ -133,6 +158,7 @@ class OperatorConfig:
         return {
             "public_alpha": self.public_alpha,
             "admission_token": self.admission_token,
+            "credit_grant_token": self.credit_grant_token,
             "max_request_bytes": self.max_request_bytes,
             "max_job_payload_bytes": self.max_job_payload_bytes,
             "allowed_job_types": list(self.allowed_job_types),
@@ -144,10 +170,10 @@ def write_operator_config(path: Path, config: OperatorConfig) -> None:
     path.write_text(json.dumps(config.to_file_dict(), indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _optional_string(value: Any) -> str | None:
+def _optional_string(value: Any, *, field_name: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError("admission_token must be a string")
+        raise ValueError(f"{field_name} must be a string")
     stripped = value.strip()
     return stripped or None

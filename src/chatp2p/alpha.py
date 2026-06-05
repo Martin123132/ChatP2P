@@ -413,6 +413,7 @@ def bootstrap_alpha(
     invite_path: Path,
     coordinator_url: str,
     admission_token: str | None = None,
+    credit_grant_token: str | None = None,
     max_request_bytes: int = 256 * 1024,
     max_job_payload_bytes: int = 16 * 1024,
     allowed_job_types: tuple[str, ...] = DEFAULT_ALLOWED_JOB_TYPES,
@@ -420,9 +421,11 @@ def bootstrap_alpha(
     force: bool = False,
 ) -> dict[str, Any]:
     token = admission_token.strip() if admission_token else generate_admission_token()
+    grant_token = credit_grant_token.strip() if credit_grant_token else generate_admission_token()
     operator_config = OperatorConfig(
         public_alpha=True,
         admission_token=token,
+        credit_grant_token=grant_token,
         max_request_bytes=max_request_bytes,
         max_job_payload_bytes=max_job_payload_bytes,
         allowed_job_types=tuple(allowed_job_types),

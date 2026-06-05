@@ -21,6 +21,15 @@ from .packets import (
 )
 
 
+CREDIT_GRANT_TOKEN_HEADER = "X-ChatP2P-Credit-Grant-Token"
+SAFE_CREDIT_GRANT_REASONS = {
+    "operator_credit_grant",
+    "requester_credit_topup",
+    "dev_credit_grant",
+}
+MAX_CREDIT_GRANT_DELTA = 1_000_000
+
+
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
     body = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
     handler.send_response(status)
@@ -482,6 +491,10 @@ def create_coordinator_http_server(
                 return authorization[7:].strip()
             return None
 
+        def _credit_grant_token(self) -> str | None:
+            token = self.headers.get(CREDIT_GRANT_TOKEN_HEADER)
+            return token.strip() if token else None
+
         def _admission_allowed(self, path: str) -> bool:
             if not config.admission_required_for(path):
                 return True
@@ -494,6 +507,21 @@ def create_coordinator_http_server(
                     "accepted": False,
                     "error": "admission token required",
                     "public_alpha": config.public_summary(),
+                },
+            )
+            return False
+
+        def _credit_grant_allowed(self) -> bool:
+            if config.credit_grant_token_matches(self._credit_grant_token()):
+                return True
+            _json_response(
+                self,
+                403,
+                {
+                    "ok": False,
+                    "accepted": False,
+                    "error": "credit grant token required",
+                    "operator": config.public_summary(),
                 },
             )
             return False
@@ -530,6 +558,68 @@ def create_coordinator_http_server(
                 )
                 return False
             return True
+
+        def _validate_credit_grant(self, request: dict[str, Any]) -> dict[str, Any] | None:
+            account_id = request.get("account_id")
+            if not isinstance(account_id, str) or not account_id.strip():
+                _json_response(self, 400, {"ok": False, "error": "account_id must be a non-empty string"})
+                return None
+
+            account_type = request.get("account_type", "requester")
+            if account_type != "requester":
+                _json_response(
+                    self,
+                    403,
+                    {
+                        "ok": False,
+                        "error": "operator credit grants are limited to requester accounts",
+                    },
+                )
+                return None
+
+            delta = request.get("delta", request.get("credits"))
+            if isinstance(delta, bool) or not isinstance(delta, int):
+                _json_response(self, 400, {"ok": False, "error": "delta must be a positive integer"})
+                return None
+            if delta < 1:
+                _json_response(self, 400, {"ok": False, "error": "delta must be at least 1"})
+                return None
+            if delta > MAX_CREDIT_GRANT_DELTA:
+                _json_response(
+                    self,
+                    400,
+                    {
+                        "ok": False,
+                        "error": f"delta exceeds max grant size ({MAX_CREDIT_GRANT_DELTA})",
+                        "max_delta": MAX_CREDIT_GRANT_DELTA,
+                    },
+                )
+                return None
+
+            reason = request.get("reason", "operator_credit_grant")
+            if reason not in SAFE_CREDIT_GRANT_REASONS:
+                _json_response(
+                    self,
+                    400,
+                    {
+                        "ok": False,
+                        "error": "reason is not allowed for operator credit grants",
+                        "allowed_reasons": sorted(SAFE_CREDIT_GRANT_REASONS),
+                    },
+                )
+                return None
+
+            transaction_id = request.get("transaction_id")
+            if transaction_id is not None and not isinstance(transaction_id, str):
+                _json_response(self, 400, {"ok": False, "error": "transaction_id must be a string"})
+                return None
+
+            return {
+                "account_id": account_id.strip(),
+                "delta": delta,
+                "reason": reason,
+                "transaction_id": transaction_id.strip() if isinstance(transaction_id, str) else None,
+            }
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
@@ -597,6 +687,44 @@ def create_coordinator_http_server(
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
+
+            if parsed.path == "/operator/credits/grant":
+                if not self._credit_grant_allowed():
+                    return
+                request = self._read_json_or_reject()
+                if request is None:
+                    return
+                grant = self._validate_credit_grant(request)
+                if grant is None:
+                    return
+                try:
+                    with lock:
+                        entry = coordinator.apply_credit_delta(
+                            account_id=grant["account_id"],
+                            account_type="requester",
+                            delta=grant["delta"],
+                            reason=grant["reason"],
+                            transaction_id=grant["transaction_id"],
+                            metadata={"source": "operator_grant_requester_credits"},
+                        )
+                        balance = coordinator.credits.get(grant["account_id"], 0)
+                except ValueError as exc:
+                    _json_response(self, 400, {"ok": False, "granted": False, "error": str(exc)})
+                    return
+                _json_response(
+                    self,
+                    201,
+                    {
+                        "ok": True,
+                        "granted": True,
+                        "account_id": grant["account_id"],
+                        "account_type": "requester",
+                        "delta": grant["delta"],
+                        "balance": balance,
+                        "entry": entry.to_dict(),
+                    },
+                )
+                return
 
             if parsed.path == "/nodes/register":
                 if not self._admission_allowed(parsed.path):

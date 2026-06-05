@@ -82,6 +82,14 @@ from .operator_actions import (
     write_operator_action_queue,
 )
 from .operator_console import OperatorConsoleConfig, format_operator_console_summary, run_operator_console
+from .operator_credits import (
+    OperatorCreditsConfig,
+    OperatorGrantRequesterCreditsConfig,
+    format_operator_credits_summary,
+    format_operator_grant_requester_credits_summary,
+    run_operator_credits,
+    run_operator_grant_requester_credits,
+)
 from .operator_daily import OperatorDailyCheckConfig, format_operator_daily_check_summary, run_operator_daily_check
 from .operator_self_heal import (
     OperatorSelfHealConfig,
@@ -220,6 +228,7 @@ def _operator_config_from_args(args: argparse.Namespace) -> OperatorConfig:
     return config.with_overrides(
         public_alpha=public_alpha,
         admission_token=args.admission_token,
+        credit_grant_token=getattr(args, "credit_grant_token", None),
         max_request_bytes=args.max_request_bytes,
         max_job_payload_bytes=args.max_job_payload_bytes,
         allowed_job_types=args.allowed_job_type,
@@ -453,6 +462,58 @@ def operator_privacy_scan_command(args: argparse.Namespace) -> None:
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     if not report["ok"]:
+        raise SystemExit(1)
+
+
+def operator_credits_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_operator_credits(
+            OperatorCreditsConfig(
+                out_dir=Path(args.out),
+                coordinator_url=args.coordinator,
+                invite_path=Path(args.invite) if args.invite else None,
+                admission_token=args.admission_token,
+                requester_account_id=args.requester_account_id,
+                min_requester_balance=args.min_requester_balance,
+                client_timeout_seconds=args.client_timeout_seconds,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_operator_credits_summary(report))
+    if report["status"] == "fail":
+        raise SystemExit(1)
+
+
+def operator_grant_requester_credits_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_operator_grant_requester_credits(
+            OperatorGrantRequesterCreditsConfig(
+                out_dir=Path(args.out),
+                coordinator_url=args.coordinator,
+                invite_path=Path(args.invite) if args.invite else None,
+                operator_config_path=Path(args.operator_config) if args.operator_config else None,
+                credit_grant_token=args.credit_grant_token,
+                requester_account_id=args.requester_account_id,
+                credits=args.credits,
+                reason=args.reason,
+                transaction_id=args.transaction_id,
+                dry_run=args.dry_run,
+                client_timeout_seconds=args.client_timeout_seconds,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_operator_grant_requester_credits_summary(report))
+    if report["status"] == "fail":
         raise SystemExit(1)
 
 
@@ -1712,6 +1773,7 @@ def write_operator_config_command(args: argparse.Namespace) -> None:
     config = OperatorConfig(
         public_alpha=True,
         admission_token=args.admission_token,
+        credit_grant_token=args.credit_grant_token,
         max_request_bytes=args.max_request_bytes,
         max_job_payload_bytes=args.max_job_payload_bytes,
         allowed_job_types=tuple(args.allowed_job_type or OperatorConfig.default().allowed_job_types),
@@ -1905,6 +1967,7 @@ def bootstrap_alpha_command(args: argparse.Namespace) -> None:
             invite_path=Path(args.invite),
             coordinator_url=args.coordinator_url,
             admission_token=args.admission_token,
+            credit_grant_token=args.credit_grant_token,
             max_request_bytes=args.max_request_bytes,
             max_job_payload_bytes=args.max_job_payload_bytes,
             allowed_job_types=tuple(args.allowed_job_type or OperatorConfig.default().allowed_job_types),
@@ -3439,6 +3502,11 @@ def build_parser() -> argparse.ArgumentParser:
     operator_config_parser.add_argument("--output", required=True, help="Path for operator config JSON")
     operator_config_parser.add_argument("--admission-token", required=True, help="Shared admission token")
     operator_config_parser.add_argument(
+        "--credit-grant-token",
+        default=None,
+        help="Optional operator-only token for guarded requester credit grants",
+    )
+    operator_config_parser.add_argument(
         "--max-request-bytes",
         default=256 * 1024,
         type=int,
@@ -3471,6 +3539,90 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also fail on tracked provider-config JSON filenames",
     )
     privacy_scan_parser.set_defaults(func=operator_privacy_scan_command)
+
+    operator_credits_parser = operator_subcommands.add_parser(
+        "credits",
+        help="Inspect requester and worker credit balances from a coordinator ledger",
+    )
+    operator_credits_parser.add_argument(
+        "--out",
+        default=".mesh/operator-credits",
+        help="Output directory for operator-credits.json and .md",
+    )
+    operator_credits_parser.add_argument(
+        "--coordinator",
+        default=None,
+        help="Coordinator base URL. Defaults to invite coordinator or http://127.0.0.1:8765",
+    )
+    operator_credits_parser.add_argument("--invite", default=None, help="Optional alpha invite JSON for coordinator/auth")
+    operator_credits_parser.add_argument("--admission-token", default=None, help="Admission token for public alpha coordinators")
+    operator_credits_parser.add_argument(
+        "--requester-account-id",
+        default=None,
+        help="Optional requester account to highlight",
+    )
+    operator_credits_parser.add_argument(
+        "--min-requester-balance",
+        default=1,
+        type=int,
+        help="Minimum highlighted requester balance before recommending a grant",
+    )
+    operator_credits_parser.add_argument(
+        "--client-timeout-seconds",
+        default=10.0,
+        type=float,
+        help="Seconds to wait for each coordinator HTTP request",
+    )
+    operator_credits_parser.add_argument("--json", action="store_true", help="Print the full JSON credits report")
+    operator_credits_parser.set_defaults(func=operator_credits_command)
+
+    operator_grant_credits_parser = operator_subcommands.add_parser(
+        "grant-requester-credits",
+        help="Grant requester credits through the guarded operator-only endpoint",
+    )
+    operator_grant_credits_parser.add_argument(
+        "--out",
+        default=".mesh/operator-credit-grant",
+        help="Output directory for grant-requester-credits.json and .md",
+    )
+    operator_grant_credits_parser.add_argument(
+        "--coordinator",
+        default=None,
+        help="Coordinator base URL. Defaults to invite coordinator or http://127.0.0.1:8765",
+    )
+    operator_grant_credits_parser.add_argument("--invite", default=None, help="Optional alpha invite JSON for coordinator URL")
+    operator_grant_credits_parser.add_argument(
+        "--operator-config",
+        default=None,
+        help="Private operator config JSON containing credit_grant_token",
+    )
+    operator_grant_credits_parser.add_argument(
+        "--credit-grant-token",
+        default=None,
+        help="Operator-only credit grant token. Prefer --operator-config for local use.",
+    )
+    operator_grant_credits_parser.add_argument(
+        "--requester-account-id",
+        required=True,
+        help="Requester account to credit",
+    )
+    operator_grant_credits_parser.add_argument("--credits", required=True, type=int, help="Positive credits to grant")
+    operator_grant_credits_parser.add_argument(
+        "--reason",
+        choices=["operator_credit_grant", "requester_credit_topup", "dev_credit_grant"],
+        default="operator_credit_grant",
+        help="Ledger reason for this grant",
+    )
+    operator_grant_credits_parser.add_argument("--transaction-id", default=None, help="Optional idempotency key")
+    operator_grant_credits_parser.add_argument("--dry-run", action="store_true", help="Write a plan without sending the grant")
+    operator_grant_credits_parser.add_argument(
+        "--client-timeout-seconds",
+        default=10.0,
+        type=float,
+        help="Seconds to wait for each coordinator HTTP request",
+    )
+    operator_grant_credits_parser.add_argument("--json", action="store_true", help="Print the full JSON grant report")
+    operator_grant_credits_parser.set_defaults(func=operator_grant_requester_credits_command)
 
     operator_console_parser = operator_subcommands.add_parser(
         "console",
@@ -4360,6 +4512,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--admission-token",
         default=None,
         help="Shared admission token. Generated when omitted",
+    )
+    bootstrap_alpha_parser.add_argument(
+        "--credit-grant-token",
+        default=None,
+        help="Operator-only requester credit grant token. Generated in the private config when omitted.",
     )
     bootstrap_alpha_parser.add_argument(
         "--max-request-bytes",
@@ -5319,6 +5476,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Require admission token for node registration and job creation",
     )
     serve_parser.add_argument("--admission-token", default=None, help="Shared admission token for public alpha")
+    serve_parser.add_argument(
+        "--credit-grant-token",
+        default=None,
+        help="Operator-only token for guarded requester credit grants",
+    )
     serve_parser.add_argument(
         "--max-request-bytes",
         default=None,

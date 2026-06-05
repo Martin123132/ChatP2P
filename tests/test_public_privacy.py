@@ -74,6 +74,18 @@ def test_privacy_scan_redacts_credential_matches(tmp_path):
     assert token not in str(report)
 
 
+def test_privacy_scan_redacts_credit_grant_token_matches(tmp_path):
+    token = "G" * 32
+    (tmp_path / "notes.txt").write_text(f'{{"credit_grant_token": "{token}"}}\n', encoding="utf-8")
+
+    report = run_public_privacy_scan(PrivacyScanConfig(root=tmp_path))
+
+    assert report["status"] == "fail"
+    assert report["findings"][0]["pattern"] == "long_credit_grant_token"
+    assert report["findings"][0]["match"] == "<redacted>"
+    assert token not in str(report)
+
+
 def test_privacy_scan_fails_on_private_runtime_filenames(tmp_path):
     (tmp_path / "alpha-invite.json").write_text("{}", encoding="utf-8")
 

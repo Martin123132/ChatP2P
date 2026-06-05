@@ -32,11 +32,20 @@ class CoordinatorClient:
         self.admission_token = admission_token
         self.timeout_seconds = timeout_seconds
 
-    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         body = None if payload is None else json.dumps(payload).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if self.admission_token:
             headers["X-ChatP2P-Admission-Token"] = self.admission_token
+        if extra_headers:
+            headers.update(extra_headers)
         request = Request(
             f"{self.base_url}{path}",
             data=body,
@@ -69,6 +78,30 @@ class CoordinatorClient:
 
     def ledger(self) -> dict[str, Any]:
         return self._request("GET", "/api/ledger")
+
+    def grant_requester_credits(
+        self,
+        *,
+        credit_grant_token: str,
+        account_id: str,
+        credits: int,
+        reason: str = "operator_credit_grant",
+        transaction_id: str | None = None,
+    ) -> dict[str, Any]:
+        request: dict[str, Any] = {
+            "account_id": account_id,
+            "account_type": "requester",
+            "delta": int(credits),
+            "reason": reason,
+        }
+        if transaction_id is not None:
+            request["transaction_id"] = transaction_id
+        return self._request(
+            "POST",
+            "/operator/credits/grant",
+            request,
+            extra_headers={"X-ChatP2P-Credit-Grant-Token": credit_grant_token},
+        )
 
     def register(self, registration: NodeRegistration) -> dict[str, Any]:
         return self._request("POST", "/nodes/register", registration.to_dict())

@@ -323,6 +323,7 @@ def _summary(
         "requester_balance_after": balances.get(config.requester_account_id),
         "worker_balance_after": balances.get(worker_id) if worker_id else None,
         "recommended_next_action": _recommended_next_action(status=status, errors=errors),
+        "suggested_commands": _suggested_commands(config=config, status=status, errors=errors),
     }
 
 
@@ -333,7 +334,7 @@ def _recommended_next_action(*, status: str, errors: list[str]) -> str:
         return "wait_for_worker_result"
     joined = "\n".join(errors).lower()
     if "negative" in joined or "credit" in joined:
-        return "fund_requester_account"
+        return "grant_requester_credits"
     if "timeout" in joined or "did not verify" in joined:
         return "check_live_ollama_workers"
     if "403" in joined or "forbidden" in joined:
@@ -341,6 +342,23 @@ def _recommended_next_action(*, status: str, errors: list[str]) -> str:
     if "connection" in joined or "refused" in joined or "reachable" in joined:
         return "check_coordinator_reachability"
     return "inspect_chat_ask_report"
+
+
+def _suggested_commands(*, config: ChatAskConfig, status: str, errors: list[str]) -> list[str]:
+    if _recommended_next_action(status=status, errors=errors) != "grant_requester_credits":
+        return []
+    coordinator_arg = (
+        f"--coordinator {config.coordinator_url}"
+        if config.coordinator_url
+        else "--invite <alpha-invite.json>"
+    )
+    return [
+        "python -m chatp2p.cli operator grant-requester-credits "
+        f"{coordinator_arg} "
+        "--operator-config <operator-config.json> "
+        f"--requester-account-id {config.requester_account_id} "
+        f"--credits {config.job_cost}"
+    ]
 
 
 def _find_job(snapshot: dict[str, Any] | None, job_id: str) -> dict[str, Any] | None:
