@@ -26,6 +26,7 @@ from .runtime_metadata import collect_software_metadata, software_metadata_publi
 
 
 CHAT_GATEWAY_REPORT_SCHEMA = "chatp2p.chat-gateway-report.v1"
+CHAT_GATEWAY_TRANSCRIPT_SCHEMA = "chatp2p.chat-gateway-transcript.v1"
 DEFAULT_CHAT_GATEWAY_HOST = "127.0.0.1"
 DEFAULT_CHAT_GATEWAY_PORT = 8787
 DEFAULT_CHAT_GATEWAY_MAX_REQUEST_BYTES = 16_384
@@ -81,6 +82,9 @@ def create_chat_gateway_server(config: ChatGatewayConfig) -> ThreadingHTTPServer
                 return
             if parsed.path == "/api/session/status":
                 _json_response(self, 200, _status_payload(config))
+                return
+            if parsed.path == "/api/session/transcript":
+                _json_response(self, 200, _transcript_payload(config))
                 return
             _json_response(self, 404, {"ok": False, "status": "fail", "error": "not found"})
 
@@ -146,6 +150,7 @@ def _health_payload(*, config: dict[str, Any], software: dict[str, Any]) -> dict
         "endpoints": {
             "health": "/health",
             "session_status": "/api/session/status",
+            "session_transcript": "/api/session/transcript",
             "session_sync": "/api/session/sync",
             "session_resume_dry_run": "/api/session/resume-dry-run",
             "chat_continue": "/api/chat/continue",
@@ -186,6 +191,55 @@ def _status_payload(config: ChatGatewayConfig) -> dict[str, Any]:
         }
     except Exception as exc:
         return _error_payload(f"{type(exc).__name__}: {exc}")
+
+
+def _transcript_payload(config: ChatGatewayConfig) -> dict[str, Any]:
+    session_path = config.out_dir.expanduser().resolve() / "chat-session.json"
+    generated_at = datetime.now(timezone.utc).isoformat()
+    if not session_path.exists():
+        return {
+            "schema": CHAT_GATEWAY_TRANSCRIPT_SCHEMA,
+            "ok": True,
+            "status": "no_session",
+            "generated_at": generated_at,
+            "session_id": config.session_id,
+            "summary": {
+                "status": "no_session",
+                "turn_count": 0,
+                "completed_turns": 0,
+                "submitted_turns": 0,
+                "failed_turns": 0,
+                "recommended_next_action": "continue_chat_session",
+            },
+            "turns": [],
+            "artifacts": {"session_json": str(session_path)},
+        }
+    try:
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return _error_payload(f"{type(exc).__name__}: {exc}")
+    if session.get("session_id") != config.session_id:
+        return _error_payload("existing chat session id does not match --session-id")
+
+    turns = [_transcript_turn(turn) for turn in session.get("turns") or []]
+    summary = dict(session.get("summary") or {})
+    summary.setdefault("status", session.get("status"))
+    summary["turn_count"] = len(turns)
+    summary.setdefault("completed_turns", len([turn for turn in turns if turn.get("status") == "pass"]))
+    summary.setdefault("submitted_turns", len([turn for turn in turns if turn.get("status") == "submitted"]))
+    summary.setdefault("failed_turns", len([turn for turn in turns if turn.get("status") == "fail"]))
+    summary.setdefault("recommended_next_action", "continue_chat_session")
+    return {
+        "schema": CHAT_GATEWAY_TRANSCRIPT_SCHEMA,
+        "ok": bool(session.get("ok", True)),
+        "status": str(session.get("status") or summary.get("status") or "unknown"),
+        "generated_at": generated_at,
+        "session_id": config.session_id,
+        "title": session.get("title"),
+        "summary": summary,
+        "turns": turns,
+        "artifacts": {"session_json": str(session_path)},
+    }
 
 
 def _sync_payload(config: ChatGatewayConfig) -> dict[str, Any]:
@@ -330,10 +384,12 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
         node.className = "turn";
         const meta = document.createElement("div");
         meta.className = "meta";
-        meta.textContent = `${{turn.turn_id || ""}} | ${{turn.status || ""}}`;
-        const body = document.createElement("div");
-        body.textContent = turn.prompt_preview || turn.prompt || "";
-        node.append(meta, body);
+        meta.textContent = `${{turn.turn_id || ""}} | ${{turn.status || ""}} | ${{turn.job_status || ""}}`;
+        const user = document.createElement("div");
+        user.textContent = `You: ${{turn.prompt || turn.prompt_preview || ""}}`;
+        const assistant = document.createElement("div");
+        assistant.textContent = turn.answer ? `Assistant: ${{turn.answer}}` : "";
+        node.append(meta, user, assistant);
         turnsEl.append(node);
       }});
     }}
@@ -346,8 +402,9 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
         setBusy(false);
       }}
     }}
-    document.querySelector("#statusButton").onclick = () => request("/api/session/status");
-    document.querySelector("#syncButton").onclick = () => request("/api/session/sync", {{ method: "POST" }});
+    async function refreshTranscript() {{ await request("/api/session/transcript"); }}
+    document.querySelector("#statusButton").onclick = refreshTranscript;
+    document.querySelector("#syncButton").onclick = async () => {{ await request("/api/session/sync", {{ method: "POST" }}); await refreshTranscript(); }};
     document.querySelector("#resumeButton").onclick = () => request("/api/session/resume-dry-run", {{ method: "POST" }});
     document.querySelector("#chatForm").onsubmit = async (event) => {{
       event.preventDefault();
@@ -359,8 +416,9 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
         headers: {{ "Content-Type": "application/json" }},
         body: JSON.stringify({{ prompt }})
       }});
+      await refreshTranscript();
     }};
-    request("/api/session/status");
+    refreshTranscript();
   </script>
 </body>
 </html>
@@ -439,6 +497,35 @@ def _redact_value(value: Any, *, secrets: list[str]) -> Any:
             redacted = redacted.replace(secret, "<redacted>")
         return redacted
     return value
+
+
+def _transcript_turn(turn: dict[str, Any]) -> dict[str, Any]:
+    worker_node_id = turn.get("worker_node_id")
+    return {
+        "turn_id": turn.get("turn_id"),
+        "turn_index": turn.get("turn_index"),
+        "created_at": turn.get("created_at"),
+        "status": turn.get("status"),
+        "prompt": turn.get("prompt"),
+        "answer": turn.get("answer"),
+        "model": turn.get("model"),
+        "job_id": turn.get("job_id"),
+        "job_status": turn.get("job_status"),
+        "worker_node_id_redacted": _redact_node_id(worker_node_id),
+        "requester_balance_after": turn.get("requester_balance_after"),
+        "recommended_next_action": turn.get("recommended_next_action"),
+        "retry_of_turn_id": turn.get("retry_of_turn_id"),
+        "retry_attempt": turn.get("retry_attempt"),
+        "errors": list(turn.get("errors") or []),
+    }
+
+
+def _redact_node_id(node_id: Any) -> str | None:
+    if not isinstance(node_id, str) or not node_id:
+        return None
+    if len(node_id) <= 12:
+        return node_id
+    return f"{node_id[:12]}..."
 
 
 def _safe_config(config: ChatGatewayConfig) -> dict[str, Any]:

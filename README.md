@@ -378,7 +378,7 @@ python -m chatp2p.cli chat gateway `
   --port 8787
 ```
 
-The gateway binds to `127.0.0.1`, serves a tiny manual test page at `/`, and exposes local JSON endpoints for health, session status, session sync, resume dry-run, and guarded chat continuation. It reuses the same `chat continue` safety path, so unresolved turns still block new credit spend.
+The gateway binds to `127.0.0.1`, serves a tiny manual test page at `/`, and exposes local JSON endpoints for health, session status, privacy-safe transcript, session sync, resume dry-run, and guarded chat continuation. It reuses the same `chat continue` safety path, so unresolved turns still block new credit spend.
 
 Inspect a session without creating a job or spending credits:
 

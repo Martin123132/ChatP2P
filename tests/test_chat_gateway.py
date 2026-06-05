@@ -5,6 +5,7 @@ from urllib.request import Request, urlopen
 
 from chatp2p.chat_gateway import (
     CHAT_GATEWAY_REPORT_SCHEMA,
+    CHAT_GATEWAY_TRANSCRIPT_SCHEMA,
     DEFAULT_CHAT_GATEWAY_HOST,
     DEFAULT_CHAT_GATEWAY_PORT,
     ChatGatewayConfig,
@@ -36,6 +37,8 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     try:
         health = _get_json(f"{base_url}/health")
         status = _get_json(f"{base_url}/api/session/status")
+        transcript = _get_json(f"{base_url}/api/session/transcript")
+        page = _get_text(f"{base_url}/")
     finally:
         server.shutdown()
         server.server_close()
@@ -45,9 +48,14 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert health["status"] == "pass"
     assert health["config"]["host"] == DEFAULT_CHAT_GATEWAY_HOST
     assert health["config"]["auth"]["admission_token_present"] is True
+    assert health["endpoints"]["session_transcript"] == "/api/session/transcript"
     assert status["status"] == "no_session"
     assert status["summary"]["recommended_next_action"] == "continue_chat_session"
-    assert token not in json.dumps({"health": health, "status": status})
+    assert transcript["schema"] == CHAT_GATEWAY_TRANSCRIPT_SCHEMA
+    assert transcript["status"] == "no_session"
+    assert transcript["turns"] == []
+    assert "/api/session/transcript" in page
+    assert token not in json.dumps({"health": health, "status": status, "transcript": transcript})
 
 
 def test_chat_gateway_continue_creates_funded_turn(tmp_path):
@@ -99,6 +107,7 @@ def test_chat_gateway_continue_creates_funded_turn(tmp_path):
         try:
             report = _post_json(f"{gateway_url}/api/chat/continue", {"prompt": "Hello gateway"})
             status = _get_json(f"{gateway_url}/api/session/status")
+            transcript = _get_json(f"{gateway_url}/api/session/transcript")
         finally:
             gateway_server.shutdown()
             gateway_server.server_close()
@@ -115,7 +124,15 @@ def test_chat_gateway_continue_creates_funded_turn(tmp_path):
     assert report["summary"]["latest_turn"]["answer"] == "Gateway answer."
     assert status["status"] == "pass"
     assert status["summary"]["turn_count"] == 1
-    assert "alpha-token" not in json.dumps({"report": report, "status": status})
+    assert transcript["schema"] == CHAT_GATEWAY_TRANSCRIPT_SCHEMA
+    assert transcript["status"] == "pass"
+    assert transcript["summary"]["turn_count"] == 1
+    assert transcript["turns"][0]["prompt"] == "Hello gateway"
+    assert transcript["turns"][0]["answer"] == "Gateway answer."
+    assert transcript["turns"][0]["job_status"] == "verified"
+    assert transcript["turns"][0]["worker_node_id_redacted"].endswith("...")
+    assert worker_identity.node_id not in json.dumps(transcript)
+    assert "alpha-token" not in json.dumps({"report": report, "status": status, "transcript": transcript})
 
 
 def test_chat_gateway_continue_blocks_unresolved_turn_without_spend(tmp_path):
@@ -134,6 +151,7 @@ def test_chat_gateway_continue_blocks_unresolved_turn_without_spend(tmp_path):
     )
     try:
         report = _post_json(f"{base_url}/api/chat/continue", {"prompt": "Do not spend"})
+        transcript = _get_json(f"{base_url}/api/session/transcript")
     finally:
         server.shutdown()
         server.server_close()
@@ -143,6 +161,10 @@ def test_chat_gateway_continue_blocks_unresolved_turn_without_spend(tmp_path):
     assert report["status"] == "blocked"
     assert report["summary"]["turn_created"] is False
     assert report["summary"]["blocked_reason"] == "unresolved_session_turns"
+    assert transcript["status"] == "fail"
+    assert transcript["summary"]["turn_count"] == 2
+    assert transcript["turns"][1]["status"] == "fail"
+    assert transcript["turns"][1]["answer"] is None
     assert after == before
 
 
@@ -227,6 +249,11 @@ def _start_gateway(config):
 
 def _get_json(url):
     return _request_json(url)
+
+
+def _get_text(url):
+    with urlopen(url, timeout=10) as response:
+        return response.read().decode("utf-8")
 
 
 def _post_json(url, payload):
