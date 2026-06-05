@@ -301,6 +301,8 @@ Credit Ledger V1 records why credits moved, not just each node's current balance
 
 Requester-funded jobs can include `requester_account_id` and `job_cost` when created through `POST /jobs` or `CoordinatorClient.create_job(...)`. The coordinator reserves the job cost before the job enters the queue; if the requester account lacks credits, creation fails and no worker can lease the job. Worker rewards are still recorded separately when an accepted result is submitted.
 
+If a requester-funded job expires with no accepted result, the coordinator records a separate `job_cost_refunded` ledger entry and restores the reserved credits. The original `job_cost_reserved` entry stays in the audit trail. Verified jobs are not refunded.
+
 Chat Inference V1 uses the funded-job path with `inference.chat.v1`. It is Ollama-backed in this phase: workers that advertise the requested local model can lease the job, run the chat messages as a local prompt, return the answer, and earn the configured reward. Create one from the CLI with:
 
 ```bash

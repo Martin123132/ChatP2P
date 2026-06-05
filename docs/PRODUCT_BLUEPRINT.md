@@ -64,7 +64,9 @@ V1 records auditable ledger entries for accepted worker results:
 
 The current node `credits` balance remains available for old clients, but the ledger is the source to build future spend, reserve, refund, and dispute flows. The next inference marketplace milestone should add requester accounts and job-cost reservation before a chat job is leased.
 
-Requester Reservation V1 adds that first spend path: a job may declare `requester_account_id` and `job_cost`, the coordinator debits `job_cost_reserved` before the job is queued, and accepted worker output still earns a separate `worker_result_reward`. Refunds and dispute settlement remain future work.
+Requester Reservation V1 adds that first spend path: a job may declare `requester_account_id` and `job_cost`, the coordinator debits `job_cost_reserved` before the job is queued, and accepted worker output still earns a separate `worker_result_reward`. Dispute settlement remains future work.
+
+Requester Refund V1 closes the simplest bad-spend case: if a funded job expires without any accepted result, the coordinator adds `job_cost_refunded` and returns the reserved credits. Refunds are ledger entries rather than history rewrites, so reservation, failure, and settlement stay visible.
 
 Chat Inference V1 uses `inference.chat.v1` as the first real product loop for credits. A requester reserves credits, the coordinator routes the chat job to an Ollama-capable worker with the requested model, and the accepted answer earns the worker reward. This is the bridge between the ledger and the future chat UI; it is still local-model infrastructure, not a hosted model marketplace yet.
 

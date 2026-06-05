@@ -752,6 +752,33 @@ class Coordinator:
             },
         )
 
+    def _refund_expired_job_cost(self, job: JobPacket, results: list[JobResult]) -> CreditLedgerEntry | None:
+        if results:
+            return None
+        requester_account_id = job.resource_requirements.get("requester_account_id")
+        job_cost = job.resource_requirements.get("job_cost")
+        if job.resource_requirements.get("credit_policy") != "reserve_on_create":
+            return None
+        if not isinstance(requester_account_id, str) or not requester_account_id.strip():
+            return None
+        if not isinstance(job_cost, int) or isinstance(job_cost, bool) or job_cost < 1:
+            return None
+        return self.apply_credit_delta(
+            account_id=requester_account_id,
+            account_type="requester",
+            delta=job_cost,
+            reason="job_cost_refunded",
+            transaction_id=f"credit_txn_job_cost_refunded_{job.job_id}_{requester_account_id}",
+            job_id=job.job_id,
+            counterparty_id=job.coordinator_id,
+            metadata={
+                "job_type": job.job_type,
+                "model_id": job.model_id,
+                "job_cost": job_cost,
+                "refund_reason": "expired_without_result",
+            },
+        )
+
     def touch_node(self, node_id: str, seen_at: float | None = None) -> bool:
         if node_id not in self.known_nodes:
             return False
@@ -1280,6 +1307,9 @@ class Coordinator:
             status = "leased"
         else:
             status = "queued"
+
+        if status == "expired":
+            self._refund_expired_job_cost(job, results)
 
         return {
             "status": status,

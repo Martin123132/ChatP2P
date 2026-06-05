@@ -137,6 +137,76 @@ def test_requester_funded_job_refuses_insufficient_credits():
     assert coordinator.credit_ledger_summary()["entries"] == 0
 
 
+def test_requester_job_cost_refunded_when_job_expires_without_result(monkeypatch):
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    requester_id = "requester_refund_account"
+    coordinator.apply_credit_delta(
+        account_id=requester_id,
+        account_type="requester",
+        delta=3,
+        reason="operator_credit_grant",
+    )
+    job = coordinator.create_job(
+        job_type="inference.echo.v1",
+        payload={"prompt": "refund if nobody answers"},
+        requester_account_id=requester_id,
+        job_cost=2,
+        ttl_seconds=1,
+    )
+
+    assert coordinator.credits[requester_id] == 1
+
+    monkeypatch.setattr("chatp2p.coordinator.time.time", lambda: job.deadline + 1)
+    summary = coordinator.verification_summary(job.job_id)
+    second_summary = coordinator.verification_summary(job.job_id)
+
+    assert summary["status"] == "expired"
+    assert second_summary["status"] == "expired"
+    assert coordinator.credits[requester_id] == 3
+    ledger = coordinator.credit_ledger_snapshot()
+    assert [entry["reason"] for entry in ledger["recent_entries"]] == [
+        "operator_credit_grant",
+        "job_cost_reserved",
+        "job_cost_refunded",
+    ]
+    refund = ledger["recent_entries"][-1]
+    assert refund["delta"] == 2
+    assert refund["balance_after"] == 3
+    assert refund["job_id"] == job.job_id
+    assert refund["metadata"]["refund_reason"] == "expired_without_result"
+
+
+def test_verified_requester_job_is_not_refunded(monkeypatch):
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    requester_id = "requester_verified_no_refund"
+    worker_identity = NodeIdentity.generate(prefix="worker")
+    worker = WorkerNode(identity=worker_identity)
+    coordinator.register_node(worker_identity.public(), capabilities=worker.capabilities())
+    coordinator.apply_credit_delta(
+        account_id=requester_id,
+        account_type="requester",
+        delta=3,
+        reason="operator_credit_grant",
+    )
+    job = coordinator.create_job(
+        job_type="inference.echo.v1",
+        payload={"prompt": "answer before deadline"},
+        requester_account_id=requester_id,
+        job_cost=2,
+        reward=1,
+    )
+    leased = coordinator.lease_next_job(worker_identity.node_id)
+    assert leased is not None
+    assert coordinator.submit_result(worker.run_job(leased))
+
+    monkeypatch.setattr("chatp2p.coordinator.time.time", lambda: job.deadline + 1)
+    assert coordinator.verification_summary(job.job_id)["status"] == "verified"
+    reasons = [entry["reason"] for entry in coordinator.credit_ledger_entries(limit=None)]
+    assert reasons == ["operator_credit_grant", "job_cost_reserved", "worker_result_reward"]
+    assert "job_cost_refunded" not in reasons
+    assert coordinator.credits[requester_id] == 1
+
+
 def test_credit_ledger_persists_across_restart(tmp_path):
     db_path = tmp_path / "coordinator.sqlite3"
     coordinator_identity = NodeIdentity.generate(prefix="coordinator")
@@ -197,3 +267,41 @@ def test_requester_reservation_persists_with_job_metadata(tmp_path):
     assert summary["requester_account_id"] == requester_id
     assert summary["job_cost"] == 2
     assert summary["credit_policy"] == "reserve_on_create"
+
+
+def test_requester_refund_persists_across_restart(tmp_path, monkeypatch):
+    db_path = tmp_path / "coordinator.sqlite3"
+    coordinator_identity = NodeIdentity.generate(prefix="coordinator")
+    requester_id = "requester_refund_persist"
+    coordinator = Coordinator(
+        identity=coordinator_identity,
+        store=SQLiteCoordinatorStore(db_path),
+    )
+    coordinator.apply_credit_delta(
+        account_id=requester_id,
+        account_type="requester",
+        delta=3,
+        reason="operator_credit_grant",
+    )
+    job = coordinator.create_job(
+        job_type="inference.echo.v1",
+        payload={"prompt": "persist refund"},
+        requester_account_id=requester_id,
+        job_cost=2,
+        ttl_seconds=1,
+    )
+
+    monkeypatch.setattr("chatp2p.coordinator.time.time", lambda: job.deadline + 1)
+    assert coordinator.verification_summary(job.job_id)["status"] == "expired"
+
+    restarted = Coordinator(
+        identity=coordinator_identity,
+        store=SQLiteCoordinatorStore(db_path),
+    )
+
+    assert restarted.credits[requester_id] == 3
+    assert [entry["reason"] for entry in restarted.credit_ledger_entries(limit=None)] == [
+        "operator_credit_grant",
+        "job_cost_reserved",
+        "job_cost_refunded",
+    ]
