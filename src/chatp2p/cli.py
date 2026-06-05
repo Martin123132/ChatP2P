@@ -59,6 +59,13 @@ from .chat_smoke import (
     run_funded_chat_smoke,
 )
 from .chat_request import ChatAskConfig, format_chat_ask_summary, run_chat_ask
+from .chat_gateway import (
+    DEFAULT_CHAT_GATEWAY_HOST,
+    DEFAULT_CHAT_GATEWAY_MAX_REQUEST_BYTES,
+    DEFAULT_CHAT_GATEWAY_PORT,
+    ChatGatewayConfig,
+    run_chat_gateway,
+)
 from .chat_session import (
     ChatSessionConfig,
     ChatSessionContinueConfig,
@@ -578,6 +585,38 @@ def run_chat_repl_command(args: argparse.Namespace) -> None:
         print(format_chat_repl_summary(report))
     if report["status"] == "fail":
         raise SystemExit(1)
+
+
+def run_chat_gateway_command(args: argparse.Namespace) -> None:
+    try:
+        run_chat_gateway(
+            ChatGatewayConfig(
+                out_dir=Path(args.out),
+                session_id=args.session_id,
+                title=args.title,
+                coordinator_url=args.coordinator,
+                invite_path=Path(args.invite) if args.invite else None,
+                admission_token=args.admission_token,
+                model=args.model,
+                system=args.system,
+                requester_account_id=args.requester_account_id,
+                job_cost=args.job_cost,
+                reward=args.reward,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                ttl_seconds=args.ttl_seconds,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval=args.poll_interval,
+                no_wait=args.no_wait,
+                client_timeout_seconds=args.client_timeout_seconds,
+                max_context_turns=args.max_context_turns,
+                host=args.host,
+                port=args.port,
+                max_request_bytes=args.max_request_bytes,
+            )
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def run_chat_session_status_command(args: argparse.Namespace) -> None:
@@ -3258,6 +3297,70 @@ def build_parser() -> argparse.ArgumentParser:
     chat_repl_parser.add_argument("--no-wait", action="store_true", help="Create jobs and skip result polling")
     chat_repl_parser.add_argument("--json", action="store_true", help="Print the final JSON REPL report after exit")
     chat_repl_parser.set_defaults(func=run_chat_repl_command)
+
+    chat_gateway_parser = chat_subcommands.add_parser(
+        "gateway",
+        help="Run a localhost HTTP gateway backed by safe chat continue",
+    )
+    chat_gateway_parser.add_argument(
+        "--out",
+        default=".mesh/chat-session",
+        help="Output directory for chat-session.json, chat-session.md, and per-turn reports",
+    )
+    chat_gateway_parser.add_argument("--session-id", default="default", help="Stable local session id")
+    chat_gateway_parser.add_argument("--title", default=None, help="Optional session title")
+    chat_gateway_parser.add_argument(
+        "--coordinator",
+        default=None,
+        help="Coordinator base URL. Defaults to invite coordinator, session coordinator, or http://127.0.0.1:8765",
+    )
+    chat_gateway_parser.add_argument("--invite", default=None, help="Optional alpha invite JSON for coordinator/auth")
+    chat_gateway_parser.add_argument("--admission-token", default=None, help="Admission token for public alpha coordinators")
+    chat_gateway_parser.add_argument("--model", required=True, help="Ollama model name, such as llama3.2:3b")
+    chat_gateway_parser.add_argument("--system", default="Be concise.", help="Optional system message for model context")
+    chat_gateway_parser.add_argument(
+        "--requester-account-id",
+        required=True,
+        help="Requester account to reserve credits from",
+    )
+    chat_gateway_parser.add_argument("--job-cost", default=1, type=int, help="Credits to reserve from requester account")
+    chat_gateway_parser.add_argument("--reward", default=1, type=int, help="Credits awarded to the worker")
+    chat_gateway_parser.add_argument("--temperature", default=0.2, type=float, help="Optional model temperature")
+    chat_gateway_parser.add_argument("--max-tokens", default=256, type=int, help="Optional max token hint")
+    chat_gateway_parser.add_argument("--ttl-seconds", default=300, type=int, help="Job lifetime in seconds")
+    chat_gateway_parser.add_argument("--timeout-seconds", default=60.0, type=float, help="Seconds to wait for each result")
+    chat_gateway_parser.add_argument("--poll-interval", default=0.5, type=float, help="Seconds between result checks")
+    chat_gateway_parser.add_argument(
+        "--client-timeout-seconds",
+        default=10.0,
+        type=float,
+        help="Seconds to wait for each coordinator HTTP request",
+    )
+    chat_gateway_parser.add_argument(
+        "--max-context-turns",
+        default=8,
+        type=int,
+        help="Verified prior turns to include as context",
+    )
+    chat_gateway_parser.add_argument("--no-wait", action="store_true", help="Create jobs and skip result polling")
+    chat_gateway_parser.add_argument(
+        "--host",
+        default=DEFAULT_CHAT_GATEWAY_HOST,
+        help="Gateway bind host. V0 only supports 127.0.0.1",
+    )
+    chat_gateway_parser.add_argument(
+        "--port",
+        default=DEFAULT_CHAT_GATEWAY_PORT,
+        type=int,
+        help="Gateway bind port",
+    )
+    chat_gateway_parser.add_argument(
+        "--max-request-bytes",
+        default=DEFAULT_CHAT_GATEWAY_MAX_REQUEST_BYTES,
+        type=int,
+        help="Maximum JSON request body size",
+    )
+    chat_gateway_parser.set_defaults(func=run_chat_gateway_command)
 
     chat_session_status_parser = chat_subcommands.add_parser(
         "session-status",

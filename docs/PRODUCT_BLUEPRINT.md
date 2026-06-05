@@ -84,6 +84,8 @@ Chat Continue V1 turns the safe sequence into one product-loop command. It check
 
 Chat REPL V0 makes that contract feel like a usable chat surface without adding another daemon. It runs a local terminal loop where ordinary messages call `chat continue`, while `/status`, `/sync`, and `/resume-dry-run` expose the safety loop in-place. This is the smallest interactive bridge toward a real chat app: one prompt, one guarded spend path, one transcript, and no partner-side manual step.
 
+Chat Gateway V0 exposes that same safe loop to a future UI over localhost HTTP. It serves health, status, sync, resume dry-run, and guarded continue endpoints plus a tiny local test page, while still keeping all credit spend behind `chat continue` and blocking unresolved turns.
+
 Operator Credit Tools V1 adds the missing controlled top-up path. Operators can inspect requester and worker balances with a read-only `operator credits` report, then grant requester credits with `operator grant-requester-credits` through a separate operator-only grant token. The normal alpha invite/admission token can still create jobs, but it cannot mint credits.
 
 ## Future Lane: ISP Edge / Broadband Bundle

@@ -365,6 +365,21 @@ python -m chatp2p.cli chat repl `
 
 Inside the REPL, `/status` inspects the local transcript, `/sync` reconciles existing job-backed turns from the coordinator snapshot, `/resume-dry-run` previews retry work without spending credits, and `/quit` exits. The REPL writes `chat-repl.json` and `chat-repl.md` next to the session transcript.
 
+For a future UI or local browser test surface, use the localhost-only chat gateway:
+
+```powershell
+python -m chatp2p.cli chat gateway `
+  --invite D:\ChatP2PData\alpha-invite.json `
+  --out D:\ChatP2PData\chat-session `
+  --session-id demo `
+  --model llama3.2:3b `
+  --requester-account-id requester_demo `
+  --host 127.0.0.1 `
+  --port 8787
+```
+
+The gateway binds to `127.0.0.1`, serves a tiny manual test page at `/`, and exposes local JSON endpoints for health, session status, session sync, resume dry-run, and guarded chat continuation. It reuses the same `chat continue` safety path, so unresolved turns still block new credit spend.
+
 Inspect a session without creating a job or spending credits:
 
 ```powershell
