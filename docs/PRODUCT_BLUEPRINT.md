@@ -108,6 +108,8 @@ Chat Demo Modes V0 keeps the fake no-dependency demo as the default and adds `--
 
 Operator Credit Tools V1 adds the missing controlled top-up path. Operators can inspect requester and worker balances with a read-only `operator credits` report, then grant requester credits with `operator grant-requester-credits` through a separate operator-only grant token. The normal alpha invite/admission token can still create jobs, but it cannot mint credits.
 
+Model Governance V0 creates the first strict contract for a community-shaped model network. `chatp2p model governance` can initialize and inspect a registry of contribution tiers, approved weight-pack policy, domain roles, adapter submission gates, safety rules, and tamper response. V0 keeps direct core-weight editing disabled, treats credits and reputation as separate signals, and warns until a real open-weight base model, license, and hashes replace the placeholder pack.
+
 ## Future Lane: ISP Edge / Broadband Bundle
 
 Keep a second product architecture lane for an ISP-edge simulation, but do not let it interrupt the current alpha path. The idea is not "AI inside fibre"; it is a broadband-provider-style deployment model where a provider runs a coordinator, subscribers run light gateway/device nodes, regional edge workers provide stronger capacity, and policy routes work through local, provider-edge, trusted-peer, then placeholder fallback paths.

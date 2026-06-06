@@ -100,6 +100,11 @@ from .node_runtime import (
 from .ollama import DEFAULT_OLLAMA_BASE_URL
 from .jsonio import read_json_file
 from .operator_config import OperatorConfig, write_operator_config
+from .model_governance import (
+    ModelGovernanceConfig,
+    format_model_governance_summary,
+    run_model_governance,
+)
 from .operator_actions import (
     build_operator_action_queue,
     format_operator_action_queue_summary,
@@ -408,6 +413,27 @@ def run_quickstart_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_quickstart_report(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_governance_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_governance(
+            ModelGovernanceConfig(
+                registry_path=Path(args.registry),
+                out_path=Path(args.out) if args.out else None,
+                init=args.init,
+                force=args.force,
+            )
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_governance_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -3147,6 +3173,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     quickstart_parser.add_argument("--json", action="store_true", help="Print the full JSON quickstart report")
     quickstart_parser.set_defaults(func=run_quickstart_command)
+
+    model_parser = subcommands.add_parser("model", help="Model registry and governance tools")
+    model_subcommands = model_parser.add_subparsers(dest="model_command", required=True)
+    model_governance_parser = model_subcommands.add_parser(
+        "governance",
+        help="Inspect or initialize the model contribution governance registry",
+    )
+    model_governance_parser.add_argument(
+        "--registry",
+        default=".mesh/model-governance.json",
+        help="Path to the model governance registry JSON",
+    )
+    model_governance_parser.add_argument("--out", default=None, help="Optional JSON report path")
+    model_governance_parser.add_argument("--init", action="store_true", help="Write the default registry before reporting")
+    model_governance_parser.add_argument("--force", action="store_true", help="Replace an existing registry during --init")
+    model_governance_parser.add_argument("--json", action="store_true", help="Print the full JSON governance report")
+    model_governance_parser.set_defaults(func=model_governance_command)
 
     chat_parser = subcommands.add_parser("chat", help="Local chat product-loop proofs")
     chat_subcommands = chat_parser.add_subparsers(dest="chat_command", required=True)

@@ -793,4 +793,16 @@ The active leasing policy is included in `GET /api/snapshot` and `GET /health`.
 
 The first product goal is a one-click node that lets normal machines contribute useful work: deterministic evals, inference jobs, dataset review, verification, model feedback, and later distributed fine-tuning.
 
+Model Governance V0 turns the "community-shaped model" idea into a local registry contract. It defines membership tiers, approved weight-pack rules, adapter submission gates, domain review roles, and tamper response. It does not train or download a model; it records the rules for who may influence future model/adaptor releases and rejects direct core-weight editing in V0.
+
+```powershell
+python -m chatp2p.cli model governance `
+  --registry D:\ChatP2PData\model-governance.json `
+  --out D:\ChatP2PData\model-governance-report.json `
+  --init `
+  --json
+```
+
+The default registry intentionally starts with a placeholder base weight pack, so the report warns until a real open-weight base model, license, and hashes are selected. Credits remain spendable usage accounting; reputation and tier gates decide who can submit adapters, review domains, or vote on releases.
+
 The longer blueprint lives in [docs/PRODUCT_BLUEPRINT.md](docs/PRODUCT_BLUEPRINT.md).
