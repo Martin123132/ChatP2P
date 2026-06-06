@@ -365,6 +365,14 @@ python -m chatp2p.cli chat repl `
 
 Inside the REPL, `/status` inspects the local transcript, `/sync` reconciles existing job-backed turns from the coordinator snapshot, `/resume-dry-run` previews retry work without spending credits, and `/quit` exits. The REPL writes `chat-repl.json` and `chat-repl.md` next to the session transcript.
 
+To try the complete chat product loop without a partner node, invite file, or real Ollama install, run the local demo:
+
+```powershell
+python -m chatp2p.cli chat demo --port 8787
+```
+
+The demo starts a temporary local coordinator, fake Ollama-compatible model endpoint, worker, funded requester account, and chat gateway. Open the printed gateway URL, send a prompt, and the local worker will answer through the same signed funded-job path used by `chat continue`. The demo binds to `127.0.0.1` and stops when you press `Ctrl+C`.
+
 For a future UI or local browser test surface, use the localhost-only chat gateway:
 
 ```powershell

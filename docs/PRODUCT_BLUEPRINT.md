@@ -92,6 +92,8 @@ Chat Readiness V0 adds the missing pre-send check for that local UI. The gateway
 
 Chat Gateway Action Hints V0 makes those readiness blockers directly actionable. The gateway returns safe local command hints for session sync, resume dry-run, coordinator status checks, requester credit inspection, and credit-grant dry-runs without exposing tokens or contacting partner machines.
 
+Local Chat Demo V0 packages the whole product loop into one localhost command. It starts a temporary coordinator, fake Ollama-compatible runtime, worker, funded requester account, and gateway so the operator can prove `start -> open chat -> send prompt -> worker answers -> credits move` without a partner node or real model download.
+
 Operator Credit Tools V1 adds the missing controlled top-up path. Operators can inspect requester and worker balances with a read-only `operator credits` report, then grant requester credits with `operator grant-requester-credits` through a separate operator-only grant token. The normal alpha invite/admission token can still create jobs, but it cannot mint credits.
 
 ## Future Lane: ISP Edge / Broadband Bundle

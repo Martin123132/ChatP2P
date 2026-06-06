@@ -58,6 +58,7 @@ from .chat_smoke import (
     format_funded_chat_smoke_summary,
     run_funded_chat_smoke,
 )
+from .chat_demo import ChatDemoConfig, run_chat_demo
 from .chat_request import ChatAskConfig, format_chat_ask_summary, run_chat_ask
 from .chat_gateway import (
     DEFAULT_CHAT_GATEWAY_HOST,
@@ -613,6 +614,40 @@ def run_chat_gateway_command(args: argparse.Namespace) -> None:
                 host=args.host,
                 port=args.port,
                 max_request_bytes=args.max_request_bytes,
+            )
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def run_chat_demo_command(args: argparse.Namespace) -> None:
+    try:
+        run_chat_demo(
+            ChatDemoConfig(
+                out_dir=Path(args.out),
+                session_id=args.session_id,
+                title=args.title,
+                model=args.model,
+                system=args.system,
+                requester_account_id=args.requester_account_id,
+                starting_credits=args.starting_credits,
+                job_cost=args.job_cost,
+                reward=args.reward,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                ttl_seconds=args.ttl_seconds,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval=args.poll_interval,
+                client_timeout_seconds=args.client_timeout_seconds,
+                max_context_turns=args.max_context_turns,
+                fake_answer=args.fake_answer,
+                host=args.host,
+                port=args.port,
+                coordinator_port=args.coordinator_port,
+                worker_poll_interval=args.worker_poll_interval,
+                max_request_bytes=args.max_request_bytes,
+                open_browser=args.open_browser,
+                source_root=Path.cwd(),
             )
         )
     except ValueError as exc:
@@ -3361,6 +3396,86 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum JSON request body size",
     )
     chat_gateway_parser.set_defaults(func=run_chat_gateway_command)
+
+    chat_demo_parser = chat_subcommands.add_parser(
+        "demo",
+        help="Run a complete local chat demo with fake model, worker, coordinator, and gateway",
+    )
+    chat_demo_parser.add_argument(
+        "--out",
+        default=".mesh/chat-demo",
+        help="Output directory for the demo chat session and per-turn reports",
+    )
+    chat_demo_parser.add_argument("--session-id", default="demo", help="Stable local session id")
+    chat_demo_parser.add_argument("--title", default="Local Chat Demo", help="Optional session title")
+    chat_demo_parser.add_argument("--model", default="tiny-test-model", help="Demo model name")
+    chat_demo_parser.add_argument("--system", default="Be concise.", help="Optional system message for model context")
+    chat_demo_parser.add_argument(
+        "--requester-account-id",
+        default="requester_demo",
+        help="Requester account to grant and reserve credits from",
+    )
+    chat_demo_parser.add_argument(
+        "--starting-credits",
+        default=10,
+        type=int,
+        help="Credits granted to the demo requester before opening the gateway",
+    )
+    chat_demo_parser.add_argument("--job-cost", default=1, type=int, help="Credits reserved for each chat turn")
+    chat_demo_parser.add_argument("--reward", default=1, type=int, help="Credits awarded to the demo worker")
+    chat_demo_parser.add_argument("--temperature", default=0.2, type=float, help="Optional model temperature")
+    chat_demo_parser.add_argument("--max-tokens", default=256, type=int, help="Optional max token hint")
+    chat_demo_parser.add_argument("--ttl-seconds", default=300, type=int, help="Job lifetime in seconds")
+    chat_demo_parser.add_argument("--timeout-seconds", default=60.0, type=float, help="Seconds to wait for each result")
+    chat_demo_parser.add_argument("--poll-interval", default=0.2, type=float, help="Seconds between result checks")
+    chat_demo_parser.add_argument(
+        "--client-timeout-seconds",
+        default=10.0,
+        type=float,
+        help="Seconds to wait for each local HTTP request",
+    )
+    chat_demo_parser.add_argument(
+        "--max-context-turns",
+        default=8,
+        type=int,
+        help="Verified prior turns to include as context",
+    )
+    chat_demo_parser.add_argument(
+        "--fake-answer",
+        default="ChatP2P demo answer from a local fake model worker.",
+        help="Answer returned by the fake local model runtime",
+    )
+    chat_demo_parser.add_argument(
+        "--host",
+        default=DEFAULT_CHAT_GATEWAY_HOST,
+        help="Gateway bind host. V0 only supports 127.0.0.1",
+    )
+    chat_demo_parser.add_argument(
+        "--port",
+        default=DEFAULT_CHAT_GATEWAY_PORT,
+        type=int,
+        help="Gateway bind port",
+    )
+    chat_demo_parser.add_argument(
+        "--coordinator-port",
+        default=0,
+        type=int,
+        help="Local coordinator port. Defaults to an ephemeral port",
+    )
+    chat_demo_parser.add_argument(
+        "--worker-poll-interval",
+        default=0.05,
+        type=float,
+        help="Seconds between demo worker lease polls",
+    )
+    chat_demo_parser.add_argument(
+        "--max-request-bytes",
+        default=DEFAULT_CHAT_GATEWAY_MAX_REQUEST_BYTES,
+        type=int,
+        help="Maximum JSON request body size",
+    )
+    chat_demo_parser.add_argument("--open-browser", action="store_true", help="Open the local gateway in the default browser")
+    chat_demo_parser.set_defaults(func=run_chat_demo_command)
 
     chat_session_status_parser = chat_subcommands.add_parser(
         "session-status",
