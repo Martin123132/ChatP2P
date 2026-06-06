@@ -88,6 +88,8 @@ Chat Gateway V0 exposes that same safe loop to a future UI over localhost HTTP. 
 
 Chat UI V0 turns the gateway page into a usable local chat surface. It renders transcript-backed user and assistant turns, visible turn state, requester balance, loading state, and blocked-turn safe actions without adding new spend paths or a public web server.
 
+Chat Readiness V0 adds the missing pre-send check for that local UI. The gateway can now report coordinator reachability, requester balance versus job cost, selected-model routability, and unresolved session blockers before `chat continue` spends credits.
+
 Operator Credit Tools V1 adds the missing controlled top-up path. Operators can inspect requester and worker balances with a read-only `operator credits` report, then grant requester credits with `operator grant-requester-credits` through a separate operator-only grant token. The normal alpha invite/admission token can still create jobs, but it cannot mint credits.
 
 ## Future Lane: ISP Edge / Broadband Bundle

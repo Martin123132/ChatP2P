@@ -4,6 +4,7 @@ import time
 from urllib.request import Request, urlopen
 
 from chatp2p.chat_gateway import (
+    CHAT_GATEWAY_READINESS_SCHEMA,
     CHAT_GATEWAY_REPORT_SCHEMA,
     CHAT_GATEWAY_TRANSCRIPT_SCHEMA,
     DEFAULT_CHAT_GATEWAY_HOST,
@@ -49,15 +50,20 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert health["config"]["host"] == DEFAULT_CHAT_GATEWAY_HOST
     assert health["config"]["auth"]["admission_token_present"] is True
     assert health["endpoints"]["session_transcript"] == "/api/session/transcript"
+    assert health["endpoints"]["chat_readiness"] == "/api/chat/readiness"
     assert status["status"] == "no_session"
     assert status["summary"]["recommended_next_action"] == "continue_chat_session"
     assert transcript["schema"] == CHAT_GATEWAY_TRANSCRIPT_SCHEMA
     assert transcript["status"] == "no_session"
     assert transcript["turns"] == []
     assert "/api/session/transcript" in page
+    assert "/api/chat/readiness" in page
     assert "/api/chat/continue" in page
     assert "Session demo - tiny-test-model" in page
     assert 'id="blockedBanner"' in page
+    assert 'id="readinessBadge"' in page
+    assert 'id="modelRoute"' in page
+    assert 'id="coordinatorState"' in page
     assert 'id="balance"' in page
     assert 'id="sendButton"' in page
     assert "turn user status-" in page
@@ -65,8 +71,177 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert "Safe action:" in page
     assert "Balance ${balance}" in page
     assert 'sendButton.textContent = value ? "Sending" : "Send"' in page
-    assert "innerHTML = `<span" not in page
+    assert "innerHTML" not in page
     assert token not in json.dumps({"health": health, "status": status, "transcript": transcript})
+
+
+def test_chat_gateway_readiness_ready_redacts_node_and_key(tmp_path):
+    coordinator_server, coordinator_thread, coordinator_url, worker_identity = _start_coordinator_with_worker(
+        requester_balance=2,
+        models=["tiny-test-model"],
+    )
+    try:
+        server, thread, base_url = _start_gateway(
+            ChatGatewayConfig(
+                out_dir=tmp_path / "chat-session",
+                session_id="demo",
+                coordinator_url=coordinator_url,
+                model="tiny-test-model",
+                requester_account_id="requester_gateway_account",
+                port=0,
+            )
+        )
+        try:
+            readiness = _get_json(f"{base_url}/api/chat/readiness")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+    finally:
+        coordinator_server.shutdown()
+        coordinator_server.server_close()
+        coordinator_thread.join(timeout=2)
+
+    serialized = json.dumps(readiness)
+    assert readiness["schema"] == CHAT_GATEWAY_READINESS_SCHEMA
+    assert readiness["status"] == "pass"
+    assert readiness["summary"]["can_send"] is True
+    assert readiness["summary"]["requester_balance"] == 2
+    assert readiness["summary"]["live_eligible_node_count"] == 1
+    assert readiness["summary"]["recommended_next_action"] == "continue_chat_session"
+    assert worker_identity.node_id not in serialized
+    assert worker_identity.public_key not in serialized
+
+
+def test_chat_gateway_readiness_blocks_when_coordinator_unreachable(tmp_path):
+    token = "alpha-token-readiness-secret"
+    server, thread, base_url = _start_gateway(
+        ChatGatewayConfig(
+            out_dir=tmp_path / "chat-session",
+            session_id="demo",
+            coordinator_url="http://127.0.0.1:9",
+            model="tiny-test-model",
+            requester_account_id="requester_gateway_account",
+            admission_token=token,
+            client_timeout_seconds=0.1,
+            port=0,
+        )
+    )
+    try:
+        readiness = _get_json(f"{base_url}/api/chat/readiness")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    serialized = json.dumps(readiness)
+    assert readiness["status"] == "blocked"
+    assert readiness["summary"]["can_send"] is False
+    assert readiness["summary"]["coordinator_reachable"] is False
+    assert readiness["summary"]["recommended_next_action"] == "start_or_check_local_coordinator"
+    assert token not in serialized
+
+
+def test_chat_gateway_readiness_blocks_when_requester_has_no_credits(tmp_path):
+    coordinator_server, coordinator_thread, coordinator_url, _worker_identity = _start_coordinator_with_worker(
+        requester_balance=0,
+        models=["tiny-test-model"],
+    )
+    try:
+        server, thread, base_url = _start_gateway(
+            ChatGatewayConfig(
+                out_dir=tmp_path / "chat-session",
+                session_id="demo",
+                coordinator_url=coordinator_url,
+                model="tiny-test-model",
+                requester_account_id="requester_gateway_account",
+                port=0,
+            )
+        )
+        try:
+            readiness = _get_json(f"{base_url}/api/chat/readiness")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+    finally:
+        coordinator_server.shutdown()
+        coordinator_server.server_close()
+        coordinator_thread.join(timeout=2)
+
+    assert readiness["status"] == "blocked"
+    assert readiness["summary"]["can_send"] is False
+    assert readiness["summary"]["requester_balance"] == 0
+    assert readiness["summary"]["credits_sufficient"] is False
+    assert readiness["summary"]["recommended_next_action"] == "grant_requester_credits"
+
+
+def test_chat_gateway_readiness_blocks_when_model_has_no_live_worker(tmp_path):
+    coordinator_server, coordinator_thread, coordinator_url, _worker_identity = _start_coordinator_with_worker(
+        requester_balance=2,
+        models=["other-model"],
+    )
+    try:
+        server, thread, base_url = _start_gateway(
+            ChatGatewayConfig(
+                out_dir=tmp_path / "chat-session",
+                session_id="demo",
+                coordinator_url=coordinator_url,
+                model="tiny-test-model",
+                requester_account_id="requester_gateway_account",
+                port=0,
+            )
+        )
+        try:
+            readiness = _get_json(f"{base_url}/api/chat/readiness")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+    finally:
+        coordinator_server.shutdown()
+        coordinator_server.server_close()
+        coordinator_thread.join(timeout=2)
+
+    assert readiness["status"] == "blocked"
+    assert readiness["summary"]["can_send"] is False
+    assert readiness["summary"]["live_eligible_node_count"] == 0
+    assert readiness["model_routing"]["live_node_count"] == 1
+    assert readiness["summary"]["recommended_next_action"] == "wait_for_model_capable_worker_or_change_model"
+
+
+def test_chat_gateway_readiness_blocks_unresolved_session_before_other_actions(tmp_path):
+    session_path = _write_failed_session_fixture(tmp_path / "chat-session")
+    coordinator_server, coordinator_thread, coordinator_url, _worker_identity = _start_coordinator_with_worker(
+        requester_balance=2,
+        models=["tiny-test-model"],
+    )
+    try:
+        server, thread, base_url = _start_gateway(
+            ChatGatewayConfig(
+                out_dir=session_path.parent,
+                session_id="demo",
+                coordinator_url=coordinator_url,
+                model="tiny-test-model",
+                requester_account_id="requester_gateway_account",
+                port=0,
+            )
+        )
+        try:
+            readiness = _get_json(f"{base_url}/api/chat/readiness")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+    finally:
+        coordinator_server.shutdown()
+        coordinator_server.server_close()
+        coordinator_thread.join(timeout=2)
+
+    assert readiness["status"] == "blocked"
+    assert readiness["summary"]["can_send"] is False
+    assert readiness["summary"]["session_blocked"] is True
+    assert readiness["summary"]["recommended_next_action"] == "run_session_resume_dry_run"
 
 
 def test_chat_gateway_continue_creates_funded_turn(tmp_path):
@@ -256,6 +431,32 @@ def _start_gateway(config):
     thread.start()
     host, port = server.server_address
     return server, thread, f"http://{host}:{port}"
+
+
+def _start_coordinator_with_worker(*, requester_balance, models):
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    if requester_balance:
+        coordinator.apply_credit_delta(
+            account_id="requester_gateway_account",
+            account_type="requester",
+            delta=requester_balance,
+            reason="operator_credit_grant",
+        )
+    server = create_coordinator_http_server(coordinator, host="127.0.0.1", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    coordinator_url = f"http://{host}:{port}"
+    client = CoordinatorClient(coordinator_url)
+    worker_identity = NodeIdentity.generate(prefix="worker")
+    worker = WorkerNode(
+        identity=worker_identity,
+        capability_profile=_ollama_capabilities(models=models, base_url="http://127.0.0.1:11434"),
+        ollama_base_url="http://127.0.0.1:11434",
+    )
+    registration = NodeRegistration.create(node=worker_identity, capabilities=worker.capabilities())
+    assert client.register(registration)["accepted"] is True
+    return server, thread, coordinator_url, worker_identity
 
 
 def _get_json(url):

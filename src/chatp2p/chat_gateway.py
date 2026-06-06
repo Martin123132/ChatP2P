@@ -9,9 +9,11 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
+from .alpha import load_alpha_invite
 from .chat_session import (
+    DEFAULT_COORDINATOR_URL,
     DEFAULT_MAX_CONTEXT_TURNS,
     ChatSessionContinueConfig,
     ChatSessionResumeConfig,
@@ -22,11 +24,13 @@ from .chat_session import (
     run_chat_session_status,
     run_chat_session_sync,
 )
+from .client import CoordinatorClient
 from .runtime_metadata import collect_software_metadata, software_metadata_public_view
 
 
 CHAT_GATEWAY_REPORT_SCHEMA = "chatp2p.chat-gateway-report.v1"
 CHAT_GATEWAY_TRANSCRIPT_SCHEMA = "chatp2p.chat-gateway-transcript.v1"
+CHAT_GATEWAY_READINESS_SCHEMA = "chatp2p.chat-gateway-readiness.v1"
 DEFAULT_CHAT_GATEWAY_HOST = "127.0.0.1"
 DEFAULT_CHAT_GATEWAY_PORT = 8787
 DEFAULT_CHAT_GATEWAY_MAX_REQUEST_BYTES = 16_384
@@ -85,6 +89,9 @@ def create_chat_gateway_server(config: ChatGatewayConfig) -> ThreadingHTTPServer
                 return
             if parsed.path == "/api/session/transcript":
                 _json_response(self, 200, _transcript_payload(config))
+                return
+            if parsed.path == "/api/chat/readiness":
+                _json_response(self, 200, _readiness_payload(config))
                 return
             _json_response(self, 404, {"ok": False, "status": "fail", "error": "not found"})
 
@@ -151,6 +158,7 @@ def _health_payload(*, config: dict[str, Any], software: dict[str, Any]) -> dict
             "health": "/health",
             "session_status": "/api/session/status",
             "session_transcript": "/api/session/transcript",
+            "chat_readiness": "/api/chat/readiness",
             "session_sync": "/api/session/sync",
             "session_resume_dry_run": "/api/session/resume-dry-run",
             "chat_continue": "/api/chat/continue",
@@ -326,6 +334,79 @@ def _continue_payload(config: ChatGatewayConfig, *, prompt: str) -> dict[str, An
         return _error_payload(f"{type(exc).__name__}: {exc}")
 
 
+def _readiness_payload(config: ChatGatewayConfig) -> dict[str, Any]:
+    generated_at = datetime.now(timezone.utc).isoformat()
+    errors: list[str] = []
+    warnings: list[str] = []
+    connection = _resolve_gateway_connection(config)
+    transcript = _transcript_payload(config)
+    session = _readiness_session(transcript)
+
+    snapshot: dict[str, Any] | None = None
+    coordinator_error: str | None = None
+    try:
+        client = CoordinatorClient(
+            connection["coordinator_url"],
+            admission_token=connection["token"],
+            timeout_seconds=config.client_timeout_seconds,
+        )
+        snapshot = client.snapshot()
+    except Exception as exc:
+        coordinator_error = _format_gateway_exception(exc)
+        errors.append(coordinator_error)
+
+    requester = _readiness_requester(snapshot=snapshot, account_id=config.requester_account_id, job_cost=config.job_cost)
+    routing = _readiness_model_routing(snapshot=snapshot, model=config.model)
+    warnings.extend(routing["warnings"])
+
+    can_send = (
+        not session["blocked"]
+        and snapshot is not None
+        and requester["credits_sufficient"]
+        and routing["live_eligible_node_count"] > 0
+    )
+    recommended_next_action = _readiness_recommended_next_action(
+        session=session,
+        coordinator_ok=snapshot is not None,
+        credits_sufficient=requester["credits_sufficient"],
+        live_eligible_node_count=routing["live_eligible_node_count"],
+    )
+    status = "pass" if can_send else "blocked"
+    return _redact_report(
+        {
+            "schema": CHAT_GATEWAY_READINESS_SCHEMA,
+            "ok": can_send,
+            "status": status,
+            "generated_at": generated_at,
+            "summary": {
+                "status": status,
+                "can_send": can_send,
+                "coordinator_reachable": snapshot is not None,
+                "requester_balance": requester["balance"],
+                "job_cost": config.job_cost,
+                "credits_sufficient": requester["credits_sufficient"],
+                "model": config.model,
+                "live_eligible_node_count": routing["live_eligible_node_count"],
+                "session_blocked": session["blocked"],
+                "recommended_next_action": recommended_next_action,
+            },
+            "coordinator": {
+                "ok": snapshot is not None,
+                "url": connection["coordinator_url"],
+                "error": coordinator_error,
+                "status": _snapshot_status_summary(snapshot),
+            },
+            "requester": requester,
+            "model_routing": routing,
+            "session": session,
+            "invite": connection["invite_summary"],
+            "warnings": warnings,
+            "errors": errors,
+        },
+        config,
+    )
+
+
 def _render_gateway_html(config: ChatGatewayConfig) -> str:
     title = html.escape(config.session_id)
     model = html.escape(config.model)
@@ -405,7 +486,10 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     <section id="status">
       <div class="status-row">
         <span id="stateBadge" class="badge">loading</span>
+        <span id="readinessBadge" class="badge">readiness</span>
         <span id="balance"></span>
+        <span id="modelRoute"></span>
+        <span id="coordinatorState"></span>
         <span id="nextAction"></span>
       </div>
       <div id="blockedBanner" class="banner"></div>
@@ -420,7 +504,10 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
   </footer>
   <script>
     const stateBadge = document.querySelector("#stateBadge");
+    const readinessBadge = document.querySelector("#readinessBadge");
     const balanceEl = document.querySelector("#balance");
+    const modelRouteEl = document.querySelector("#modelRoute");
+    const coordinatorStateEl = document.querySelector("#coordinatorState");
     const nextActionEl = document.querySelector("#nextAction");
     const blockedBanner = document.querySelector("#blockedBanner");
     const turnsEl = document.querySelector("#turns");
@@ -442,6 +529,25 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
       }}
       return "";
     }}
+    function renderReadiness(report) {{
+      const summary = report.summary || {{}};
+      const routing = report.model_routing || {{}};
+      const coordinator = report.coordinator || {{}};
+      readinessBadge.className = badgeClass(report.status || "unknown");
+      readinessBadge.textContent = summary.can_send ? "ready" : "not ready";
+      if (summary.requester_balance !== null && summary.requester_balance !== undefined) {{
+        balanceEl.textContent = `Balance ${{summary.requester_balance}}`;
+      }}
+      modelRouteEl.textContent = `Model workers ${{routing.live_eligible_node_count ?? 0}}`;
+      coordinatorStateEl.textContent = coordinator.ok ? "Coordinator online" : "Coordinator offline";
+      if (!summary.can_send && summary.recommended_next_action) {{
+        blockedBanner.className = "banner visible";
+        blockedBanner.textContent = `Safe action: ${{summary.recommended_next_action}}`;
+      }} else {{
+        blockedBanner.className = "banner";
+        blockedBanner.textContent = "";
+      }}
+    }}
     function render(report) {{
       const summary = report.summary || {{}};
       const turns = report.turns || [];
@@ -449,12 +555,16 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
       const nextAction = summary.recommended_next_action || "";
       stateBadge.className = badgeClass(status);
       stateBadge.textContent = status;
-      balanceEl.textContent = formatBalance(turns);
+      if (!balanceEl.textContent) balanceEl.textContent = formatBalance(turns);
       nextActionEl.textContent = nextAction ? `Next ${{nextAction}}` : "";
       const blocked = status === "blocked" || status === "fail" || blockedActions.has(nextAction);
-      blockedBanner.className = blocked ? "banner visible" : "banner";
-      blockedBanner.textContent = blocked ? `Safe action: ${{nextAction || "inspect_chat_session_status"}}` : "";
-      turnsEl.innerHTML = "";
+      if (blocked) {{
+        blockedBanner.className = "banner visible";
+        blockedBanner.textContent = `Safe action: ${{nextAction || "inspect_chat_session_status"}}`;
+      }} else if (!blockedBanner.textContent) {{
+        blockedBanner.className = "banner";
+      }}
+      turnsEl.replaceChildren();
       if (!turns.length) {{
         const empty = document.createElement("div");
         empty.className = "empty";
@@ -506,11 +616,21 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
       }});
       turnsEl.scrollTop = turnsEl.scrollHeight;
     }}
+    async function refreshReadiness() {{
+      try {{
+        const response = await fetch("/api/chat/readiness");
+        renderReadiness(await response.json());
+      }} catch (_error) {{
+        readinessBadge.className = badgeClass("fail");
+        readinessBadge.textContent = "readiness failed";
+      }}
+    }}
     async function request(path, options = {{}}) {{
       setBusy(true);
       try {{
         const response = await fetch(path, options);
         render(await response.json());
+        await refreshReadiness();
       }} finally {{
         setBusy(false);
       }}
@@ -531,6 +651,7 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
       }});
       await refreshTranscript();
     }};
+    refreshReadiness();
     refreshTranscript();
   </script>
 </body>
@@ -610,6 +731,162 @@ def _redact_value(value: Any, *, secrets: list[str]) -> Any:
             redacted = redacted.replace(secret, "<redacted>")
         return redacted
     return value
+
+
+def _resolve_gateway_connection(config: ChatGatewayConfig) -> dict[str, Any]:
+    invite = load_alpha_invite(config.invite_path.expanduser()) if config.invite_path else None
+    resolved_url = config.coordinator_url or (invite.coordinator if invite else DEFAULT_COORDINATOR_URL)
+    token = config.admission_token or (invite.admission_token if invite else None)
+    return {
+        "coordinator_url": _safe_url(resolved_url.rstrip("/")),
+        "token": token,
+        "invite_summary": invite.public_summary() if invite else None,
+    }
+
+
+def _readiness_session(transcript: dict[str, Any]) -> dict[str, Any]:
+    summary = transcript.get("summary") if isinstance(transcript.get("summary"), dict) else {}
+    status = str(transcript.get("status") or summary.get("status") or "unknown")
+    submitted = _int_or_zero(summary.get("submitted_turns"))
+    failed = _int_or_zero(summary.get("failed_turns"))
+    recommended = str(summary.get("recommended_next_action") or "")
+    blocked = status in {"blocked", "fail"} or submitted > 0 or failed > 0
+    return {
+        "ok": bool(transcript.get("ok", status == "no_session")),
+        "status": status,
+        "blocked": blocked,
+        "turn_count": _int_or_zero(summary.get("turn_count")),
+        "completed_turns": _int_or_zero(summary.get("completed_turns")),
+        "submitted_turns": submitted,
+        "failed_turns": failed,
+        "recommended_next_action": recommended or "continue_chat_session",
+    }
+
+
+def _readiness_requester(*, snapshot: dict[str, Any] | None, account_id: str, job_cost: int) -> dict[str, Any]:
+    balances = (((snapshot or {}).get("credit_ledger") or {}).get("summary") or {}).get("balances") or {}
+    balance = _int_or_none(balances.get(account_id))
+    if snapshot is not None and balance is None:
+        balance = 0
+    effective_balance = balance if balance is not None else 0
+    return {
+        "account_id": account_id,
+        "balance": balance,
+        "job_cost": job_cost,
+        "credits_sufficient": effective_balance >= job_cost,
+    }
+
+
+def _readiness_model_routing(*, snapshot: dict[str, Any] | None, model: str) -> dict[str, Any]:
+    nodes = (snapshot or {}).get("nodes") or []
+    eligible_node_count = 0
+    live_eligible_node_count = 0
+    live_node_count = 0
+    legacy_node_count = 0
+    eligible_samples: list[dict[str, Any]] = []
+
+    node_items = nodes if isinstance(nodes, list) else []
+    for node in node_items:
+        if not isinstance(node, dict):
+            continue
+        liveness = str(node.get("liveness_status") or "unknown")
+        if liveness == "live":
+            live_node_count += 1
+        supported = [str(item) for item in node.get("supported_job_types") or [] if isinstance(item, str)]
+        models = [str(item) for item in node.get("ollama_models") or [] if isinstance(item, str)]
+        if not supported:
+            legacy_node_count += 1
+        eligible = "inference.chat.v1" in supported and model in models
+        if not eligible:
+            continue
+        eligible_node_count += 1
+        if liveness == "live":
+            live_eligible_node_count += 1
+        if len(eligible_samples) < 5:
+            eligible_samples.append(
+                {
+                    "node_id_redacted": _redact_node_id(node.get("node_id")),
+                    "liveness_status": liveness,
+                    "ollama_models": models,
+                    "software": node.get("software") if isinstance(node.get("software"), dict) else None,
+                }
+            )
+
+    warnings = []
+    if legacy_node_count:
+        warnings.append("legacy_nodes_without_supported_job_types")
+    return {
+        "model": model,
+        "live_node_count": live_node_count,
+        "eligible_node_count": eligible_node_count,
+        "live_eligible_node_count": live_eligible_node_count,
+        "legacy_node_count": legacy_node_count,
+        "eligible_node_samples": eligible_samples,
+        "warnings": warnings,
+    }
+
+
+def _snapshot_status_summary(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    if snapshot is None:
+        return None
+    status = snapshot.get("status") if isinstance(snapshot.get("status"), dict) else {}
+    return {
+        "coordinator_id_redacted": _redact_node_id(status.get("coordinator_id")),
+        "jobs": status.get("jobs"),
+        "live_nodes": status.get("live_nodes"),
+        "known_nodes": status.get("known_nodes"),
+        "pending_jobs": status.get("pending_jobs"),
+        "queued_jobs": status.get("queued_jobs"),
+    }
+
+
+def _readiness_recommended_next_action(
+    *,
+    session: dict[str, Any],
+    coordinator_ok: bool,
+    credits_sufficient: bool,
+    live_eligible_node_count: int,
+) -> str:
+    if session["blocked"]:
+        if session["submitted_turns"] > 0:
+            return "run_session_sync"
+        if session["failed_turns"] > 0:
+            return "run_session_resume_dry_run"
+        return session.get("recommended_next_action") or "inspect_chat_session_status"
+    if not coordinator_ok:
+        return "start_or_check_local_coordinator"
+    if not credits_sufficient:
+        return "grant_requester_credits"
+    if live_eligible_node_count <= 0:
+        return "wait_for_model_capable_worker_or_change_model"
+    return "continue_chat_session"
+
+
+def _safe_url(url: str) -> str:
+    parsed = urlsplit(url)
+    if parsed.username or parsed.password:
+        host = parsed.hostname or ""
+        netloc = host
+        if parsed.port is not None:
+            netloc = f"{netloc}:{parsed.port}"
+        return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+    return url
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_zero(value: Any) -> int:
+    parsed = _int_or_none(value)
+    return parsed if parsed is not None else 0
+
+
+def _format_gateway_exception(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
 
 
 def _transcript_turn(turn: dict[str, Any]) -> dict[str, Any]:
