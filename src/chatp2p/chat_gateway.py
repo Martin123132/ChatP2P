@@ -371,6 +371,12 @@ def _readiness_payload(config: ChatGatewayConfig) -> dict[str, Any]:
         credits_sufficient=requester["credits_sufficient"],
         live_eligible_node_count=routing["live_eligible_node_count"],
     )
+    action_hint = _readiness_action_hint(
+        config=config,
+        connection=connection,
+        action_id=recommended_next_action,
+        requester_balance=requester["balance"],
+    )
     status = "pass" if can_send else "blocked"
     return _redact_report(
         {
@@ -389,7 +395,9 @@ def _readiness_payload(config: ChatGatewayConfig) -> dict[str, Any]:
                 "live_eligible_node_count": routing["live_eligible_node_count"],
                 "session_blocked": session["blocked"],
                 "recommended_next_action": recommended_next_action,
+                "suggested_command": action_hint["primary_command"],
             },
+            "action_hint": action_hint,
             "coordinator": {
                 "ok": snapshot is not None,
                 "url": connection["coordinator_url"],
@@ -449,6 +457,8 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     .badge.submitted {{ color: var(--wait); border-color: #bfdbfe; background: #eff6ff; }}
     .banner {{ display: none; border: 1px solid #fed7aa; background: #fff7ed; color: var(--warn); border-radius: 8px; padding: 10px 12px; }}
     .banner.visible {{ display: block; }}
+    .command {{ display: none; border: 1px solid #d1d5db; background: #111827; color: #f9fafb; border-radius: 8px; padding: 10px 12px; font-family: Consolas, ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; }}
+    .command.visible {{ display: block; }}
     #turns {{ max-width: 1040px; width: 100%; margin: 0 auto; padding: 16px 20px 120px; display: grid; gap: 14px; align-content: start; }}
     .empty {{ border: 1px dashed #cbd5e1; border-radius: 8px; padding: 18px; color: var(--muted); background: rgba(255,255,255,.72); }}
     .turn {{ display: grid; gap: 8px; max-width: min(760px, 92%); }}
@@ -493,6 +503,7 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
         <span id="nextAction"></span>
       </div>
       <div id="blockedBanner" class="banner"></div>
+      <div id="commandHint" class="command"></div>
     </section>
     <section id="turns"></section>
   </main>
@@ -510,6 +521,7 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     const coordinatorStateEl = document.querySelector("#coordinatorState");
     const nextActionEl = document.querySelector("#nextAction");
     const blockedBanner = document.querySelector("#blockedBanner");
+    const commandHintEl = document.querySelector("#commandHint");
     const turnsEl = document.querySelector("#turns");
     const promptEl = document.querySelector("#prompt");
     const sendButton = document.querySelector("#sendButton");
@@ -533,6 +545,8 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
       const summary = report.summary || {{}};
       const routing = report.model_routing || {{}};
       const coordinator = report.coordinator || {{}};
+      const actionHint = report.action_hint || {{}};
+      const command = actionHint.primary_command || "";
       readinessBadge.className = badgeClass(report.status || "unknown");
       readinessBadge.textContent = summary.can_send ? "ready" : "not ready";
       if (summary.requester_balance !== null && summary.requester_balance !== undefined) {{
@@ -547,6 +561,8 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
         blockedBanner.className = "banner";
         blockedBanner.textContent = "";
       }}
+      commandHintEl.className = command ? "command visible" : "command";
+      commandHintEl.textContent = command;
     }}
     function render(report) {{
       const summary = report.summary || {{}};
@@ -563,6 +579,9 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
         blockedBanner.textContent = `Safe action: ${{nextAction || "inspect_chat_session_status"}}`;
       }} else if (!blockedBanner.textContent) {{
         blockedBanner.className = "banner";
+      }}
+      if (blocked && !commandHintEl.textContent) {{
+        commandHintEl.className = "command";
       }}
       turnsEl.replaceChildren();
       if (!turns.length) {{
@@ -860,6 +879,217 @@ def _readiness_recommended_next_action(
     if live_eligible_node_count <= 0:
         return "wait_for_model_capable_worker_or_change_model"
     return "continue_chat_session"
+
+
+def _readiness_action_hint(
+    *,
+    config: ChatGatewayConfig,
+    connection: dict[str, Any],
+    action_id: str,
+    requester_balance: int | None,
+) -> dict[str, Any]:
+    commands = _readiness_commands(
+        config=config,
+        connection=connection,
+        action_id=action_id,
+        requester_balance=requester_balance,
+    )
+    primary_command = commands[0]["command"] if commands else None
+    return {
+        "id": action_id,
+        "partner_required": False,
+        "safe": True,
+        "primary_command": primary_command,
+        "commands": commands,
+    }
+
+
+def _readiness_commands(
+    *,
+    config: ChatGatewayConfig,
+    connection: dict[str, Any],
+    action_id: str,
+    requester_balance: int | None,
+) -> list[dict[str, Any]]:
+    if action_id == "run_session_sync":
+        return [
+            _command(
+                "sync_session",
+                "read_only_remote_updates_local_session",
+                _base_chat_session_argv(config, "session-sync", connection) + ["--json"],
+            )
+        ]
+    if action_id == "run_session_resume_dry_run":
+        return [
+            _command(
+                "preview_resume",
+                "dry_run_no_credit_spend",
+                _base_chat_session_argv(config, "session-resume", connection)
+                + _chat_continue_options(config)
+                + ["--dry-run", "--json"],
+            )
+        ]
+    if action_id == "start_or_check_local_coordinator":
+        return [
+            _command(
+                "check_coordinator",
+                "read_only_network_check",
+                _base_node_status_argv(config, connection),
+            )
+        ]
+    if action_id == "grant_requester_credits":
+        needed = max(1, config.job_cost - (requester_balance or 0))
+        commands = [
+            _command(
+                "inspect_requester_credits",
+                "read_only_credit_report",
+                _base_operator_credits_argv(config, connection) + ["--json"],
+            )
+        ]
+        grant_argv = _base_operator_grant_argv(config, connection, credits=needed)
+        commands.append(
+            _command(
+                "preview_credit_grant",
+                "dry_run_requires_private_operator_config",
+                grant_argv + ["--operator-config", "<private-operator-config.json>", "--dry-run", "--json"],
+            )
+        )
+        return commands
+    if action_id == "wait_for_model_capable_worker_or_change_model":
+        return [
+            _command(
+                "check_node_status",
+                "read_only_model_route_check",
+                _base_node_status_argv(config, connection),
+            )
+        ]
+    return []
+
+
+def _base_chat_session_argv(config: ChatGatewayConfig, subcommand: str, connection: dict[str, Any]) -> list[str]:
+    return [
+        "python",
+        "-m",
+        "chatp2p.cli",
+        "chat",
+        subcommand,
+        "--out",
+        str(config.out_dir.expanduser().resolve()),
+        "--session-id",
+        config.session_id,
+        *_connection_argv(config, connection),
+        "--client-timeout-seconds",
+        str(config.client_timeout_seconds),
+    ]
+
+
+def _chat_continue_options(config: ChatGatewayConfig) -> list[str]:
+    argv = [
+        "--model",
+        config.model,
+        "--requester-account-id",
+        config.requester_account_id,
+        "--job-cost",
+        str(config.job_cost),
+        "--reward",
+        str(config.reward),
+        "--ttl-seconds",
+        str(config.ttl_seconds),
+        "--timeout-seconds",
+        str(config.timeout_seconds),
+        "--poll-interval",
+        str(config.poll_interval),
+        "--max-context-turns",
+        str(config.max_context_turns),
+    ]
+    if config.system is not None:
+        argv.extend(["--system", config.system])
+    if config.temperature is not None:
+        argv.extend(["--temperature", str(config.temperature)])
+    if config.max_tokens is not None:
+        argv.extend(["--max-tokens", str(config.max_tokens)])
+    if config.no_wait:
+        argv.append("--no-wait")
+    return argv
+
+
+def _base_node_status_argv(config: ChatGatewayConfig, connection: dict[str, Any]) -> list[str]:
+    return [
+        "python",
+        "-m",
+        "chatp2p.cli",
+        "node",
+        "status",
+        *_connection_argv(config, connection),
+    ]
+
+
+def _base_operator_credits_argv(config: ChatGatewayConfig, connection: dict[str, Any]) -> list[str]:
+    return [
+        "python",
+        "-m",
+        "chatp2p.cli",
+        "operator",
+        "credits",
+        "--out",
+        str((config.out_dir.expanduser().resolve().parent / "operator-credits")),
+        "--requester-account-id",
+        config.requester_account_id,
+        "--min-requester-balance",
+        str(config.job_cost),
+        *_connection_argv(config, connection),
+        "--client-timeout-seconds",
+        str(config.client_timeout_seconds),
+    ]
+
+
+def _base_operator_grant_argv(
+    config: ChatGatewayConfig,
+    connection: dict[str, Any],
+    *,
+    credits: int,
+) -> list[str]:
+    return [
+        "python",
+        "-m",
+        "chatp2p.cli",
+        "operator",
+        "grant-requester-credits",
+        "--out",
+        str((config.out_dir.expanduser().resolve().parent / "operator-credit-grant")),
+        "--requester-account-id",
+        config.requester_account_id,
+        "--credits",
+        str(credits),
+        *_connection_argv(config, connection),
+        "--client-timeout-seconds",
+        str(config.client_timeout_seconds),
+    ]
+
+
+def _connection_argv(config: ChatGatewayConfig, connection: dict[str, Any]) -> list[str]:
+    if config.invite_path is not None:
+        return ["--invite", str(config.invite_path.expanduser().resolve())]
+    return ["--coordinator", str(connection["coordinator_url"])]
+
+
+def _command(command_id: str, side_effect: str, argv: list[str]) -> dict[str, Any]:
+    return {
+        "id": command_id,
+        "side_effect": side_effect,
+        "argv": argv,
+        "command": _command_text(argv),
+    }
+
+
+def _command_text(argv: list[str]) -> str:
+    return " ".join(_powershell_quote(part) for part in argv)
+
+
+def _powershell_quote(value: str) -> str:
+    if value and all(char.isalnum() or char in ".:/\\-_=" for char in value):
+        return value
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _safe_url(url: str) -> str:

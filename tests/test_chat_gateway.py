@@ -64,6 +64,7 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert 'id="readinessBadge"' in page
     assert 'id="modelRoute"' in page
     assert 'id="coordinatorState"' in page
+    assert 'id="commandHint"' in page
     assert 'id="balance"' in page
     assert 'id="sendButton"' in page
     assert "turn user status-" in page
@@ -109,6 +110,10 @@ def test_chat_gateway_readiness_ready_redacts_node_and_key(tmp_path):
     assert readiness["summary"]["requester_balance"] == 2
     assert readiness["summary"]["live_eligible_node_count"] == 1
     assert readiness["summary"]["recommended_next_action"] == "continue_chat_session"
+    assert readiness["summary"]["suggested_command"] is None
+    assert readiness["action_hint"]["id"] == "continue_chat_session"
+    assert readiness["action_hint"]["partner_required"] is False
+    assert readiness["action_hint"]["commands"] == []
     assert worker_identity.node_id not in serialized
     assert worker_identity.public_key not in serialized
 
@@ -139,6 +144,9 @@ def test_chat_gateway_readiness_blocks_when_coordinator_unreachable(tmp_path):
     assert readiness["summary"]["can_send"] is False
     assert readiness["summary"]["coordinator_reachable"] is False
     assert readiness["summary"]["recommended_next_action"] == "start_or_check_local_coordinator"
+    assert readiness["action_hint"]["commands"][0]["id"] == "check_coordinator"
+    assert "python -m chatp2p.cli node status" in readiness["action_hint"]["primary_command"]
+    assert "--coordinator http://127.0.0.1:9" in readiness["action_hint"]["primary_command"]
     assert token not in serialized
 
 
@@ -174,6 +182,14 @@ def test_chat_gateway_readiness_blocks_when_requester_has_no_credits(tmp_path):
     assert readiness["summary"]["requester_balance"] == 0
     assert readiness["summary"]["credits_sufficient"] is False
     assert readiness["summary"]["recommended_next_action"] == "grant_requester_credits"
+    assert [command["id"] for command in readiness["action_hint"]["commands"]] == [
+        "inspect_requester_credits",
+        "preview_credit_grant",
+    ]
+    assert "operator credits" in readiness["action_hint"]["commands"][0]["command"]
+    assert "operator grant-requester-credits" in readiness["action_hint"]["commands"][1]["command"]
+    assert "--operator-config '<private-operator-config.json>'" in readiness["action_hint"]["commands"][1]["command"]
+    assert "--dry-run" in readiness["action_hint"]["commands"][1]["command"]
 
 
 def test_chat_gateway_readiness_blocks_when_model_has_no_live_worker(tmp_path):
@@ -208,6 +224,8 @@ def test_chat_gateway_readiness_blocks_when_model_has_no_live_worker(tmp_path):
     assert readiness["summary"]["live_eligible_node_count"] == 0
     assert readiness["model_routing"]["live_node_count"] == 1
     assert readiness["summary"]["recommended_next_action"] == "wait_for_model_capable_worker_or_change_model"
+    assert readiness["action_hint"]["commands"][0]["id"] == "check_node_status"
+    assert "node status" in readiness["action_hint"]["primary_command"]
 
 
 def test_chat_gateway_readiness_blocks_unresolved_session_before_other_actions(tmp_path):
@@ -242,6 +260,9 @@ def test_chat_gateway_readiness_blocks_unresolved_session_before_other_actions(t
     assert readiness["summary"]["can_send"] is False
     assert readiness["summary"]["session_blocked"] is True
     assert readiness["summary"]["recommended_next_action"] == "run_session_resume_dry_run"
+    assert readiness["action_hint"]["commands"][0]["id"] == "preview_resume"
+    assert "chat session-resume" in readiness["action_hint"]["primary_command"]
+    assert "--dry-run" in readiness["action_hint"]["primary_command"]
 
 
 def test_chat_gateway_continue_creates_funded_turn(tmp_path):
