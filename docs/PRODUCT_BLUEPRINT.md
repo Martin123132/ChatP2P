@@ -100,6 +100,8 @@ Chat Gateway Session Controls V0 makes recovery less CLI-shaped without weakenin
 
 Chat Gateway Error Clarity V0 gives the UI stable categories for common blocked or failed states: coordinator unreachable, insufficient credits, missing model-capable workers, unresolved sessions, invalid model names, and request timeouts. Those categories keep the visible banner and safe action hints predictable without changing the guarded spend path.
 
+Chat Gateway Conversation List V0 adds local multi-session visibility without creating a new backend. The gateway lists compact session summaries from a safe sessions root, lets the page switch between local conversations by validated session id, and keeps raw prompts, answers, worker ids, and artifacts out of the list endpoint.
+
 Local Chat Demo V0 packages the whole product loop into one localhost command. It starts a temporary coordinator, fake Ollama-compatible runtime, worker, funded requester account, and gateway so the operator can prove `start -> open chat -> send prompt -> worker answers -> credits move` without a partner node or real model download.
 
 Chat Demo Modes V0 keeps the fake no-dependency demo as the default and adds `--mode ollama` for a real local model. Ollama mode preflights the requested model before opening the gateway, so the operator gets a clear setup error instead of a broken chat surface.

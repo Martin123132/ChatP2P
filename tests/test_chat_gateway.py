@@ -9,6 +9,7 @@ from chatp2p.chat_gateway import (
     CHAT_GATEWAY_READINESS_SCHEMA,
     CHAT_GATEWAY_REPORT_SCHEMA,
     CHAT_GATEWAY_SESSION_CONTROL_SCHEMA,
+    CHAT_GATEWAY_SESSIONS_SCHEMA,
     CHAT_GATEWAY_TRANSCRIPT_SCHEMA,
     DEFAULT_CHAT_GATEWAY_HOST,
     DEFAULT_CHAT_GATEWAY_PORT,
@@ -40,6 +41,7 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     )
     try:
         health = _get_json(f"{base_url}/health")
+        sessions = _get_json(f"{base_url}/api/sessions")
         status = _get_json(f"{base_url}/api/session/status")
         transcript = _get_json(f"{base_url}/api/session/transcript")
         page = _get_text(f"{base_url}/")
@@ -53,27 +55,36 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert health["config"]["host"] == DEFAULT_CHAT_GATEWAY_HOST
     assert health["config"]["auth"]["admission_token_present"] is True
     assert health["endpoints"]["session_transcript"] == "/api/session/transcript"
+    assert health["endpoints"]["sessions"] == "/api/sessions"
     assert health["endpoints"]["chat_readiness"] == "/api/chat/readiness"
     assert health["endpoints"]["chat_models"] == "/api/chat/models"
     assert health["endpoints"]["session_reset_dry_run"] == "/api/session/reset-dry-run"
     assert health["endpoints"]["session_archive_dry_run"] == "/api/session/archive-dry-run"
+    assert sessions["schema"] == CHAT_GATEWAY_SESSIONS_SCHEMA
+    assert sessions["summary"]["current_session_id"] == "demo"
+    assert sessions["sessions"][0]["session_id"] == "demo"
+    assert sessions["sessions"][0]["status"] == "no_session"
     assert status["status"] == "no_session"
     assert status["summary"]["recommended_next_action"] == "continue_chat_session"
     assert transcript["schema"] == CHAT_GATEWAY_TRANSCRIPT_SCHEMA
     assert transcript["status"] == "no_session"
     assert transcript["turns"] == []
     assert "/api/session/transcript" in page
+    assert "/api/sessions" in page
     assert "/api/chat/readiness" in page
     assert "/api/chat/models" in page
     assert "/api/chat/continue" in page
     assert "/api/session/reset-dry-run" in page
     assert "/api/session/archive-dry-run" in page
-    assert "Session demo - tiny-test-model" in page
+    assert 'Session <span id="sessionLabel">demo</span> - tiny-test-model' in page
     assert 'id="blockedBanner"' in page
     assert 'id="readinessBadge"' in page
     assert 'id="modelRoute"' in page
     assert 'id="modelCatalog"' in page
     assert 'id="modelSelect"' in page
+    assert 'id="sessionLabel"' in page
+    assert 'id="sessionsList"' in page
+    assert 'id="newSessionButton"' in page
     assert 'id="apiErrorBanner"' in page
     assert 'id="coordinatorState"' in page
     assert 'id="commandHint"' in page
@@ -92,6 +103,9 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert "Run Safe Action" in page
     assert "New Session Dry Run" in page
     assert "Archive Dry Run" in page
+    assert "Conversations" in page
+    assert "session_id: activeSessionId" in page
+    assert "setActiveSession" in page
     assert "model: selectedModel()" in page
     assert "innerHTML" not in page
     assert "\u00b7" not in page
@@ -819,6 +833,130 @@ def test_chat_gateway_session_control_dry_run_handles_missing_session(tmp_path):
     assert not (tmp_path / "chat-session" / "chat-session.json").exists()
 
 
+def test_chat_gateway_sessions_list_safe_local_summaries(tmp_path):
+    root = tmp_path / "sessions"
+    _write_chat_session_fixture(
+        root / "demo",
+        session_id="demo",
+        prompt="Do not list this prompt",
+        answer="Do not list this answer",
+        worker_node_id="worker_fixture_sensitive_one",
+        updated_at="2026-06-06T10:00:00+00:00",
+    )
+    _write_chat_session_fixture(
+        root / "second",
+        session_id="second",
+        prompt="Hidden second prompt",
+        answer="Hidden second answer",
+        worker_node_id="worker_fixture_sensitive_two",
+        updated_at="2026-06-06T11:00:00+00:00",
+    )
+    token = "alpha-token-session-list-secret"
+    server, thread, base_url = _start_gateway(
+        ChatGatewayConfig(
+            out_dir=root / "demo",
+            session_id="demo",
+            sessions_root=root,
+            model="tiny-test-model",
+            requester_account_id="requester_gateway_account",
+            admission_token=token,
+            port=0,
+        )
+    )
+    try:
+        sessions = _get_json(f"{base_url}/api/sessions")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    serialized = json.dumps(sessions)
+    assert sessions["schema"] == CHAT_GATEWAY_SESSIONS_SCHEMA
+    assert sessions["status"] == "pass"
+    assert sessions["summary"]["session_count"] == 2
+    assert sessions["summary"]["current_session_id"] == "demo"
+    assert [session["session_id"] for session in sessions["sessions"]] == ["demo", "second"]
+    assert sessions["sessions"][0]["current"] is True
+    assert sessions["sessions"][0]["turn_count"] == 1
+    assert sessions["sessions"][0]["latest_model"] == "tiny-test-model"
+    assert "Do not list this prompt" not in serialized
+    assert "Do not list this answer" not in serialized
+    assert "worker_fixture_sensitive_one" not in serialized
+    assert token not in serialized
+
+
+def test_chat_gateway_selected_session_query_reads_safe_sibling_session(tmp_path):
+    root = tmp_path / "sessions"
+    _write_chat_session_fixture(
+        root / "demo",
+        session_id="demo",
+        prompt="Default prompt",
+        answer="Default answer",
+        worker_node_id="worker_default",
+        updated_at="2026-06-06T10:00:00+00:00",
+    )
+    _write_chat_session_fixture(
+        root / "second",
+        session_id="second",
+        prompt="Second prompt",
+        answer="Second answer",
+        worker_node_id="worker_second",
+        updated_at="2026-06-06T11:00:00+00:00",
+    )
+    server, thread, base_url = _start_gateway(
+        ChatGatewayConfig(
+            out_dir=root / "demo",
+            session_id="demo",
+            sessions_root=root,
+            model="tiny-test-model",
+            requester_account_id="requester_gateway_account",
+            port=0,
+        )
+    )
+    try:
+        default_transcript = _get_json(f"{base_url}/api/session/transcript")
+        selected_transcript = _get_json(f"{base_url}/api/session/transcript?session_id=second")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert default_transcript["session_id"] == "demo"
+    assert default_transcript["turns"][0]["prompt"] == "Default prompt"
+    assert selected_transcript["session_id"] == "second"
+    assert selected_transcript["turns"][0]["prompt"] == "Second prompt"
+    assert selected_transcript["turns"][0]["answer"] == "Second answer"
+
+
+def test_chat_gateway_rejects_invalid_session_override(tmp_path):
+    server, thread, base_url = _start_gateway(
+        ChatGatewayConfig(
+            out_dir=tmp_path / "chat-session",
+            session_id="demo",
+            model="tiny-test-model",
+            requester_account_id="requester_gateway_account",
+            port=0,
+        )
+    )
+    try:
+        get_code, get_error = _get_json_error(f"{base_url}/api/session/transcript?session_id=..%2Fsecret")
+        post_code, post_error = _post_json_error(
+            f"{base_url}/api/chat/continue",
+            {"prompt": "Hello", "session_id": "bad/path"},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert get_code == 400
+    assert get_error["error_category"] == "invalid_session"
+    assert get_error["summary"]["recommended_next_action"] == "choose_valid_session"
+    assert post_code == 400
+    assert post_error["error_category"] == "invalid_session"
+    assert not (tmp_path / "secret").exists()
+
+
 def test_chat_gateway_parser_accepts_required_flags():
     parser = build_parser()
 
@@ -830,6 +968,8 @@ def test_chat_gateway_parser_accepts_required_flags():
             "D:\\ChatP2PData\\chat-session",
             "--session-id",
             "demo",
+            "--sessions-root",
+            "D:\\ChatP2PData\\chat-sessions",
             "--model",
             "tiny-test-model",
             "--requester-account-id",
@@ -839,6 +979,7 @@ def test_chat_gateway_parser_accepts_required_flags():
 
     assert args.func.__name__ == "run_chat_gateway_command"
     assert args.chat_command == "gateway"
+    assert args.sessions_root == "D:\\ChatP2PData\\chat-sessions"
     assert args.host == DEFAULT_CHAT_GATEWAY_HOST
     assert args.port == DEFAULT_CHAT_GATEWAY_PORT
 
@@ -884,6 +1025,14 @@ def _get_json(url):
 def _get_text(url):
     with urlopen(url, timeout=10) as response:
         return response.read().decode("utf-8")
+
+
+def _get_json_error(url):
+    try:
+        with urlopen(url, timeout=10) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
 def _post_json(url, payload):
@@ -943,6 +1092,67 @@ def _run_worker_until_jobs(client, worker, errors, count):
             return
     if completed != count:
         errors.append(f"worker completed {completed}/{count} jobs")
+
+
+def _write_chat_session_fixture(
+    path,
+    *,
+    session_id,
+    prompt,
+    answer,
+    worker_node_id,
+    updated_at,
+):
+    path.mkdir(parents=True, exist_ok=True)
+    session = {
+        "schema": CHAT_SESSION_REPORT_SCHEMA,
+        "ok": True,
+        "status": "pass",
+        "session_id": session_id,
+        "title": session_id,
+        "created_at": "2026-06-06T09:00:00+00:00",
+        "updated_at": updated_at,
+        "config": {
+            "out_dir": str(path),
+            "session_id": session_id,
+            "model": "tiny-test-model",
+            "requester_account_id": "requester_gateway_account",
+        },
+        "turns": [
+            {
+                "turn_id": "turn-0001",
+                "turn_index": 1,
+                "created_at": "2026-06-06T09:01:00+00:00",
+                "ok": True,
+                "status": "pass",
+                "prompt": prompt,
+                "answer": answer,
+                "model": "tiny-test-model",
+                "job_id": "job_fixture",
+                "job_status": "verified",
+                "worker_node_id": worker_node_id,
+                "requester_balance_after": 1,
+                "worker_balance_after": 1,
+                "recommended_next_action": "continue_chat_session",
+                "context_message_count": 0,
+                "artifacts": {},
+                "errors": [],
+            }
+        ],
+        "summary": {
+            "status": "pass",
+            "turn_count": 1,
+            "completed_turns": 1,
+            "submitted_turns": 0,
+            "failed_turns": 0,
+            "recommended_next_action": "continue_chat_session",
+        },
+        "errors": [],
+        "artifacts": {"json": str(path / "chat-session.json")},
+    }
+    session_path = path / "chat-session.json"
+    session_path.write_text(json.dumps(session, indent=2, sort_keys=True), encoding="utf-8")
+    return session_path
 
 
 def _write_failed_session_fixture(path):

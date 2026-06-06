@@ -387,6 +387,7 @@ For a future UI or local browser test surface, use the localhost-only chat gatew
 python -m chatp2p.cli chat gateway `
   --invite D:\ChatP2PData\alpha-invite.json `
   --out D:\ChatP2PData\chat-session `
+  --sessions-root D:\ChatP2PData\chat-sessions `
   --session-id demo `
   --model llama3.2:3b `
   --requester-account-id requester_demo `
@@ -394,7 +395,7 @@ python -m chatp2p.cli chat gateway `
   --port 8787
 ```
 
-The gateway binds to `127.0.0.1`, serves a small manual chat UI at `/`, and exposes local JSON endpoints for health, pre-send readiness, read-only model catalog, session status, privacy-safe transcript, session sync, resume dry-run, session reset dry-run, session archive dry-run, and guarded chat continuation. It reuses the same `chat continue` safety path, so unresolved turns still block new credit spend. The page renders user/assistant turns, requester balance, coordinator reachability, selected and recommended models, a local model picker backed by `/api/chat/models`, model-capable worker count, turn state, the next safe action, and a copyable local command hint when one is available. `GET /api/chat/readiness?model=<model>` and `POST /api/chat/continue` with `{ "prompt": "...", "model": "..." }` let a future UI preview and send with a chosen advertised model. Blocked/fail responses include stable categories such as `coordinator_unreachable`, `insufficient_credits`, `no_model_worker`, `unresolved_session`, `invalid_model`, and `request_timeout`, plus safe action hints. The safe-action button only invokes allowlisted no-spend session controls, while reset/archive controls are dry-run reports first. Credit-grant hints remain dry-run by default and require a private operator config.
+The gateway binds to `127.0.0.1`, serves a small manual chat UI at `/`, and exposes local JSON endpoints for health, conversation list, pre-send readiness, read-only model catalog, session status, privacy-safe transcript, session sync, resume dry-run, session reset dry-run, session archive dry-run, and guarded chat continuation. It reuses the same `chat continue` safety path, so unresolved turns still block new credit spend. The page renders user/assistant turns, a local conversation strip backed by `/api/sessions`, requester balance, coordinator reachability, selected and recommended models, a local model picker backed by `/api/chat/models`, model-capable worker count, turn state, the next safe action, and a copyable local command hint when one is available. `GET /api/chat/readiness?session_id=<session>&model=<model>` and `POST /api/chat/continue` with `{ "prompt": "...", "session_id": "...", "model": "..." }` let a future UI preview and send with a chosen local conversation and advertised model. Conversation ids are constrained to safe local names only. Blocked/fail responses include stable categories such as `coordinator_unreachable`, `insufficient_credits`, `no_model_worker`, `unresolved_session`, `invalid_model`, `invalid_session`, and `request_timeout`, plus safe action hints. The safe-action button only invokes allowlisted no-spend session controls, while reset/archive controls are dry-run reports first. Credit-grant hints remain dry-run by default and require a private operator config.
 
 Inspect a session without creating a job or spending credits:
 

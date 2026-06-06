@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,17 +34,21 @@ CHAT_GATEWAY_TRANSCRIPT_SCHEMA = "chatp2p.chat-gateway-transcript.v1"
 CHAT_GATEWAY_READINESS_SCHEMA = "chatp2p.chat-gateway-readiness.v1"
 CHAT_GATEWAY_MODEL_CATALOG_SCHEMA = "chatp2p.chat-gateway-model-catalog.v1"
 CHAT_GATEWAY_SESSION_CONTROL_SCHEMA = "chatp2p.chat-gateway-session-control.v1"
+CHAT_GATEWAY_SESSIONS_SCHEMA = "chatp2p.chat-gateway-sessions.v1"
 DEFAULT_CHAT_GATEWAY_HOST = "127.0.0.1"
 DEFAULT_CHAT_GATEWAY_PORT = 8787
 DEFAULT_CHAT_GATEWAY_MAX_REQUEST_BYTES = 16_384
 CHAT_GATEWAY_MAX_MODEL_LENGTH = 128
+CHAT_GATEWAY_MAX_SESSION_ID_LENGTH = 80
 CHAT_GATEWAY_MODEL_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-/")
+CHAT_GATEWAY_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 GATEWAY_ERROR_CATEGORIES = {
     "coordinator_unreachable",
     "insufficient_credits",
     "no_model_worker",
     "unresolved_session",
     "invalid_model",
+    "invalid_session",
     "request_timeout",
 }
 CHAT_GATEWAY_SESSION_FILES = (
@@ -64,6 +69,7 @@ CHAT_GATEWAY_SESSION_FILES = (
 class ChatGatewayConfig:
     out_dir: Path = Path(".mesh/chat-session")
     session_id: str = "default"
+    sessions_root: Path | None = None
     title: str | None = None
     coordinator_url: str | None = None
     invite_path: Path | None = None
@@ -108,21 +114,40 @@ def create_chat_gateway_server(config: ChatGatewayConfig) -> ThreadingHTTPServer
             if parsed.path == "/health":
                 _json_response(self, 200, _health_payload(config=safe_config, software=software))
                 return
+            if parsed.path == "/api/sessions":
+                _json_response(self, 200, _sessions_payload(config))
+                return
             if parsed.path == "/api/session/status":
-                _json_response(self, 200, _status_payload(config))
+                request_config, error = _config_from_query_session(config, parsed.query)
+                if error:
+                    _json_response(self, 400, _bad_session_payload(error))
+                    return
+                _json_response(self, 200, _status_payload(request_config))
                 return
             if parsed.path == "/api/session/transcript":
-                _json_response(self, 200, _transcript_payload(config))
+                request_config, error = _config_from_query_session(config, parsed.query)
+                if error:
+                    _json_response(self, 400, _bad_session_payload(error))
+                    return
+                _json_response(self, 200, _transcript_payload(request_config))
                 return
             if parsed.path == "/api/chat/readiness":
-                request_config, error = _config_from_query_model(config, parsed.query)
+                request_config, error = _config_from_query_session(config, parsed.query)
+                if error:
+                    _json_response(self, 400, _bad_session_payload(error))
+                    return
+                request_config, error = _config_from_query_model(request_config, parsed.query)
                 if error:
                     _json_response(self, 400, _bad_model_payload(error))
                     return
                 _json_response(self, 200, _readiness_payload(request_config))
                 return
             if parsed.path == "/api/chat/models":
-                request_config, error = _config_from_query_model(config, parsed.query)
+                request_config, error = _config_from_query_session(config, parsed.query)
+                if error:
+                    _json_response(self, 400, _bad_session_payload(error))
+                    return
+                request_config, error = _config_from_query_model(request_config, parsed.query)
                 if error:
                     _json_response(self, 400, _bad_model_payload(error))
                     return
@@ -133,16 +158,32 @@ def create_chat_gateway_server(config: ChatGatewayConfig) -> ThreadingHTTPServer
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path == "/api/session/sync":
-                _json_response(self, 200, _sync_payload(config))
+                request_config, error = _config_from_query_session(config, parsed.query)
+                if error:
+                    _json_response(self, 400, _bad_session_payload(error))
+                    return
+                _json_response(self, 200, _sync_payload(request_config))
                 return
             if parsed.path == "/api/session/resume-dry-run":
-                _json_response(self, 200, _resume_dry_run_payload(config))
+                request_config, error = _config_from_query_session(config, parsed.query)
+                if error:
+                    _json_response(self, 400, _bad_session_payload(error))
+                    return
+                _json_response(self, 200, _resume_dry_run_payload(request_config))
                 return
             if parsed.path == "/api/session/reset-dry-run":
-                _json_response(self, 200, _session_dry_run_payload(config, action="reset"))
+                request_config, error = _config_from_query_session(config, parsed.query)
+                if error:
+                    _json_response(self, 400, _bad_session_payload(error))
+                    return
+                _json_response(self, 200, _session_dry_run_payload(request_config, action="reset"))
                 return
             if parsed.path == "/api/session/archive-dry-run":
-                _json_response(self, 200, _session_dry_run_payload(config, action="archive"))
+                request_config, error = _config_from_query_session(config, parsed.query)
+                if error:
+                    _json_response(self, 400, _bad_session_payload(error))
+                    return
+                _json_response(self, 200, _session_dry_run_payload(request_config, action="archive"))
                 return
             if parsed.path == "/api/chat/continue":
                 request = _read_json_request(self, max_bytes=config.max_request_bytes)
@@ -159,7 +200,11 @@ def create_chat_gateway_server(config: ChatGatewayConfig) -> ThreadingHTTPServer
                         ),
                     )
                     return
-                request_config, error = _config_from_model_override(config, request.get("model"))
+                request_config, error = _config_from_session_override(config, request.get("session_id"))
+                if error:
+                    _json_response(self, 400, _bad_session_payload(error))
+                    return
+                request_config, error = _config_from_model_override(request_config, request.get("model"))
                 if error:
                     _json_response(self, 400, _bad_model_payload(error))
                     return
@@ -200,6 +245,7 @@ def _health_payload(*, config: dict[str, Any], software: dict[str, Any]) -> dict
         "software": software,
         "endpoints": {
             "health": "/health",
+            "sessions": "/api/sessions",
             "session_status": "/api/session/status",
             "session_transcript": "/api/session/transcript",
             "chat_readiness": "/api/chat/readiness",
@@ -211,6 +257,171 @@ def _health_payload(*, config: dict[str, Any], software: dict[str, Any]) -> dict
             "chat_continue": "/api/chat/continue",
         },
     }
+
+
+def _sessions_payload(config: ChatGatewayConfig) -> dict[str, Any]:
+    generated_at = datetime.now(timezone.utc).isoformat()
+    sessions_root = _sessions_root(config)
+    current_out_dir = config.out_dir.expanduser().resolve()
+    sessions: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    current_item = _session_list_item(
+        session_id=config.session_id,
+        out_dir=current_out_dir,
+        current=True,
+        include_missing=True,
+    )
+    if current_item is not None:
+        sessions.append(current_item)
+
+    if sessions_root.exists():
+        try:
+            for path in sorted(sessions_root.iterdir()):
+                if not path.is_dir():
+                    continue
+                if path.resolve() == current_out_dir:
+                    continue
+                if path.name == config.session_id:
+                    continue
+                session_id, error = _validate_session_override(path.name)
+                if error:
+                    continue
+                item = _session_list_item(
+                    session_id=session_id,
+                    out_dir=path.resolve(),
+                    current=False,
+                    include_missing=False,
+                )
+                if item is not None:
+                    sessions.append(item)
+        except OSError as exc:
+            warnings.append(f"{type(exc).__name__}: {exc}")
+
+    sessions.sort(key=_session_list_sort_key)
+    current_status = next((item["status"] for item in sessions if item["current"]), "unknown")
+    return {
+        "schema": CHAT_GATEWAY_SESSIONS_SCHEMA,
+        "ok": True,
+        "status": "pass" if not warnings else "warn",
+        "generated_at": generated_at,
+        "summary": {
+            "session_count": len(sessions),
+            "current_session_id": config.session_id,
+            "current_session_status": current_status,
+            "sessions_root": str(sessions_root),
+            "recommended_next_action": "select_or_continue_session",
+        },
+        "sessions": sessions,
+        "warnings": warnings,
+        "errors": [],
+    }
+
+
+def _session_list_item(
+    *,
+    session_id: str,
+    out_dir: Path,
+    current: bool,
+    include_missing: bool,
+) -> dict[str, Any] | None:
+    session_path = out_dir / "chat-session.json"
+    if not session_path.exists():
+        if not include_missing:
+            return None
+        return {
+            "session_id": session_id,
+            "title": session_id,
+            "status": "no_session",
+            "ok": True,
+            "current": current,
+            "has_session_file": False,
+            "turn_count": 0,
+            "completed_turns": 0,
+            "submitted_turns": 0,
+            "failed_turns": 0,
+            "latest_turn_id": None,
+            "latest_turn_status": None,
+            "latest_model": None,
+            "updated_at": None,
+            "recommended_next_action": "continue_chat_session",
+        }
+    try:
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "session_id": session_id,
+            "title": session_id,
+            "status": "unreadable",
+            "ok": False,
+            "current": current,
+            "has_session_file": True,
+            "turn_count": 0,
+            "completed_turns": 0,
+            "submitted_turns": 0,
+            "failed_turns": 0,
+            "latest_turn_id": None,
+            "latest_turn_status": None,
+            "latest_model": None,
+            "updated_at": None,
+            "recommended_next_action": "inspect_chat_session_status",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    file_session_id = str(session.get("session_id") or "")
+    if file_session_id and file_session_id != session_id:
+        return {
+            "session_id": session_id,
+            "title": session.get("title") or session_id,
+            "status": "session_id_mismatch",
+            "ok": False,
+            "current": current,
+            "has_session_file": True,
+            "turn_count": 0,
+            "completed_turns": 0,
+            "submitted_turns": 0,
+            "failed_turns": 0,
+            "latest_turn_id": None,
+            "latest_turn_status": None,
+            "latest_model": None,
+            "updated_at": session.get("updated_at"),
+            "recommended_next_action": "inspect_chat_session_status",
+        }
+
+    turns = list(session.get("turns") or [])
+    summary = dict(session.get("summary") or {})
+    latest_turn = turns[-1] if turns else {}
+    turn_count = len(turns)
+    return {
+        "session_id": session_id,
+        "title": session.get("title") or session_id,
+        "status": str(session.get("status") or summary.get("status") or "unknown"),
+        "ok": bool(session.get("ok", True)),
+        "current": current,
+        "has_session_file": True,
+        "turn_count": int(summary.get("turn_count") or turn_count),
+        "completed_turns": int(summary.get("completed_turns") or 0),
+        "submitted_turns": int(summary.get("submitted_turns") or 0),
+        "failed_turns": int(summary.get("failed_turns") or 0),
+        "latest_turn_id": latest_turn.get("turn_id"),
+        "latest_turn_status": latest_turn.get("status"),
+        "latest_model": latest_turn.get("model") or (session.get("config") or {}).get("model"),
+        "updated_at": session.get("updated_at") or session.get("created_at"),
+        "recommended_next_action": summary.get("recommended_next_action") or "continue_chat_session",
+    }
+
+
+def _session_list_sort_key(item: dict[str, Any]) -> tuple[int, str, str]:
+    current_rank = 0 if item.get("current") else 1
+    updated_at = str(item.get("updated_at") or "")
+    return (current_rank, _reverse_iso_sort_value(updated_at), str(item.get("session_id") or ""))
+
+
+def _reverse_iso_sort_value(value: str) -> str:
+    if not value:
+        return ""
+    # ASCII invert keeps ISO timestamps in descending order without parsing loose legacy values.
+    return "".join(chr(127 - min(ord(char), 127)) for char in value)
 
 
 def _status_payload(config: ChatGatewayConfig) -> dict[str, Any]:
@@ -568,6 +779,59 @@ def _model_catalog_payload(config: ChatGatewayConfig) -> dict[str, Any]:
     )
 
 
+def _config_from_query_session(config: ChatGatewayConfig, query: str) -> tuple[ChatGatewayConfig, str | None]:
+    values = parse_qs(query, keep_blank_values=True).get("session_id") or []
+    if not values:
+        return config, None
+    return _config_from_session_override(config, values[-1])
+
+
+def _config_from_session_override(config: ChatGatewayConfig, value: Any) -> tuple[ChatGatewayConfig, str | None]:
+    if value is None:
+        return config, None
+    session_id, error = _validate_session_override(value)
+    if error:
+        return config, error
+    if session_id == config.session_id:
+        return config, None
+    try:
+        out_dir = _session_out_dir(config, session_id)
+    except ValueError as exc:
+        return config, str(exc)
+    return replace(config, session_id=session_id, out_dir=out_dir), None
+
+
+def _validate_session_override(value: Any) -> tuple[str, str | None]:
+    if not isinstance(value, str):
+        return "", "session_id must be a string"
+    session_id = value.strip()
+    if not session_id:
+        return "", "session_id must be a non-empty string"
+    if session_id != value:
+        return "", "session_id must not contain leading or trailing whitespace"
+    if len(session_id) > CHAT_GATEWAY_MAX_SESSION_ID_LENGTH:
+        return "", f"session_id must be at most {CHAT_GATEWAY_MAX_SESSION_ID_LENGTH} characters"
+    if not CHAT_GATEWAY_SESSION_ID_RE.fullmatch(session_id):
+        return "", "session_id may contain only letters, numbers, dot, underscore, and dash"
+    return session_id, None
+
+
+def _sessions_root(config: ChatGatewayConfig) -> Path:
+    if config.sessions_root is not None:
+        return config.sessions_root.expanduser().resolve()
+    return config.out_dir.expanduser().resolve().parent
+
+
+def _session_out_dir(config: ChatGatewayConfig, session_id: str) -> Path:
+    root = _sessions_root(config)
+    candidate = (root / session_id).expanduser().resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("session_id must resolve inside sessions_root") from exc
+    return candidate
+
+
 def _config_from_query_model(config: ChatGatewayConfig, query: str) -> tuple[ChatGatewayConfig, str | None]:
     values = parse_qs(query, keep_blank_values=True).get("model") or []
     if not values:
@@ -619,10 +883,29 @@ def _bad_model_payload(error: str) -> dict[str, Any]:
     }
 
 
+def _bad_session_payload(error: str) -> dict[str, Any]:
+    return {
+        "schema": CHAT_GATEWAY_REPORT_SCHEMA,
+        "ok": False,
+        "status": "fail",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "error_category": "invalid_session",
+        "error": error,
+        "errors": [error],
+        "summary": {
+            "recommended_next_action": "choose_valid_session",
+            "error_category": "invalid_session",
+        },
+        "ui_message": _gateway_ui_message("invalid_session", "choose_valid_session"),
+        "action_hint": _static_action_hint("choose_valid_session", category="invalid_session"),
+    }
+
+
 def _render_gateway_html(config: ChatGatewayConfig) -> str:
     title = html.escape(config.session_id)
     model = html.escape(config.model)
     model_json = json.dumps(config.model)
+    session_json = json.dumps(config.session_id)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -667,6 +950,13 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     .command {{ display: none; border: 1px solid #d1d5db; background: #111827; color: #f9fafb; border-radius: 8px; padding: 10px 12px; font-family: Consolas, ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; }}
     .command.visible {{ display: block; }}
     .models {{ display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 13px; }}
+    #sessions {{ max-width: 1040px; width: 100%; margin: 0 auto; padding: 10px 20px 0; display: grid; gap: 8px; }}
+    .sessions-head {{ color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0; }}
+    #sessionsList {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+    .session-chip {{ display: inline-grid; gap: 2px; min-width: 132px; max-width: 230px; text-align: left; }}
+    .session-chip.active {{ border-color: var(--accent); background: #ecfdf5; color: #0f4f49; }}
+    .session-name {{ font-size: 13px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .session-meta {{ color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
     #turns {{ max-width: 1040px; width: 100%; margin: 0 auto; padding: 16px 20px 120px; display: grid; gap: 14px; align-content: start; }}
     .empty {{ border: 1px dashed #cbd5e1; border-radius: 8px; padding: 18px; color: var(--muted); background: rgba(255,255,255,.72); }}
     .turn {{ display: grid; gap: 8px; max-width: min(760px, 92%); }}
@@ -692,13 +982,14 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
       <div class="bar">
         <div>
           <h1>ChatP2P</h1>
-          <div class="sub">Session {title} - {model}</div>
+          <div class="sub">Session <span id="sessionLabel">{title}</span> - {model}</div>
         </div>
         <div class="actions">
           <button id="statusButton" type="button">Refresh</button>
           <button id="safeActionButton" type="button" hidden>Run Safe Action</button>
           <button id="syncButton" type="button">Sync</button>
           <button id="resumeButton" type="button">Resume Dry Run</button>
+          <button id="newSessionButton" type="button">New Local Session</button>
           <button id="resetButton" type="button">New Session Dry Run</button>
           <button id="archiveButton" type="button">Archive Dry Run</button>
         </div>
@@ -719,6 +1010,10 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
       <div id="blockedBanner" class="banner"></div>
       <div id="commandHint" class="command"></div>
     </section>
+    <section id="sessions">
+      <div class="sessions-head">Conversations</div>
+      <div id="sessionsList"></div>
+    </section>
     <section id="turns"></section>
   </main>
   <footer>
@@ -734,6 +1029,8 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     const modelRouteEl = document.querySelector("#modelRoute");
     const coordinatorStateEl = document.querySelector("#coordinatorState");
     const nextActionEl = document.querySelector("#nextAction");
+    const sessionLabelEl = document.querySelector("#sessionLabel");
+    const sessionsListEl = document.querySelector("#sessionsList");
     const modelCatalogEl = document.querySelector("#modelCatalog");
     const modelSelectEl = document.querySelector("#modelSelect");
     const apiErrorBanner = document.querySelector("#apiErrorBanner");
@@ -745,6 +1042,9 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     const safeActionButton = document.querySelector("#safeActionButton");
     const buttons = Array.from(document.querySelectorAll("button"));
     const defaultModel = {model_json};
+    const defaultSessionId = {session_json};
+    const initialParams = new URLSearchParams(window.location.search);
+    let activeSessionId = initialParams.get("session_id") || defaultSessionId;
     const blockedActions = new Set(["run_session_resume_dry_run", "run_session_sync_then_resume_dry_run", "wait_for_worker_result", "resume_failed_turn", "sync_session_then_resume_failed_turn"]);
     const safeActionEndpoints = {{
       run_session_sync: "/api/session/sync",
@@ -758,8 +1058,34 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     function selectedModel() {{
       return modelSelectEl.value || defaultModel;
     }}
+    function queryString(values = {{}}) {{
+      const params = new URLSearchParams();
+      if (activeSessionId && activeSessionId !== defaultSessionId) params.set("session_id", activeSessionId);
+      Object.entries(values).forEach(([key, value]) => {{
+        if (value !== null && value !== undefined && value !== "") params.set(key, value);
+      }});
+      const text = params.toString();
+      return text ? `?${{text}}` : "";
+    }}
+    function sessionPath(path) {{
+      return `${{path}}${{queryString()}}`;
+    }}
     function modelQuery() {{
-      return `?model=${{encodeURIComponent(selectedModel())}}`;
+      return queryString({{ model: selectedModel() }});
+    }}
+    function setActiveSession(sessionId) {{
+      activeSessionId = sessionId || defaultSessionId;
+      sessionLabelEl.textContent = activeSessionId;
+      const params = new URLSearchParams(window.location.search);
+      if (activeSessionId === defaultSessionId) params.delete("session_id");
+      else params.set("session_id", activeSessionId);
+      const query = params.toString();
+      const nextUrl = `${{window.location.pathname}}${{query ? `?${{query}}` : ""}}`;
+      window.history.replaceState({{}}, "", nextUrl);
+    }}
+    function newSessionId() {{
+      const stamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
+      return `session-${{stamp}}`;
     }}
     function setBusy(value) {{
       buttons.forEach((button) => button.disabled = value);
@@ -823,6 +1149,47 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
         modelSelectEl.append(option);
       }});
       modelSelectEl.value = choices.includes(current) ? current : selected || recommended || defaultModel;
+    }}
+    function renderSessions(report) {{
+      const sessions = Array.isArray(report.sessions) ? report.sessions.slice() : [];
+      if (!sessions.some((item) => item.session_id === activeSessionId)) {{
+        sessions.unshift({{
+          session_id: activeSessionId,
+          title: activeSessionId,
+          status: "new",
+          turn_count: 0,
+          latest_model: selectedModel(),
+          current: activeSessionId === defaultSessionId
+        }});
+      }}
+      sessionsListEl.replaceChildren();
+      if (!sessions.length) {{
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "No saved conversations.";
+        sessionsListEl.append(empty);
+        return;
+      }}
+      sessions.forEach((session) => {{
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = session.session_id === activeSessionId ? "session-chip active" : "session-chip";
+        const name = document.createElement("span");
+        name.className = "session-name";
+        name.textContent = session.title || session.session_id || "session";
+        const meta = document.createElement("span");
+        meta.className = "session-meta";
+        meta.textContent = `${{session.status || "unknown"}} - turns ${{session.turn_count ?? 0}}`;
+        const model = document.createElement("span");
+        model.className = "session-meta";
+        model.textContent = session.latest_model || "";
+        chip.append(name, meta, model);
+        chip.onclick = async () => {{
+          setActiveSession(session.session_id);
+          await refreshTranscript();
+        }};
+        sessionsListEl.append(chip);
+      }});
     }}
     function renderReadiness(report) {{
       const summary = report.summary || {{}};
@@ -933,6 +1300,14 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
         readinessBadge.textContent = "readiness failed";
       }}
     }}
+    async function refreshSessions() {{
+      try {{
+        const response = await fetch("/api/sessions");
+        renderSessions(await response.json());
+      }} catch (_error) {{
+        sessionsListEl.replaceChildren();
+      }}
+    }}
     async function request(path, options = {{}}) {{
       setBusy(true);
       try {{
@@ -940,23 +1315,28 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
         const report = await response.json();
         renderApiError(report, response.status);
         render(report);
-        await refreshReadiness();
+        await Promise.all([refreshReadiness(), refreshSessions()]);
       }} finally {{
         setBusy(false);
       }}
     }}
-    async function refreshTranscript() {{ await request("/api/session/transcript"); }}
+    async function refreshTranscript() {{ await request(sessionPath("/api/session/transcript")); }}
     document.querySelector("#statusButton").onclick = refreshTranscript;
     safeActionButton.onclick = async () => {{
       const path = safeActionEndpoints[currentSafeAction];
       if (!path) return;
-      await request(path, {{ method: "POST" }});
+      await request(sessionPath(path), {{ method: "POST" }});
       await refreshTranscript();
     }};
-    document.querySelector("#syncButton").onclick = async () => {{ await request("/api/session/sync", {{ method: "POST" }}); await refreshTranscript(); }};
-    document.querySelector("#resumeButton").onclick = () => request("/api/session/resume-dry-run", {{ method: "POST" }});
-    document.querySelector("#resetButton").onclick = () => request("/api/session/reset-dry-run", {{ method: "POST" }});
-    document.querySelector("#archiveButton").onclick = () => request("/api/session/archive-dry-run", {{ method: "POST" }});
+    document.querySelector("#syncButton").onclick = async () => {{ await request(sessionPath("/api/session/sync"), {{ method: "POST" }}); await refreshTranscript(); }};
+    document.querySelector("#resumeButton").onclick = () => request(sessionPath("/api/session/resume-dry-run"), {{ method: "POST" }});
+    document.querySelector("#newSessionButton").onclick = async () => {{
+      setActiveSession(newSessionId());
+      promptEl.focus();
+      await refreshTranscript();
+    }};
+    document.querySelector("#resetButton").onclick = () => request(sessionPath("/api/session/reset-dry-run"), {{ method: "POST" }});
+    document.querySelector("#archiveButton").onclick = () => request(sessionPath("/api/session/archive-dry-run"), {{ method: "POST" }});
     modelSelectEl.onchange = refreshReadiness;
     document.querySelector("#chatForm").onsubmit = async (event) => {{
       event.preventDefault();
@@ -966,10 +1346,12 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
       await request("/api/chat/continue", {{
         method: "POST",
         headers: {{ "Content-Type": "application/json" }},
-        body: JSON.stringify({{ prompt, model: selectedModel() }})
+        body: JSON.stringify({{ prompt, model: selectedModel(), session_id: activeSessionId }})
       }});
       await refreshTranscript();
     }};
+    setActiveSession(activeSessionId);
+    refreshSessions();
     refreshReadiness();
     refreshTranscript();
   </script>
@@ -1178,6 +1560,8 @@ def _action_id_for_category(category: str | None, fallback: str = "") -> str:
         return "run_session_sync"
     if category == "invalid_model":
         return "choose_valid_model"
+    if category == "invalid_session":
+        return "choose_valid_session"
     return fallback or "inspect_chat_gateway_response"
 
 
@@ -1188,7 +1572,7 @@ def _gateway_action_hint(
     category: str | None,
     requester_balance: int | None,
 ) -> dict[str, Any]:
-    if action_id == "choose_valid_model":
+    if action_id in {"choose_valid_model", "choose_valid_session"}:
         return _static_action_hint(action_id, category=category)
     connection = _resolve_gateway_connection(config)
     commands = _readiness_commands(
@@ -1230,6 +1614,8 @@ def _gateway_ui_message(category: str | None, action_id: str) -> str | None:
         return "No live worker currently advertises the selected model."
     if category == "invalid_model":
         return "Choose a valid model name from the catalog."
+    if category == "invalid_session":
+        return "Choose a valid local session."
     if category == "request_timeout":
         return "The request timed out before a verified answer arrived."
     if action_id and action_id != "continue_chat_session":
@@ -1731,6 +2117,7 @@ def _redact_node_id(node_id: Any) -> str | None:
 def _safe_config(config: ChatGatewayConfig) -> dict[str, Any]:
     return {
         "out_dir": str(config.out_dir.expanduser().resolve()),
+        "sessions_root": str(_sessions_root(config)),
         "session_id": config.session_id,
         "coordinator": config.coordinator_url,
         "invite_path": str(config.invite_path.expanduser().resolve()) if config.invite_path else None,
@@ -1757,6 +2144,9 @@ def _safe_config(config: ChatGatewayConfig) -> dict[str, Any]:
 def _validate_config(config: ChatGatewayConfig) -> None:
     if not config.session_id.strip():
         raise ValueError("--session-id must be non-empty")
+    _, session_error = _validate_session_override(config.session_id)
+    if session_error:
+        raise ValueError(f"--session-id {session_error}")
     if not config.model.strip():
         raise ValueError("--model must be non-empty")
     if not config.requester_account_id.strip():

@@ -594,6 +594,7 @@ def run_chat_gateway_command(args: argparse.Namespace) -> None:
             ChatGatewayConfig(
                 out_dir=Path(args.out),
                 session_id=args.session_id,
+                sessions_root=Path(args.sessions_root) if args.sessions_root else None,
                 title=args.title,
                 coordinator_url=args.coordinator,
                 invite_path=Path(args.invite) if args.invite else None,
@@ -3346,6 +3347,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output directory for chat-session.json, chat-session.md, and per-turn reports",
     )
     chat_gateway_parser.add_argument("--session-id", default="default", help="Stable local session id")
+    chat_gateway_parser.add_argument(
+        "--sessions-root",
+        default=None,
+        help="Optional parent directory for multiple local chat session folders",
+    )
     chat_gateway_parser.add_argument("--title", default=None, help="Optional session title")
     chat_gateway_parser.add_argument(
         "--coordinator",
