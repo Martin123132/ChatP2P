@@ -627,6 +627,7 @@ def run_chat_demo_command(args: argparse.Namespace) -> None:
                 out_dir=Path(args.out),
                 session_id=args.session_id,
                 title=args.title,
+                mode=args.mode,
                 model=args.model,
                 system=args.system,
                 requester_account_id=args.requester_account_id,
@@ -641,6 +642,8 @@ def run_chat_demo_command(args: argparse.Namespace) -> None:
                 client_timeout_seconds=args.client_timeout_seconds,
                 max_context_turns=args.max_context_turns,
                 fake_answer=args.fake_answer,
+                ollama_base_url=args.ollama_base_url,
+                ollama_timeout_seconds=args.ollama_timeout_seconds,
                 host=args.host,
                 port=args.port,
                 coordinator_port=args.coordinator_port,
@@ -3408,6 +3411,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chat_demo_parser.add_argument("--session-id", default="demo", help="Stable local session id")
     chat_demo_parser.add_argument("--title", default="Local Chat Demo", help="Optional session title")
+    chat_demo_parser.add_argument(
+        "--mode",
+        default="fake",
+        choices=("fake", "ollama"),
+        help="Model runtime mode: fake for no dependencies, ollama for a real local model",
+    )
     chat_demo_parser.add_argument("--model", default="tiny-test-model", help="Demo model name")
     chat_demo_parser.add_argument("--system", default="Be concise.", help="Optional system message for model context")
     chat_demo_parser.add_argument(
@@ -3444,6 +3453,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--fake-answer",
         default="ChatP2P demo answer from a local fake model worker.",
         help="Answer returned by the fake local model runtime",
+    )
+    chat_demo_parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="Ollama base URL used when --mode ollama",
+    )
+    chat_demo_parser.add_argument(
+        "--ollama-timeout-seconds",
+        default=30.0,
+        type=float,
+        help="Seconds to wait for Ollama preflight and generation in --mode ollama",
     )
     chat_demo_parser.add_argument(
         "--host",

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 import webbrowser
@@ -23,6 +22,7 @@ from .client import CoordinatorClient
 from .coordinator import Coordinator
 from .crypto import NodeIdentity
 from .http_api import create_coordinator_http_server
+from .ollama import DEFAULT_OLLAMA_BASE_URL, list_ollama_models
 from .packets import NodeRegistration
 from .worker import WorkerNode
 
@@ -35,6 +35,7 @@ class ChatDemoConfig:
     out_dir: Path = Path(".mesh/chat-demo")
     session_id: str = "demo"
     title: str | None = "Local Chat Demo"
+    mode: str = "fake"
     model: str = "tiny-test-model"
     system: str | None = "Be concise."
     requester_account_id: str = "requester_demo"
@@ -49,6 +50,8 @@ class ChatDemoConfig:
     client_timeout_seconds: float = 10.0
     max_context_turns: int = 8
     fake_answer: str = "ChatP2P demo answer from a local fake model worker."
+    ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
+    ollama_timeout_seconds: float = 30.0
     host: str = DEFAULT_CHAT_GATEWAY_HOST
     port: int = DEFAULT_CHAT_GATEWAY_PORT
     coordinator_host: str = "127.0.0.1"
@@ -65,7 +68,7 @@ class ChatDemoRuntime:
     coordinator: Coordinator
     coordinator_server: Any
     coordinator_thread: threading.Thread
-    fake_ollama: Any
+    model_runtime: Any
     worker: WorkerNode
     worker_thread: threading.Thread
     worker_stop: threading.Event
@@ -102,11 +105,12 @@ class ChatDemoRuntime:
             "urls": {
                 "gateway": self.gateway_url,
                 "coordinator": self.coordinator_url,
-                "fake_ollama": self.fake_ollama.base_url,
+                "model_runtime": self.model_runtime.base_url,
             },
             "config": {
                 "out_dir": str(self.config.out_dir.expanduser().resolve()),
                 "session_id": self.config.session_id,
+                "mode": self.config.mode,
                 "model": self.config.model,
                 "requester_account_id": self.config.requester_account_id,
                 "starting_credits": self.config.starting_credits,
@@ -136,7 +140,7 @@ class ChatDemoRuntime:
         self.coordinator_server.shutdown()
         self.coordinator_server.server_close()
         self.coordinator_thread.join(timeout=2)
-        self.fake_ollama.stop()
+        self.model_runtime.stop()
         self.worker_thread.join(timeout=2)
 
 
@@ -148,7 +152,7 @@ def create_chat_demo_runtime(config: ChatDemoConfig) -> ChatDemoRuntime:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     started_at = datetime.now(timezone.utc).isoformat()
-    fake_ollama = _start_fake_ollama(model=config.model, answer=config.fake_answer)
+    model_runtime = _start_model_runtime(config)
     coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
     coordinator_server = create_coordinator_http_server(
         coordinator,
@@ -172,8 +176,9 @@ def create_chat_demo_runtime(config: ChatDemoConfig) -> ChatDemoRuntime:
     worker_identity = NodeIdentity.generate(prefix="worker")
     worker = WorkerNode(
         identity=worker_identity,
-        capability_profile=_ollama_capabilities(models=[config.model], base_url=fake_ollama.base_url),
-        ollama_base_url=fake_ollama.base_url,
+        capability_profile=_ollama_capabilities(models=[config.model], base_url=model_runtime.base_url),
+        ollama_base_url=model_runtime.base_url,
+        ollama_timeout_seconds=config.ollama_timeout_seconds,
     )
     client = CoordinatorClient(coordinator_url, timeout_seconds=config.client_timeout_seconds)
     registration = NodeRegistration.create(node=worker.identity, capabilities=worker.capabilities())
@@ -221,7 +226,7 @@ def create_chat_demo_runtime(config: ChatDemoConfig) -> ChatDemoRuntime:
         coordinator=coordinator,
         coordinator_server=coordinator_server,
         coordinator_thread=coordinator_thread,
-        fake_ollama=fake_ollama,
+        model_runtime=model_runtime,
         worker=worker,
         worker_thread=worker_thread,
         worker_stop=worker_stop,
@@ -247,8 +252,9 @@ def format_chat_demo_summary(report: dict[str, Any]) -> str:
             "Chat demo: READY",
             f"Gateway: {urls.get('gateway')}",
             f"Coordinator: {urls.get('coordinator')}",
-            f"Fake Ollama: {urls.get('fake_ollama')}",
+            f"Model runtime: {urls.get('model_runtime')}",
             f"Session: {config.get('session_id')}",
+            f"Mode: {config.get('mode')}",
             f"Model: {config.get('model')}",
             f"Requester: {config.get('requester_account_id')} ({config.get('starting_credits')} credits)",
             f"Worker: {worker.get('node_id_redacted')}",
@@ -279,6 +285,31 @@ def _worker_loop(
             time.sleep(interval_seconds)
 
 
+@dataclass
+class _ExternalModelRuntime:
+    base_url: str
+
+    def stop(self) -> None:
+        return
+
+
+def _start_model_runtime(config: ChatDemoConfig) -> Any:
+    if config.mode == "fake":
+        return _start_fake_ollama(model=config.model, answer=config.fake_answer)
+    if config.mode == "ollama":
+        advertised_models = list_ollama_models(
+            base_url=config.ollama_base_url,
+            timeout_seconds=min(config.ollama_timeout_seconds, 10.0),
+        )
+        if config.model not in advertised_models:
+            raise ValueError(
+                f"Ollama model {config.model!r} is not advertised by {config.ollama_base_url}. "
+                f"Advertised models: {advertised_models}"
+            )
+        return _ExternalModelRuntime(base_url=config.ollama_base_url.rstrip("/"))
+    raise ValueError("--mode must be fake or ollama")
+
+
 def _validate_config(config: ChatDemoConfig) -> None:
     if not config.session_id.strip():
         raise ValueError("--session-id must be non-empty")
@@ -286,6 +317,8 @@ def _validate_config(config: ChatDemoConfig) -> None:
         raise ValueError("--model must be non-empty")
     if not config.requester_account_id.strip():
         raise ValueError("--requester-account-id must be non-empty")
+    if config.mode not in {"fake", "ollama"}:
+        raise ValueError("--mode must be fake or ollama")
     if config.host != DEFAULT_CHAT_GATEWAY_HOST:
         raise ValueError("Chat Demo V0 only supports --host 127.0.0.1")
     if not 0 <= config.port <= 65535:
@@ -308,6 +341,8 @@ def _validate_config(config: ChatDemoConfig) -> None:
         raise ValueError("--client-timeout-seconds must be greater than 0")
     if config.worker_poll_interval <= 0:
         raise ValueError("--worker-poll-interval must be greater than 0")
+    if config.ollama_timeout_seconds <= 0:
+        raise ValueError("--ollama-timeout-seconds must be greater than 0")
     if config.max_context_turns < 0:
         raise ValueError("--max-context-turns must be at least 0")
     if config.max_request_bytes < 1:

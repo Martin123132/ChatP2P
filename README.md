@@ -373,6 +373,14 @@ python -m chatp2p.cli chat demo --port 8787
 
 The demo starts a temporary local coordinator, fake Ollama-compatible model endpoint, worker, funded requester account, and chat gateway. Open the printed gateway URL, send a prompt, and the local worker will answer through the same signed funded-job path used by `chat continue`. The demo binds to `127.0.0.1` and stops when you press `Ctrl+C`.
 
+When you have Ollama running locally and a model pulled, switch the same demo to real local inference:
+
+```powershell
+python -m chatp2p.cli chat demo --mode ollama --model llama3.2:3b --port 8787
+```
+
+`--mode ollama` checks `/api/tags` before opening the gateway. If the model is not advertised, the command fails early with a clear message instead of starting a demo that cannot answer.
+
 For a future UI or local browser test surface, use the localhost-only chat gateway:
 
 ```powershell
