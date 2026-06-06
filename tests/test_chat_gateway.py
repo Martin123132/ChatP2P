@@ -8,6 +8,7 @@ from chatp2p.chat_gateway import (
     CHAT_GATEWAY_MODEL_CATALOG_SCHEMA,
     CHAT_GATEWAY_READINESS_SCHEMA,
     CHAT_GATEWAY_REPORT_SCHEMA,
+    CHAT_GATEWAY_SESSION_CONTROL_SCHEMA,
     CHAT_GATEWAY_TRANSCRIPT_SCHEMA,
     DEFAULT_CHAT_GATEWAY_HOST,
     DEFAULT_CHAT_GATEWAY_PORT,
@@ -54,6 +55,8 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert health["endpoints"]["session_transcript"] == "/api/session/transcript"
     assert health["endpoints"]["chat_readiness"] == "/api/chat/readiness"
     assert health["endpoints"]["chat_models"] == "/api/chat/models"
+    assert health["endpoints"]["session_reset_dry_run"] == "/api/session/reset-dry-run"
+    assert health["endpoints"]["session_archive_dry_run"] == "/api/session/archive-dry-run"
     assert status["status"] == "no_session"
     assert status["summary"]["recommended_next_action"] == "continue_chat_session"
     assert transcript["schema"] == CHAT_GATEWAY_TRANSCRIPT_SCHEMA
@@ -63,6 +66,8 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert "/api/chat/readiness" in page
     assert "/api/chat/models" in page
     assert "/api/chat/continue" in page
+    assert "/api/session/reset-dry-run" in page
+    assert "/api/session/archive-dry-run" in page
     assert "Session demo - tiny-test-model" in page
     assert 'id="blockedBanner"' in page
     assert 'id="readinessBadge"' in page
@@ -73,11 +78,18 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert 'id="commandHint"' in page
     assert 'id="balance"' in page
     assert 'id="sendButton"' in page
+    assert 'id="safeActionButton"' in page
+    assert 'id="resetButton"' in page
+    assert 'id="archiveButton"' in page
     assert "turn user status-" in page
     assert "turn assistant status-" in page
     assert "Safe action:" in page
     assert "Balance ${balance}" in page
     assert 'sendButton.textContent = value ? "Sending" : "Send"' in page
+    assert "safeActionEndpoints" in page
+    assert "Run Safe Action" in page
+    assert "New Session Dry Run" in page
+    assert "Archive Dry Run" in page
     assert "model: selectedModel()" in page
     assert "innerHTML" not in page
     assert "\u00b7" not in page
@@ -673,6 +685,74 @@ def test_chat_gateway_sync_and_resume_endpoints_use_safe_flows(monkeypatch, tmp_
     assert resume["status"] == "pass"
     assert calls["sync"].session_id == "demo"
     assert calls["resume"].dry_run is True
+
+
+def test_chat_gateway_reset_and_archive_dry_run_are_report_only(tmp_path):
+    session_path = _write_failed_session_fixture(tmp_path / "chat-session")
+    token = "alpha-token-session-control-secret"
+    before = json.loads(session_path.read_text(encoding="utf-8"))
+    server, thread, base_url = _start_gateway(
+        ChatGatewayConfig(
+            out_dir=session_path.parent,
+            session_id="demo",
+            coordinator_url="http://127.0.0.1:9",
+            model="tiny-test-model",
+            requester_account_id="requester_gateway_account",
+            admission_token=token,
+            client_timeout_seconds=0.1,
+            port=0,
+        )
+    )
+    try:
+        reset = _post_json(f"{base_url}/api/session/reset-dry-run", {})
+        archive = _post_json(f"{base_url}/api/session/archive-dry-run", {})
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    after = json.loads(session_path.read_text(encoding="utf-8"))
+
+    for report, action_id in [(reset, "reset_session_dry_run"), (archive, "archive_session_dry_run")]:
+        serialized = json.dumps(report)
+        assert report["schema"] == CHAT_GATEWAY_SESSION_CONTROL_SCHEMA
+        assert report["status"] == "pass"
+        assert report["dry_run"] is True
+        assert report["action"]["id"] == action_id
+        assert report["action"]["local_only"] is True
+        assert report["action"]["partner_required"] is False
+        assert report["action"]["credit_spend"] is False
+        assert report["action"]["will_modify"] is False
+        assert report["summary"]["session_exists"] is True
+        assert report["summary"]["file_count"] >= 1
+        assert report["plan"]["files_to_archive"][0]["name"] == "chat-session.json"
+        assert token not in serialized
+
+    assert after == before
+
+
+def test_chat_gateway_session_control_dry_run_handles_missing_session(tmp_path):
+    server, thread, base_url = _start_gateway(
+        ChatGatewayConfig(
+            out_dir=tmp_path / "chat-session",
+            session_id="demo",
+            model="tiny-test-model",
+            requester_account_id="requester_gateway_account",
+            port=0,
+        )
+    )
+    try:
+        reset = _post_json(f"{base_url}/api/session/reset-dry-run", {})
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert reset["schema"] == CHAT_GATEWAY_SESSION_CONTROL_SCHEMA
+    assert reset["status"] == "no_session"
+    assert reset["summary"]["session_exists"] is False
+    assert reset["summary"]["recommended_next_action"] == "continue_chat_session"
+    assert reset["warnings"] == ["no_session_to_archive_or_reset"]
+    assert not (tmp_path / "chat-session" / "chat-session.json").exists()
 
 
 def test_chat_gateway_parser_accepts_required_flags():

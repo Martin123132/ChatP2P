@@ -32,11 +32,24 @@ CHAT_GATEWAY_REPORT_SCHEMA = "chatp2p.chat-gateway-report.v1"
 CHAT_GATEWAY_TRANSCRIPT_SCHEMA = "chatp2p.chat-gateway-transcript.v1"
 CHAT_GATEWAY_READINESS_SCHEMA = "chatp2p.chat-gateway-readiness.v1"
 CHAT_GATEWAY_MODEL_CATALOG_SCHEMA = "chatp2p.chat-gateway-model-catalog.v1"
+CHAT_GATEWAY_SESSION_CONTROL_SCHEMA = "chatp2p.chat-gateway-session-control.v1"
 DEFAULT_CHAT_GATEWAY_HOST = "127.0.0.1"
 DEFAULT_CHAT_GATEWAY_PORT = 8787
 DEFAULT_CHAT_GATEWAY_MAX_REQUEST_BYTES = 16_384
 CHAT_GATEWAY_MAX_MODEL_LENGTH = 128
 CHAT_GATEWAY_MODEL_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-/")
+CHAT_GATEWAY_SESSION_FILES = (
+    "chat-session.json",
+    "chat-session.md",
+    "chat-session-status.json",
+    "chat-session-status.md",
+    "chat-session-resume.json",
+    "chat-session-resume.md",
+    "chat-session-sync.json",
+    "chat-session-sync.md",
+    "chat-session-continue.json",
+    "chat-session-continue.md",
+)
 
 
 @dataclass(frozen=True)
@@ -117,6 +130,12 @@ def create_chat_gateway_server(config: ChatGatewayConfig) -> ThreadingHTTPServer
             if parsed.path == "/api/session/resume-dry-run":
                 _json_response(self, 200, _resume_dry_run_payload(config))
                 return
+            if parsed.path == "/api/session/reset-dry-run":
+                _json_response(self, 200, _session_dry_run_payload(config, action="reset"))
+                return
+            if parsed.path == "/api/session/archive-dry-run":
+                _json_response(self, 200, _session_dry_run_payload(config, action="archive"))
+                return
             if parsed.path == "/api/chat/continue":
                 request = _read_json_request(self, max_bytes=config.max_request_bytes)
                 if request is None:
@@ -180,6 +199,8 @@ def _health_payload(*, config: dict[str, Any], software: dict[str, Any]) -> dict
             "chat_models": "/api/chat/models",
             "session_sync": "/api/session/sync",
             "session_resume_dry_run": "/api/session/resume-dry-run",
+            "session_reset_dry_run": "/api/session/reset-dry-run",
+            "session_archive_dry_run": "/api/session/archive-dry-run",
             "chat_continue": "/api/chat/continue",
         },
     }
@@ -318,6 +339,79 @@ def _resume_dry_run_payload(config: ChatGatewayConfig) -> dict[str, Any]:
         )
     except Exception as exc:
         return _error_payload(f"{type(exc).__name__}: {exc}")
+
+
+def _session_dry_run_payload(config: ChatGatewayConfig, *, action: str) -> dict[str, Any]:
+    generated_at = datetime.now(timezone.utc)
+    out_dir = config.out_dir.expanduser().resolve()
+    inventory = _session_control_inventory(out_dir)
+    archive_target = out_dir / "archive" / f"{config.session_id}-{generated_at.strftime('%Y%m%dT%H%M%SZ')}"
+    session_exists = any(item["name"] == "chat-session.json" and item["exists"] for item in inventory["files"])
+    if action == "reset":
+        action_id = "reset_session_dry_run"
+        description = "Preview archiving the current local session so the next prompt can start a clean session."
+        next_action = "review_reset_plan_then_archive_manually"
+    elif action == "archive":
+        action_id = "archive_session_dry_run"
+        description = "Preview moving local session files and turn folders into an archive directory."
+        next_action = "review_archive_plan"
+    else:
+        return _error_payload(f"unknown session control action: {action}")
+
+    status = "pass" if session_exists else "no_session"
+    report = {
+        "schema": CHAT_GATEWAY_SESSION_CONTROL_SCHEMA,
+        "ok": True,
+        "status": status,
+        "generated_at": generated_at.isoformat(),
+        "session_id": config.session_id,
+        "dry_run": True,
+        "action": {
+            "id": action_id,
+            "description": description,
+            "local_only": True,
+            "partner_required": False,
+            "credit_spend": False,
+            "will_modify": False,
+        },
+        "summary": {
+            "status": status,
+            "session_exists": session_exists,
+            "file_count": len([item for item in inventory["files"] if item["exists"]]),
+            "turn_dir_count": len(inventory["turn_directories"]),
+            "archive_target": str(archive_target),
+            "recommended_next_action": next_action if session_exists else "continue_chat_session",
+        },
+        "plan": {
+            "archive_target": str(archive_target),
+            "files_to_archive": [item for item in inventory["files"] if item["exists"]],
+            "turn_directories_to_archive": inventory["turn_directories"],
+            "session_json_after_archive": str(out_dir / "chat-session.json"),
+        },
+        "warnings": [] if session_exists else ["no_session_to_archive_or_reset"],
+        "errors": [],
+    }
+    return _redact_report(report, config)
+
+
+def _session_control_inventory(out_dir: Path) -> dict[str, Any]:
+    files = []
+    for name in CHAT_GATEWAY_SESSION_FILES:
+        path = out_dir / name
+        files.append(
+            {
+                "name": name,
+                "path": str(path),
+                "exists": path.exists(),
+                "size_bytes": path.stat().st_size if path.exists() else None,
+            }
+        )
+    turn_directories = []
+    if out_dir.exists():
+        for path in sorted(out_dir.glob("turn-*")):
+            if path.is_dir():
+                turn_directories.append({"name": path.name, "path": str(path)})
+    return {"files": files, "turn_directories": turn_directories}
 
 
 def _continue_payload(config: ChatGatewayConfig, *, prompt: str) -> dict[str, Any]:
@@ -580,8 +674,11 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
         </div>
         <div class="actions">
           <button id="statusButton" type="button">Refresh</button>
+          <button id="safeActionButton" type="button" hidden>Run Safe Action</button>
           <button id="syncButton" type="button">Sync</button>
           <button id="resumeButton" type="button">Resume Dry Run</button>
+          <button id="resetButton" type="button">New Session Dry Run</button>
+          <button id="archiveButton" type="button">Archive Dry Run</button>
         </div>
       </div>
     </header>
@@ -621,9 +718,19 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     const turnsEl = document.querySelector("#turns");
     const promptEl = document.querySelector("#prompt");
     const sendButton = document.querySelector("#sendButton");
+    const safeActionButton = document.querySelector("#safeActionButton");
     const buttons = Array.from(document.querySelectorAll("button"));
     const defaultModel = {model_json};
     const blockedActions = new Set(["run_session_resume_dry_run", "run_session_sync_then_resume_dry_run", "wait_for_worker_result", "resume_failed_turn", "sync_session_then_resume_failed_turn"]);
+    const safeActionEndpoints = {{
+      run_session_sync: "/api/session/sync",
+      wait_for_worker_result: "/api/session/sync",
+      run_session_resume_dry_run: "/api/session/resume-dry-run",
+      resume_failed_turn: "/api/session/resume-dry-run",
+      sync_session_then_resume_failed_turn: "/api/session/sync",
+      run_session_sync_then_resume_dry_run: "/api/session/sync"
+    }};
+    let currentSafeAction = "";
     function selectedModel() {{
       return modelSelectEl.value || defaultModel;
     }}
@@ -633,6 +740,12 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     function setBusy(value) {{
       buttons.forEach((button) => button.disabled = value);
       sendButton.textContent = value ? "Sending" : "Send";
+      if (!value) updateSafeActionButton();
+    }}
+    function updateSafeActionButton() {{
+      const enabled = Boolean(safeActionEndpoints[currentSafeAction]);
+      safeActionButton.hidden = !enabled;
+      safeActionButton.disabled = !enabled;
     }}
     function badgeClass(status) {{
       return `badge ${{status || ""}}`;
@@ -681,6 +794,8 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
       const coordinator = report.coordinator || {{}};
       const actionHint = report.action_hint || {{}};
       const command = actionHint.primary_command || "";
+      currentSafeAction = actionHint.id || summary.recommended_next_action || "";
+      updateSafeActionButton();
       readinessBadge.className = badgeClass(report.status || "unknown");
       readinessBadge.textContent = summary.can_send ? "ready" : "not ready";
       if (summary.requester_balance !== null && summary.requester_balance !== undefined) {{
@@ -794,8 +909,16 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     }}
     async function refreshTranscript() {{ await request("/api/session/transcript"); }}
     document.querySelector("#statusButton").onclick = refreshTranscript;
+    safeActionButton.onclick = async () => {{
+      const path = safeActionEndpoints[currentSafeAction];
+      if (!path) return;
+      await request(path, {{ method: "POST" }});
+      await refreshTranscript();
+    }};
     document.querySelector("#syncButton").onclick = async () => {{ await request("/api/session/sync", {{ method: "POST" }}); await refreshTranscript(); }};
     document.querySelector("#resumeButton").onclick = () => request("/api/session/resume-dry-run", {{ method: "POST" }});
+    document.querySelector("#resetButton").onclick = () => request("/api/session/reset-dry-run", {{ method: "POST" }});
+    document.querySelector("#archiveButton").onclick = () => request("/api/session/archive-dry-run", {{ method: "POST" }});
     modelSelectEl.onchange = refreshReadiness;
     document.querySelector("#chatForm").onsubmit = async (event) => {{
       event.preventDefault();
