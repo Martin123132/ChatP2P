@@ -824,6 +824,18 @@ python -m chatp2p.cli model eval `
   --json
 ```
 
+After reviewing the eval report, attach the evidence with a dry-run first:
+
+```powershell
+python -m chatp2p.cli model attach-eval `
+  --registry D:\ChatP2PData\model-registry.json `
+  --eval-report D:\ChatP2PData\model-eval\model-eval-report.json `
+  --out D:\ChatP2PData\model-eval-attach-report.json `
+  --json
+```
+
+Add `--write` only when the preview is correct. The attach step updates eval evidence fields and writes a registry backup by default; it never changes the model status to `approved`.
+
 The default registry intentionally starts with a placeholder base weight pack, so the report warns until a real open-weight base model, license, and hashes are selected. Credits remain spendable usage accounting; reputation and tier gates decide who can submit adapters, review domains, or vote on releases.
 
 The longer blueprint lives in [docs/PRODUCT_BLUEPRINT.md](docs/PRODUCT_BLUEPRINT.md).

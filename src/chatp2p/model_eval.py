@@ -20,14 +20,16 @@ from .ollama import DEFAULT_OLLAMA_BASE_URL, OllamaError, generate_ollama, list_
 
 
 MODEL_EVAL_REPORT_SCHEMA = "chatp2p.model-eval-report.v1"
+MODEL_EVAL_ATTACH_REPORT_SCHEMA = "chatp2p.model-eval-attach-report.v1"
 MODEL_EVAL_MODES = {"fake", "ollama"}
-MODEL_EVAL_REQUIRED_CATEGORIES = {
+MODEL_EVAL_REQUIRED_CATEGORY_ORDER = (
     "domain_eval",
     "regression_eval",
     "safety_eval",
     "license_review",
     "local_smoke",
-}
+)
+MODEL_EVAL_REQUIRED_CATEGORIES = set(MODEL_EVAL_REQUIRED_CATEGORY_ORDER)
 
 _PLACEHOLDER_VALUES = {"", "TBD", "UNKNOWN", "TO_BE_SELECTED", "MUST_BE_CONFIRMED_BEFORE_APPROVAL"}
 _SENSITIVE_PATTERNS: dict[str, re.Pattern[str]] = {
@@ -51,6 +53,15 @@ class ModelEvalConfig:
     ollama_model: str | None = None
     ollama_base_url: str = DEFAULT_OLLAMA_BASE_URL
     ollama_timeout_seconds: float = 60.0
+
+
+@dataclass(frozen=True)
+class ModelEvalAttachConfig:
+    registry_path: Path = Path(".mesh/model-registry.json")
+    eval_report_path: Path = Path(".mesh/model-eval/model-eval-report.json")
+    out_path: Path | None = None
+    write: bool = False
+    backup: bool = True
 
 
 def run_model_eval(config: ModelEvalConfig) -> dict[str, Any]:
@@ -145,6 +156,111 @@ def run_model_eval(config: ModelEvalConfig) -> dict[str, Any]:
     return report
 
 
+def run_model_eval_attach(config: ModelEvalAttachConfig) -> dict[str, Any]:
+    """Attach eval evidence to a model registry without approving the model."""
+
+    started_at = time.time()
+    registry_path = config.registry_path.expanduser().resolve()
+    eval_report_path = config.eval_report_path.expanduser().resolve()
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    registry = read_json_file(registry_path, description="model registry")
+    if not isinstance(registry, dict):
+        raise ValueError("model registry must be a JSON object")
+    eval_report = read_json_file(eval_report_path, description="model eval report")
+    if not isinstance(eval_report, dict):
+        raise ValueError("model eval report must be a JSON object")
+
+    if registry.get("schema") != MODEL_REGISTRY_SCHEMA:
+        errors.append(f"registry schema must be {MODEL_REGISTRY_SCHEMA}")
+    if eval_report.get("schema") != MODEL_EVAL_REPORT_SCHEMA:
+        errors.append(f"eval report schema must be {MODEL_EVAL_REPORT_SCHEMA}")
+    if eval_report.get("status") == "fail" or eval_report.get("errors"):
+        errors.append("eval report has failures; rerun model eval before attaching evidence")
+
+    model_id = _eval_report_model_id(eval_report)
+    if not model_id:
+        errors.append("eval report does not identify a model id")
+    model = _find_model(registry, model_id) if model_id else None
+    if model_id and model is None:
+        errors.append(f"model_id not found in registry: {model_id}")
+
+    before_status = _safe_text(model.get("status")) if isinstance(model, dict) else None
+    updated_registry = json.loads(json.dumps(registry))
+    updated_model = _find_model(updated_registry, model_id) if model_id else None
+    changes: list[dict[str, Any]] = []
+
+    if not errors and isinstance(updated_model, dict):
+        changes = _apply_eval_evidence_to_model(updated_model, eval_report)
+
+    after_status = _safe_text(updated_model.get("status")) if isinstance(updated_model, dict) else None
+    if before_status != after_status:
+        errors.append("internal safety error: attach-eval attempted to change model status")
+
+    validation = validate_model_registry(updated_registry if not errors else registry)
+    warnings.extend(validation["warnings"])
+    if validation["errors"]:
+        errors.extend(f"updated registry validation failed: {error}" for error in validation["errors"])
+
+    backup_path = registry_path.with_suffix(registry_path.suffix + ".bak") if config.backup else None
+    write_result = {"requested": config.write, "status": "dry_run", "registry_path": str(registry_path)}
+    if config.write and not errors:
+        if backup_path is not None:
+            backup_path.write_text(json.dumps(registry, indent=2, sort_keys=True), encoding="utf-8")
+            write_result["backup_path"] = str(backup_path)
+        registry_path.write_text(json.dumps(updated_registry, indent=2, sort_keys=True), encoding="utf-8")
+        write_result["status"] = "written"
+    elif config.write and errors:
+        write_result["status"] = "blocked"
+
+    status = "fail" if errors else ("warn" if warnings or _has_blocked_eval(eval_report) else "pass")
+    report: dict[str, Any] = {
+        "schema": MODEL_EVAL_ATTACH_REPORT_SCHEMA,
+        "ok": not errors,
+        "status": status,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(time.time() - started_at, 3),
+        "dry_run": not config.write,
+        "config": {
+            "registry_path": _safe_text(str(registry_path)),
+            "eval_report_path": _safe_text(str(eval_report_path)),
+            "out_path": _safe_text(str(config.out_path.expanduser().resolve())) if config.out_path else None,
+            "write": config.write,
+            "backup": config.backup,
+        },
+        "model": {
+            "id": _safe_text(model_id),
+            "status_before": before_status,
+            "status_after": after_status,
+            "approval_status_changed": before_status != after_status,
+        },
+        "summary": {
+            "change_count": len(changes),
+            "completed_evaluations_added": _completed_eval_changes(changes),
+            "does_not_approve_model": True,
+            "recommended_next_action": _attach_recommended_next_action(
+                errors=errors,
+                write=config.write,
+                eval_report=eval_report,
+            ),
+        },
+        "write": write_result,
+        "changes": changes,
+        "eval_summary": _safe_attach_eval_summary(eval_report),
+        "registry_validation_summary": validation["summary"],
+        "warnings": warnings,
+        "errors": errors,
+    }
+
+    if config.out_path is not None:
+        out_path = config.out_path.expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+        report["artifacts"] = {"json": str(out_path)}
+    return report
+
+
 def format_model_eval_summary(report: dict[str, Any]) -> str:
     summary = report.get("summary") or {}
     lines = [
@@ -154,6 +270,31 @@ def format_model_eval_summary(report: dict[str, Any]) -> str:
         f"Checks: {summary.get('passed_checks')}/{summary.get('total_checks')} passed",
         f"Blocked: {summary.get('blocked_checks')}",
         f"Domain pass rate: {summary.get('domain_pass_rate')}",
+        f"Next: {summary.get('recommended_next_action')}",
+    ]
+    if report.get("warnings"):
+        lines.append("Warnings:")
+        lines.extend(f"- {warning}" for warning in report["warnings"])
+    if report.get("errors"):
+        lines.append("Errors:")
+        lines.extend(f"- {error}" for error in report["errors"])
+    if (report.get("artifacts") or {}).get("json"):
+        lines.append(f"Report: {(report.get('artifacts') or {}).get('json')}")
+    return "\n".join(lines)
+
+
+def format_model_eval_attach_summary(report: dict[str, Any]) -> str:
+    summary = report.get("summary") or {}
+    model = report.get("model") or {}
+    write = report.get("write") or {}
+    lines = [
+        f"Model eval attach: {str(report.get('status', 'unknown')).upper()}",
+        f"Model: {model.get('id')}",
+        f"Mode: {'dry-run' if report.get('dry_run') else 'write'}",
+        f"Changes: {summary.get('change_count')}",
+        f"Completed evals added: {', '.join(summary.get('completed_evaluations_added') or []) or 'none'}",
+        f"Model status: {model.get('status_before')} -> {model.get('status_after')}",
+        f"Write: {write.get('status')}",
         f"Next: {summary.get('recommended_next_action')}",
     ]
     if report.get("warnings"):
@@ -222,6 +363,191 @@ def _find_model(registry: dict[str, Any], model_id: str) -> dict[str, Any] | Non
         if isinstance(model, dict) and str(model.get("id") or "") == model_id:
             return model
     return None
+
+
+def _eval_report_model_id(eval_report: dict[str, Any]) -> str | None:
+    selected = eval_report.get("selected_model") if isinstance(eval_report.get("selected_model"), dict) else {}
+    config = eval_report.get("config") if isinstance(eval_report.get("config"), dict) else {}
+    return _safe_text(selected.get("id") or config.get("model_id"))
+
+
+def _apply_eval_evidence_to_model(model: dict[str, Any], eval_report: dict[str, Any]) -> list[dict[str, Any]]:
+    changes: list[dict[str, Any]] = []
+    eval_plan = model.setdefault("eval_plan", {})
+    if not isinstance(eval_plan, dict):
+        model["eval_plan"] = {}
+        eval_plan = model["eval_plan"]
+        changes.append({"field": "eval_plan", "status": "created_object"})
+
+    required = _ordered_unique(
+        [
+            *[
+                str(item)
+                for item in eval_plan.get("required_evaluations", [])
+                if isinstance(item, str) and item
+            ],
+            *MODEL_EVAL_REQUIRED_CATEGORY_ORDER,
+        ]
+    )
+    if eval_plan.get("required_evaluations") != required:
+        eval_plan["required_evaluations"] = required
+        changes.append({"field": "eval_plan.required_evaluations", "status": "updated", "value": required})
+
+    completed_before = [
+        str(item)
+        for item in eval_plan.get("completed_evaluations", [])
+        if isinstance(item, str) and item
+    ]
+    evidence = eval_report.get("evidence_for_registry") if isinstance(eval_report.get("evidence_for_registry"), dict) else {}
+    completed_from_report = [
+        str(item)
+        for item in evidence.get("completed_evaluations", [])
+        if isinstance(item, str) and item in MODEL_EVAL_REQUIRED_CATEGORIES
+    ]
+    completed_after = _ordered_unique([*completed_before, *completed_from_report])
+    if completed_after != completed_before:
+        eval_plan["completed_evaluations"] = completed_after
+        changes.append(
+            {
+                "field": "eval_plan.completed_evaluations",
+                "status": "updated",
+                "added": [item for item in completed_after if item not in completed_before],
+                "value": completed_after,
+            }
+        )
+
+    criteria = eval_plan.setdefault("success_criteria", {})
+    if not isinstance(criteria, dict):
+        eval_plan["success_criteria"] = {}
+        criteria = eval_plan["success_criteria"]
+        changes.append({"field": "eval_plan.success_criteria", "status": "created_object"})
+
+    criteria_changes = _apply_success_criteria(criteria, evidence)
+    changes.extend(criteria_changes)
+
+    evidence_history = eval_plan.setdefault("evidence_reports", [])
+    if not isinstance(evidence_history, list):
+        eval_plan["evidence_reports"] = []
+        evidence_history = eval_plan["evidence_reports"]
+        changes.append({"field": "eval_plan.evidence_reports", "status": "created_list"})
+    evidence_entry = _eval_evidence_history_entry(eval_report)
+    if evidence_entry not in evidence_history:
+        evidence_history.append(evidence_entry)
+        changes.append({"field": "eval_plan.evidence_reports", "status": "appended", "entry": evidence_entry})
+
+    return changes
+
+
+def _apply_success_criteria(criteria: dict[str, Any], evidence: dict[str, Any]) -> list[dict[str, Any]]:
+    changes: list[dict[str, Any]] = []
+    domain_rate = evidence.get("minimum_domain_pass_rate")
+    if isinstance(domain_rate, (int, float)):
+        current = criteria.get("minimum_domain_pass_rate")
+        if not isinstance(current, (int, float)) or float(domain_rate) > float(current):
+            criteria["minimum_domain_pass_rate"] = round(float(domain_rate), 3)
+            changes.append(
+                {
+                    "field": "eval_plan.success_criteria.minimum_domain_pass_rate",
+                    "status": "updated",
+                    "value": criteria["minimum_domain_pass_rate"],
+                }
+            )
+
+    local_smoke = bool(evidence.get("local_chat_smoke_passes"))
+    if criteria.get("local_chat_smoke_passes") != local_smoke:
+        criteria["local_chat_smoke_passes"] = local_smoke
+        changes.append(
+            {
+                "field": "eval_plan.success_criteria.local_chat_smoke_passes",
+                "status": "updated",
+                "value": local_smoke,
+            }
+        )
+
+    license_ok = bool(evidence.get("no_known_license_blocker"))
+    if criteria.get("no_known_license_blocker") != license_ok:
+        criteria["no_known_license_blocker"] = license_ok
+        changes.append(
+            {
+                "field": "eval_plan.success_criteria.no_known_license_blocker",
+                "status": "updated",
+                "value": license_ok,
+            }
+        )
+    return changes
+
+
+def _eval_evidence_history_entry(eval_report: dict[str, Any]) -> dict[str, Any]:
+    summary = eval_report.get("summary") if isinstance(eval_report.get("summary"), dict) else {}
+    config = eval_report.get("config") if isinstance(eval_report.get("config"), dict) else {}
+    artifacts = eval_report.get("artifacts") if isinstance(eval_report.get("artifacts"), dict) else {}
+    return {
+        "schema": MODEL_EVAL_REPORT_SCHEMA,
+        "generated_at": _safe_text(eval_report.get("generated_at")),
+        "mode": _safe_text(config.get("mode")),
+        "status": _safe_text(eval_report.get("status")),
+        "pass_rate": summary.get("pass_rate"),
+        "domain_pass_rate": summary.get("domain_pass_rate"),
+        "report_json_name": _safe_artifact_name(artifacts.get("json")),
+    }
+
+
+def _ordered_unique(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _safe_artifact_name(value: Any) -> str | None:
+    text = _safe_text(value)
+    if not text:
+        return None
+    return Path(text).name
+
+
+def _completed_eval_changes(changes: list[dict[str, Any]]) -> list[str]:
+    for change in changes:
+        if change.get("field") == "eval_plan.completed_evaluations":
+            return [str(item) for item in change.get("added", []) if isinstance(item, str)]
+    return []
+
+
+def _has_blocked_eval(eval_report: dict[str, Any]) -> bool:
+    summary = eval_report.get("summary") if isinstance(eval_report.get("summary"), dict) else {}
+    return bool(summary.get("blocked_checks"))
+
+
+def _safe_attach_eval_summary(eval_report: dict[str, Any]) -> dict[str, Any]:
+    summary = eval_report.get("summary") if isinstance(eval_report.get("summary"), dict) else {}
+    return {
+        "status": _safe_text(eval_report.get("status")),
+        "passed_checks": summary.get("passed_checks"),
+        "total_checks": summary.get("total_checks"),
+        "blocked_checks": summary.get("blocked_checks"),
+        "completed_evaluations": [
+            _safe_text(item) for item in summary.get("completed_evaluations", []) if isinstance(item, str)
+        ],
+        "required_evaluations_satisfied": summary.get("required_evaluations_satisfied")
+        if isinstance(summary.get("required_evaluations_satisfied"), dict)
+        else {},
+    }
+
+
+def _attach_recommended_next_action(*, errors: list[str], write: bool, eval_report: dict[str, Any]) -> str:
+    if errors:
+        return "fix_model_eval_attach_inputs"
+    summary = eval_report.get("summary") if isinstance(eval_report.get("summary"), dict) else {}
+    satisfied = summary.get("required_evaluations_satisfied")
+    if not isinstance(satisfied, dict) or not satisfied.get("license_review"):
+        return "confirm_model_license"
+    if not write:
+        return "rerun_attach_eval_with_write"
+    return "run_model_registry_validation"
 
 
 def _default_eval_suite() -> list[dict[str, Any]]:
@@ -433,16 +759,22 @@ def _summarize_eval_results(results: list[dict[str, Any]]) -> dict[str, Any]:
             item["blocked"] += 1
         elif result.get("status") == "error":
             item["errored"] += 1
-    completed_categories = sorted(
+    completed_category_set = {
         category
         for category, item in by_category.items()
         if item["total"] > 0 and item["passed"] == item["total"]
+    }
+    completed_categories = [
+        category for category in MODEL_EVAL_REQUIRED_CATEGORY_ORDER if category in completed_category_set
+    ]
+    completed_categories.extend(
+        sorted(category for category in completed_category_set if category not in MODEL_EVAL_REQUIRED_CATEGORIES)
     )
     domain = by_category.get("domain_eval", {"total": 0, "passed": 0})
     domain_pass_rate = round(domain["passed"] / domain["total"], 3) if domain["total"] else None
     satisfied = {
         category: category in completed_categories
-        for category in sorted(MODEL_EVAL_REQUIRED_CATEGORIES)
+        for category in MODEL_EVAL_REQUIRED_CATEGORY_ORDER
     }
     return {
         "total_checks": total,

@@ -106,9 +106,12 @@ from .model_governance import (
     run_model_governance,
 )
 from .model_eval import (
+    ModelEvalAttachConfig,
     ModelEvalConfig,
+    format_model_eval_attach_summary,
     format_model_eval_summary,
     run_model_eval,
+    run_model_eval_attach,
 )
 from .model_registry import (
     ModelRegistryConfig,
@@ -489,6 +492,28 @@ def model_eval_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_model_eval_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_eval_attach_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_eval_attach(
+            ModelEvalAttachConfig(
+                registry_path=Path(args.registry),
+                eval_report_path=Path(args.eval_report),
+                out_path=Path(args.out) if args.out else None,
+                write=args.write,
+                backup=not args.no_backup,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_eval_attach_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -3304,6 +3329,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     model_eval_parser.add_argument("--json", action="store_true", help="Print the full JSON eval report")
     model_eval_parser.set_defaults(func=model_eval_command)
+
+    model_eval_attach_parser = model_subcommands.add_parser(
+        "attach-eval",
+        help="Attach model eval evidence to the registry without approving the model",
+    )
+    model_eval_attach_parser.add_argument(
+        "--registry",
+        default=".mesh/model-registry.json",
+        help="Path to the base model registry JSON",
+    )
+    model_eval_attach_parser.add_argument(
+        "--eval-report",
+        default=".mesh/model-eval/model-eval-report.json",
+        help="Path to model-eval-report.json",
+    )
+    model_eval_attach_parser.add_argument("--out", default=None, help="Optional JSON attach report path")
+    model_eval_attach_parser.add_argument(
+        "--write",
+        action="store_true",
+        help="Write the updated eval evidence into the registry; omitted means dry-run",
+    )
+    model_eval_attach_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not write a .bak copy of the registry when --write is used",
+    )
+    model_eval_attach_parser.add_argument("--json", action="store_true", help="Print the full JSON attach report")
+    model_eval_attach_parser.set_defaults(func=model_eval_attach_command)
 
     chat_parser = subcommands.add_parser("chat", help="Local chat product-loop proofs")
     chat_subcommands = chat_parser.add_subparsers(dest="chat_command", required=True)

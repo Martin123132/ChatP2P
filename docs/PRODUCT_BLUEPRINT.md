@@ -114,6 +114,8 @@ Base Model Registry V0 creates the approval checklist for the first actual model
 
 Model Eval Harness V0 makes the first eval evidence artifact. `chatp2p model eval` runs a deterministic local harness by default, writes JSON/Markdown reports, checks domain/regression/safety/local-smoke behavior, and records whether license/source evidence is still blocking approval. It never approves a model or edits the registry; the output is evidence to attach to a future model registry update.
 
+Model Eval Attach V0 closes the loop between eval reports and the model registry. `chatp2p model attach-eval` previews registry evidence updates by default, then requires `--write` to persist completed evals, success criteria, and a compact evidence history entry. It refuses failed eval reports and preserves the candidate status, so evidence can move forward without accidentally approving a base model.
+
 ## Future Lane: ISP Edge / Broadband Bundle
 
 Keep a second product architecture lane for an ISP-edge simulation, but do not let it interrupt the current alpha path. The idea is not "AI inside fibre"; it is a broadband-provider-style deployment model where a provider runs a coordinator, subscribers run light gateway/device nodes, regional edge workers provide stronger capacity, and policy routes work through local, provider-edge, trusted-peer, then placeholder fallback paths.
