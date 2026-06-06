@@ -38,6 +38,14 @@ DEFAULT_CHAT_GATEWAY_PORT = 8787
 DEFAULT_CHAT_GATEWAY_MAX_REQUEST_BYTES = 16_384
 CHAT_GATEWAY_MAX_MODEL_LENGTH = 128
 CHAT_GATEWAY_MODEL_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-/")
+GATEWAY_ERROR_CATEGORIES = {
+    "coordinator_unreachable",
+    "insufficient_credits",
+    "no_model_worker",
+    "unresolved_session",
+    "invalid_model",
+    "request_timeout",
+}
 CHAT_GATEWAY_SESSION_FILES = (
     "chat-session.json",
     "chat-session.md",
@@ -145,11 +153,10 @@ def create_chat_gateway_server(config: ChatGatewayConfig) -> ThreadingHTTPServer
                     _json_response(
                         self,
                         400,
-                        {
-                            "ok": False,
-                            "status": "fail",
-                            "error": "prompt must be a non-empty string",
-                        },
+                        _request_error_payload(
+                            "prompt must be a non-empty string",
+                            recommended_next_action="enter_prompt",
+                        ),
                     )
                     return
                 request_config, error = _config_from_model_override(config, request.get("model"))
@@ -416,35 +423,33 @@ def _session_control_inventory(out_dir: Path) -> dict[str, Any]:
 
 def _continue_payload(config: ChatGatewayConfig, *, prompt: str) -> dict[str, Any]:
     try:
-        return _redact_report(
-            run_chat_session_continue(
-                ChatSessionContinueConfig(
-                    out_dir=config.out_dir,
-                    session_id=config.session_id,
-                    title=config.title,
-                    coordinator_url=config.coordinator_url,
-                    invite_path=config.invite_path,
-                    admission_token=config.admission_token,
-                    model=config.model,
-                    prompt=prompt.strip(),
-                    system=config.system,
-                    requester_account_id=config.requester_account_id,
-                    job_cost=config.job_cost,
-                    reward=config.reward,
-                    temperature=config.temperature,
-                    max_tokens=config.max_tokens,
-                    ttl_seconds=config.ttl_seconds,
-                    timeout_seconds=config.timeout_seconds,
-                    poll_interval=config.poll_interval,
-                    no_wait=config.no_wait,
-                    client_timeout_seconds=config.client_timeout_seconds,
-                    max_context_turns=config.max_context_turns,
-                )
-            ),
-            config,
+        report = run_chat_session_continue(
+            ChatSessionContinueConfig(
+                out_dir=config.out_dir,
+                session_id=config.session_id,
+                title=config.title,
+                coordinator_url=config.coordinator_url,
+                invite_path=config.invite_path,
+                admission_token=config.admission_token,
+                model=config.model,
+                prompt=prompt.strip(),
+                system=config.system,
+                requester_account_id=config.requester_account_id,
+                job_cost=config.job_cost,
+                reward=config.reward,
+                temperature=config.temperature,
+                max_tokens=config.max_tokens,
+                ttl_seconds=config.ttl_seconds,
+                timeout_seconds=config.timeout_seconds,
+                poll_interval=config.poll_interval,
+                no_wait=config.no_wait,
+                client_timeout_seconds=config.client_timeout_seconds,
+                max_context_turns=config.max_context_turns,
+            )
         )
+        return _redact_report(_with_gateway_error_clarity(report, config), config)
     except Exception as exc:
-        return _error_payload(f"{type(exc).__name__}: {exc}")
+        return _error_payload(f"{type(exc).__name__}: {exc}", config=config)
 
 
 def _readiness_payload(config: ChatGatewayConfig) -> dict[str, Any]:
@@ -473,11 +478,18 @@ def _readiness_payload(config: ChatGatewayConfig) -> dict[str, Any]:
         credits_sufficient=requester["credits_sufficient"],
         live_eligible_node_count=routing["live_eligible_node_count"],
     )
+    error_category = _readiness_error_category(
+        session=session,
+        snapshot_info=snapshot_info,
+        requester=requester,
+        routing=routing,
+    )
     action_hint = _readiness_action_hint(
         config=config,
         connection=connection,
         action_id=recommended_next_action,
         requester_balance=requester["balance"],
+        error_category=error_category,
     )
     status = "pass" if can_send else "blocked"
     return _redact_report(
@@ -498,7 +510,10 @@ def _readiness_payload(config: ChatGatewayConfig) -> dict[str, Any]:
                 "session_blocked": session["blocked"],
                 "recommended_next_action": recommended_next_action,
                 "suggested_command": action_hint["primary_command"],
+                "error_category": error_category,
             },
+            "error_category": error_category,
+            "ui_message": _gateway_ui_message(error_category, recommended_next_action),
             "action_hint": action_hint,
             "coordinator": {
                 "ok": snapshot_info["ok"],
@@ -592,9 +607,15 @@ def _bad_model_payload(error: str) -> dict[str, Any]:
         "ok": False,
         "status": "fail",
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "error_category": "invalid_model",
         "error": error,
         "errors": [error],
-        "summary": {"recommended_next_action": "choose_valid_model"},
+        "summary": {
+            "recommended_next_action": "choose_valid_model",
+            "error_category": "invalid_model",
+        },
+        "ui_message": _gateway_ui_message("invalid_model", "choose_valid_model"),
+        "action_hint": _static_action_hint("choose_valid_model"),
     }
 
 
@@ -642,6 +663,7 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     .badge.submitted {{ color: var(--wait); border-color: #bfdbfe; background: #eff6ff; }}
     .banner {{ display: none; border: 1px solid #fed7aa; background: #fff7ed; color: var(--warn); border-radius: 8px; padding: 10px 12px; }}
     .banner.visible {{ display: block; }}
+    .banner.error {{ border-color: #fecaca; background: #fef2f2; color: var(--bad); }}
     .command {{ display: none; border: 1px solid #d1d5db; background: #111827; color: #f9fafb; border-radius: 8px; padding: 10px 12px; font-family: Consolas, ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; }}
     .command.visible {{ display: block; }}
     .models {{ display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 13px; }}
@@ -693,6 +715,7 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
         <span id="nextAction"></span>
       </div>
       <div id="modelCatalog" class="models"></div>
+      <div id="apiErrorBanner" class="banner error"></div>
       <div id="blockedBanner" class="banner"></div>
       <div id="commandHint" class="command"></div>
     </section>
@@ -713,6 +736,7 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     const nextActionEl = document.querySelector("#nextAction");
     const modelCatalogEl = document.querySelector("#modelCatalog");
     const modelSelectEl = document.querySelector("#modelSelect");
+    const apiErrorBanner = document.querySelector("#apiErrorBanner");
     const blockedBanner = document.querySelector("#blockedBanner");
     const commandHintEl = document.querySelector("#commandHint");
     const turnsEl = document.querySelector("#turns");
@@ -756,6 +780,18 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
         if (balance !== null && balance !== undefined) return `Balance ${{balance}}`;
       }}
       return "";
+    }}
+    function renderApiError(report, statusCode) {{
+      const summary = report.summary || {{}};
+      const category = report.error_category || summary.error_category || "";
+      const message = report.ui_message || report.error || "";
+      if (category || statusCode >= 400) {{
+        apiErrorBanner.className = "banner error visible";
+        apiErrorBanner.textContent = [category, message].filter(Boolean).join(": ");
+      }} else if (report.status === "pass" || report.status === "no_session" || report.status === "submitted") {{
+        apiErrorBanner.className = "banner error";
+        apiErrorBanner.textContent = "";
+      }}
     }}
     function renderModelCatalog(report) {{
       const summary = report.summary || {{}};
@@ -901,7 +937,9 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
       setBusy(true);
       try {{
         const response = await fetch(path, options);
-        render(await response.json());
+        const report = await response.json();
+        renderApiError(report, response.status);
+        render(report);
         await refreshReadiness();
       }} finally {{
         setBusy(false);
@@ -984,7 +1022,11 @@ def _html_response(handler: BaseHTTPRequestHandler, status: int, markup: str) ->
     handler.wfile.write(body)
 
 
-def _error_payload(error: str) -> dict[str, Any]:
+def _request_error_payload(
+    error: str,
+    *,
+    recommended_next_action: str = "inspect_chat_gateway_response",
+) -> dict[str, Any]:
     return {
         "schema": CHAT_GATEWAY_REPORT_SCHEMA,
         "ok": False,
@@ -992,8 +1034,207 @@ def _error_payload(error: str) -> dict[str, Any]:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "error": error,
         "errors": [error],
-        "summary": {"recommended_next_action": "inspect_chat_gateway_response"},
+        "summary": {"recommended_next_action": recommended_next_action},
+        "action_hint": _static_action_hint(recommended_next_action),
     }
+
+
+def _error_payload(error: str, *, config: ChatGatewayConfig | None = None) -> dict[str, Any]:
+    category = _category_from_error_text(error)
+    action_id = _action_id_for_category(category) if category else "inspect_chat_gateway_response"
+    action_hint = (
+        _gateway_action_hint(config=config, action_id=action_id, category=category, requester_balance=None)
+        if config is not None
+        else _static_action_hint(action_id)
+    )
+    return {
+        "schema": CHAT_GATEWAY_REPORT_SCHEMA,
+        "ok": False,
+        "status": "fail",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "error_category": category,
+        "error": error,
+        "errors": [error],
+        "summary": {
+            "recommended_next_action": action_id,
+            "error_category": category,
+        },
+        "ui_message": _gateway_ui_message(category, action_id),
+        "action_hint": action_hint,
+    }
+
+
+def _with_gateway_error_clarity(report: dict[str, Any], config: ChatGatewayConfig) -> dict[str, Any]:
+    summary = dict(report.get("summary") or {})
+    if str(report.get("status") or "") not in {"blocked", "fail"} and str(summary.get("status") or "") not in {
+        "blocked",
+        "fail",
+    }:
+        return report
+    category = _continue_error_category(report)
+    action_id = _action_id_for_category(category, fallback=str(summary.get("recommended_next_action") or ""))
+    enriched = dict(report)
+    summary["error_category"] = category
+    summary["recommended_next_action"] = action_id
+    enriched["summary"] = summary
+    enriched["error_category"] = category
+    enriched["ui_message"] = _gateway_ui_message(category, action_id)
+    enriched["action_hint"] = _gateway_action_hint(
+        config=config,
+        action_id=action_id,
+        category=category,
+        requester_balance=None,
+    )
+    return enriched
+
+
+def _continue_error_category(report: dict[str, Any]) -> str | None:
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    if summary.get("blocked_reason") == "unresolved_session_turns":
+        return "unresolved_session"
+    if summary.get("blocked_reason") == "sync_failed":
+        return _category_from_error_text(_joined_report_errors(report)) or "coordinator_unreachable"
+    text_category = _category_from_error_text(_joined_report_errors(report))
+    if text_category:
+        return text_category
+    action = str(summary.get("recommended_next_action") or "")
+    if action in {"run_session_resume_dry_run", "run_session_sync_then_resume_dry_run", "wait_for_worker_result"}:
+        return "unresolved_session"
+    if action == "grant_requester_credits":
+        return "insufficient_credits"
+    if action == "check_coordinator_reachability":
+        return "coordinator_unreachable"
+    if action == "check_live_ollama_workers":
+        return "no_model_worker"
+    return None
+
+
+def _readiness_error_category(
+    *,
+    session: dict[str, Any],
+    snapshot_info: dict[str, Any],
+    requester: dict[str, Any],
+    routing: dict[str, Any],
+) -> str | None:
+    if session["blocked"]:
+        return "unresolved_session"
+    if not snapshot_info["ok"]:
+        return "coordinator_unreachable"
+    if not requester["credits_sufficient"]:
+        return "insufficient_credits"
+    if routing["live_eligible_node_count"] <= 0:
+        return "no_model_worker"
+    return None
+
+
+def _category_from_error_text(error_text: str) -> str | None:
+    text = error_text.lower()
+    if not text:
+        return None
+    if "timed out" in text or "timeout" in text or "did not verify" in text:
+        return "request_timeout"
+    if "negative" in text or "credit" in text:
+        return "insufficient_credits"
+    if "connection" in text or "refused" in text or "unreachable" in text or "urlerror" in text:
+        return "coordinator_unreachable"
+    if "ollama" in text or "worker" in text or "model" in text:
+        return "no_model_worker"
+    return None
+
+
+def _joined_report_errors(report: dict[str, Any]) -> str:
+    chunks: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            errors = value.get("errors")
+            if isinstance(errors, list):
+                chunks.extend(str(error) for error in errors)
+            for key in ("summary", "session", "sync", "status_before", "status_after_sync"):
+                collect(value.get(key))
+            latest_turn = value.get("latest_turn")
+            collect(latest_turn)
+            return
+        if isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(report)
+    return "\n".join(chunks)
+
+
+def _action_id_for_category(category: str | None, fallback: str = "") -> str:
+    if category == "unresolved_session":
+        if fallback in {"run_session_sync_then_resume_dry_run", "wait_for_worker_result", "run_session_sync"}:
+            return fallback
+        return "run_session_resume_dry_run"
+    if category == "coordinator_unreachable":
+        return "start_or_check_local_coordinator"
+    if category == "insufficient_credits":
+        return "grant_requester_credits"
+    if category == "no_model_worker":
+        return "wait_for_model_capable_worker_or_change_model"
+    if category == "request_timeout":
+        return "run_session_sync"
+    if category == "invalid_model":
+        return "choose_valid_model"
+    return fallback or "inspect_chat_gateway_response"
+
+
+def _gateway_action_hint(
+    *,
+    config: ChatGatewayConfig,
+    action_id: str,
+    category: str | None,
+    requester_balance: int | None,
+) -> dict[str, Any]:
+    if action_id == "choose_valid_model":
+        return _static_action_hint(action_id, category=category)
+    connection = _resolve_gateway_connection(config)
+    commands = _readiness_commands(
+        config=config,
+        connection=connection,
+        action_id=action_id,
+        requester_balance=requester_balance,
+    )
+    primary_command = commands[0]["command"] if commands else None
+    return {
+        "id": action_id,
+        "error_category": category,
+        "partner_required": False,
+        "safe": True,
+        "primary_command": primary_command,
+        "commands": commands,
+    }
+
+
+def _static_action_hint(action_id: str, *, category: str | None = None) -> dict[str, Any]:
+    return {
+        "id": action_id,
+        "error_category": category,
+        "partner_required": False,
+        "safe": True,
+        "primary_command": None,
+        "commands": [],
+    }
+
+
+def _gateway_ui_message(category: str | None, action_id: str) -> str | None:
+    if category == "unresolved_session":
+        return "A previous turn is unresolved. Sync or preview resume before spending more credits."
+    if category == "coordinator_unreachable":
+        return "The coordinator is not reachable from this gateway."
+    if category == "insufficient_credits":
+        return "The requester account does not have enough credits for this turn."
+    if category == "no_model_worker":
+        return "No live worker currently advertises the selected model."
+    if category == "invalid_model":
+        return "Choose a valid model name from the catalog."
+    if category == "request_timeout":
+        return "The request timed out before a verified answer arrived."
+    if action_id and action_id != "continue_chat_session":
+        return f"Safe action: {action_id}"
+    return None
 
 
 def _redact_report(report: dict[str, Any], config: ChatGatewayConfig) -> dict[str, Any]:
@@ -1209,6 +1450,7 @@ def _readiness_action_hint(
     connection: dict[str, Any],
     action_id: str,
     requester_balance: int | None,
+    error_category: str | None = None,
 ) -> dict[str, Any]:
     commands = _readiness_commands(
         config=config,
@@ -1219,6 +1461,7 @@ def _readiness_action_hint(
     primary_command = commands[0]["command"] if commands else None
     return {
         "id": action_id,
+        "error_category": error_category,
         "partner_required": False,
         "safe": True,
         "primary_command": primary_command,
@@ -1233,13 +1476,28 @@ def _readiness_commands(
     action_id: str,
     requester_balance: int | None,
 ) -> list[dict[str, Any]]:
-    if action_id == "run_session_sync":
+    if action_id in {"run_session_sync", "wait_for_worker_result"}:
         return [
             _command(
                 "sync_session",
                 "read_only_remote_updates_local_session",
                 _base_chat_session_argv(config, "session-sync", connection) + ["--json"],
             )
+        ]
+    if action_id == "run_session_sync_then_resume_dry_run":
+        return [
+            _command(
+                "sync_session",
+                "read_only_remote_updates_local_session",
+                _base_chat_session_argv(config, "session-sync", connection) + ["--json"],
+            ),
+            _command(
+                "preview_resume",
+                "dry_run_no_credit_spend",
+                _base_chat_session_argv(config, "session-resume", connection)
+                + _chat_continue_options(config)
+                + ["--dry-run", "--json"],
+            ),
         ]
     if action_id == "run_session_resume_dry_run":
         return [

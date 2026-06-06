@@ -74,6 +74,7 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert 'id="modelRoute"' in page
     assert 'id="modelCatalog"' in page
     assert 'id="modelSelect"' in page
+    assert 'id="apiErrorBanner"' in page
     assert 'id="coordinatorState"' in page
     assert 'id="commandHint"' in page
     assert 'id="balance"' in page
@@ -87,6 +88,7 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert "Balance ${balance}" in page
     assert 'sendButton.textContent = value ? "Sending" : "Send"' in page
     assert "safeActionEndpoints" in page
+    assert "renderApiError" in page
     assert "Run Safe Action" in page
     assert "New Session Dry Run" in page
     assert "Archive Dry Run" in page
@@ -163,6 +165,9 @@ def test_chat_gateway_readiness_blocks_when_coordinator_unreachable(tmp_path):
     assert readiness["status"] == "blocked"
     assert readiness["summary"]["can_send"] is False
     assert readiness["summary"]["coordinator_reachable"] is False
+    assert readiness["summary"]["error_category"] == "coordinator_unreachable"
+    assert readiness["error_category"] == "coordinator_unreachable"
+    assert readiness["action_hint"]["error_category"] == "coordinator_unreachable"
     assert readiness["summary"]["recommended_next_action"] == "start_or_check_local_coordinator"
     assert readiness["action_hint"]["commands"][0]["id"] == "check_coordinator"
     assert "python -m chatp2p.cli node status" in readiness["action_hint"]["primary_command"]
@@ -201,6 +206,7 @@ def test_chat_gateway_readiness_blocks_when_requester_has_no_credits(tmp_path):
     assert readiness["summary"]["can_send"] is False
     assert readiness["summary"]["requester_balance"] == 0
     assert readiness["summary"]["credits_sufficient"] is False
+    assert readiness["summary"]["error_category"] == "insufficient_credits"
     assert readiness["summary"]["recommended_next_action"] == "grant_requester_credits"
     assert [command["id"] for command in readiness["action_hint"]["commands"]] == [
         "inspect_requester_credits",
@@ -242,6 +248,7 @@ def test_chat_gateway_readiness_blocks_when_model_has_no_live_worker(tmp_path):
     assert readiness["status"] == "blocked"
     assert readiness["summary"]["can_send"] is False
     assert readiness["summary"]["live_eligible_node_count"] == 0
+    assert readiness["summary"]["error_category"] == "no_model_worker"
     assert readiness["model_routing"]["live_node_count"] == 1
     assert readiness["summary"]["recommended_next_action"] == "wait_for_model_capable_worker_or_change_model"
     assert readiness["action_hint"]["commands"][0]["id"] == "check_node_status"
@@ -318,6 +325,7 @@ def test_chat_gateway_readiness_blocks_unresolved_session_before_other_actions(t
     assert readiness["status"] == "blocked"
     assert readiness["summary"]["can_send"] is False
     assert readiness["summary"]["session_blocked"] is True
+    assert readiness["summary"]["error_category"] == "unresolved_session"
     assert readiness["summary"]["recommended_next_action"] == "run_session_resume_dry_run"
     assert readiness["action_hint"]["commands"][0]["id"] == "preview_resume"
     assert "chat session-resume" in readiness["action_hint"]["primary_command"]
@@ -602,7 +610,11 @@ def test_chat_gateway_continue_rejects_invalid_model_without_spend(tmp_path):
 
     assert status_code == 400
     assert payload["status"] == "fail"
+    assert payload["error_category"] == "invalid_model"
+    assert payload["summary"]["error_category"] == "invalid_model"
     assert payload["summary"]["recommended_next_action"] == "choose_valid_model"
+    assert payload["action_hint"]["id"] == "choose_valid_model"
+    assert payload["action_hint"]["partner_required"] is False
     assert "model" in payload["error"]
     assert not (tmp_path / "chat-session" / "chat-session.json").exists()
 
@@ -631,13 +643,65 @@ def test_chat_gateway_continue_blocks_unresolved_turn_without_spend(tmp_path):
     after = json.loads(session_path.read_text(encoding="utf-8"))
 
     assert report["status"] == "blocked"
+    assert report["error_category"] == "unresolved_session"
+    assert report["summary"]["error_category"] == "unresolved_session"
     assert report["summary"]["turn_created"] is False
     assert report["summary"]["blocked_reason"] == "unresolved_session_turns"
+    assert report["action_hint"]["id"] == "run_session_resume_dry_run"
+    assert report["action_hint"]["partner_required"] is False
+    assert report["action_hint"]["commands"][0]["id"] == "preview_resume"
     assert transcript["status"] == "fail"
     assert transcript["summary"]["turn_count"] == 2
     assert transcript["turns"][1]["status"] == "fail"
     assert transcript["turns"][1]["answer"] is None
     assert after == before
+
+
+def test_chat_gateway_continue_categorizes_request_timeout(tmp_path):
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    requester_id = "requester_gateway_account"
+    coordinator.apply_credit_delta(
+        account_id=requester_id,
+        account_type="requester",
+        delta=2,
+        reason="operator_credit_grant",
+    )
+    coordinator_server = create_coordinator_http_server(coordinator, host="127.0.0.1", port=0)
+    coordinator_thread = threading.Thread(target=coordinator_server.serve_forever, daemon=True)
+    coordinator_thread.start()
+    try:
+        coordinator_host, coordinator_port = coordinator_server.server_address
+        coordinator_url = f"http://{coordinator_host}:{coordinator_port}"
+        server, thread, base_url = _start_gateway(
+            ChatGatewayConfig(
+                out_dir=tmp_path / "chat-session",
+                session_id="demo",
+                coordinator_url=coordinator_url,
+                model="tiny-test-model",
+                requester_account_id=requester_id,
+                timeout_seconds=0.1,
+                poll_interval=0.05,
+                port=0,
+            )
+        )
+        try:
+            report = _post_json(f"{base_url}/api/chat/continue", {"prompt": "No worker will answer"})
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+    finally:
+        coordinator_server.shutdown()
+        coordinator_server.server_close()
+        coordinator_thread.join(timeout=2)
+
+    assert report["status"] == "fail"
+    assert report["error_category"] == "request_timeout"
+    assert report["summary"]["error_category"] == "request_timeout"
+    assert report["summary"]["recommended_next_action"] == "run_session_sync"
+    assert report["action_hint"]["id"] == "run_session_sync"
+    assert report["action_hint"]["commands"][0]["id"] == "sync_session"
+    assert "TimeoutError" in json.dumps(report["session"])
 
 
 def test_chat_gateway_sync_and_resume_endpoints_use_safe_flows(monkeypatch, tmp_path):
