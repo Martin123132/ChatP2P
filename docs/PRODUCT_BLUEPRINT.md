@@ -112,6 +112,8 @@ Model Governance V0 creates the first strict contract for a community-shaped mod
 
 Base Model Registry V0 creates the approval checklist for the first actual model the network may serve. `chatp2p model registry` tracks candidate base models, license/source evidence, runtime support, hardware fit, artifact hashes, eval completion, and governance review status. A model marked `approved` fails validation unless that evidence is complete, which keeps the project from confusing a wish list with a safe default route.
 
+Model Eval Harness V0 makes the first eval evidence artifact. `chatp2p model eval` runs a deterministic local harness by default, writes JSON/Markdown reports, checks domain/regression/safety/local-smoke behavior, and records whether license/source evidence is still blocking approval. It never approves a model or edits the registry; the output is evidence to attach to a future model registry update.
+
 ## Future Lane: ISP Edge / Broadband Bundle
 
 Keep a second product architecture lane for an ISP-edge simulation, but do not let it interrupt the current alpha path. The idea is not "AI inside fibre"; it is a broadband-provider-style deployment model where a provider runs a coordinator, subscribers run light gateway/device nodes, regional edge workers provide stronger capacity, and policy routes work through local, provider-edge, trusted-peer, then placeholder fallback paths.

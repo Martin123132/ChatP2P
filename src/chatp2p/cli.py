@@ -105,6 +105,11 @@ from .model_governance import (
     format_model_governance_summary,
     run_model_governance,
 )
+from .model_eval import (
+    ModelEvalConfig,
+    format_model_eval_summary,
+    run_model_eval,
+)
 from .model_registry import (
     ModelRegistryConfig,
     format_model_registry_summary,
@@ -460,6 +465,30 @@ def model_registry_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_model_registry_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_eval_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_eval(
+            ModelEvalConfig(
+                registry_path=Path(args.registry),
+                model_id=args.model_id,
+                out_dir=Path(args.out),
+                mode=args.mode,
+                ollama_model=args.ollama_model,
+                ollama_base_url=args.ollama_base_url,
+                ollama_timeout_seconds=args.ollama_timeout_seconds,
+            )
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_eval_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -3231,6 +3260,50 @@ def build_parser() -> argparse.ArgumentParser:
     model_governance_parser.add_argument("--force", action="store_true", help="Replace an existing registry during --init")
     model_governance_parser.add_argument("--json", action="store_true", help="Print the full JSON governance report")
     model_governance_parser.set_defaults(func=model_governance_command)
+
+    model_eval_parser = model_subcommands.add_parser(
+        "eval",
+        help="Run a read-only eval harness for a base model candidate",
+    )
+    model_eval_parser.add_argument(
+        "--registry",
+        default=".mesh/model-registry.json",
+        help="Path to the base model registry JSON",
+    )
+    model_eval_parser.add_argument(
+        "--model-id",
+        required=True,
+        help="Model id from the registry to evaluate",
+    )
+    model_eval_parser.add_argument(
+        "--out",
+        default=".mesh/model-eval",
+        help="Output directory for model-eval-report.json and .md",
+    )
+    model_eval_parser.add_argument(
+        "--mode",
+        choices=["fake", "ollama"],
+        default="fake",
+        help="Evaluation runner mode; fake is deterministic and requires no model download",
+    )
+    model_eval_parser.add_argument(
+        "--ollama-model",
+        default=None,
+        help="Local Ollama model name to use when --mode ollama is selected",
+    )
+    model_eval_parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="Local Ollama base URL used when --mode ollama is selected",
+    )
+    model_eval_parser.add_argument(
+        "--ollama-timeout-seconds",
+        type=float,
+        default=60.0,
+        help="Timeout per Ollama eval request",
+    )
+    model_eval_parser.add_argument("--json", action="store_true", help="Print the full JSON eval report")
+    model_eval_parser.set_defaults(func=model_eval_command)
 
     chat_parser = subcommands.add_parser("chat", help="Local chat product-loop proofs")
     chat_subcommands = chat_parser.add_subparsers(dest="chat_command", required=True)

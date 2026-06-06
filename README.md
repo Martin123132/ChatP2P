@@ -797,6 +797,8 @@ Model Governance V0 turns the "community-shaped model" idea into a local registr
 
 Base Model Registry V0 tracks candidate open-weight base models before the network serves them. It does not download weights or claim a model is approved; it records the evidence needed before a candidate can become the default route: license, source URL, hashes, runtime support, hardware tier, eval plan, local smoke result, and governance review.
 
+Model Eval Harness V0 turns that checklist into repeatable local evidence. The default `fake` mode is deterministic and does not download weights, spend credits, call a partner node, or approve a model. It writes JSON and Markdown evidence for domain, regression, safety, local smoke, and license/source checks so the next real model decision is based on artifacts rather than guesswork.
+
 ```powershell
 python -m chatp2p.cli model registry `
   --registry D:\ChatP2PData\model-registry.json `
@@ -810,6 +812,15 @@ python -m chatp2p.cli model governance `
   --registry D:\ChatP2PData\model-governance.json `
   --out D:\ChatP2PData\model-governance-report.json `
   --init `
+  --json
+```
+
+```powershell
+python -m chatp2p.cli model eval `
+  --registry D:\ChatP2PData\model-registry.json `
+  --model-id chatp2p-base-candidate-v0 `
+  --out D:\ChatP2PData\model-eval `
+  --mode fake `
   --json
 ```
 

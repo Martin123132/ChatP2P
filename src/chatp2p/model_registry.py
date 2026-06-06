@@ -35,6 +35,8 @@ _SENSITIVE_PATTERNS: dict[str, re.Pattern[str]] = {
     "github_token": re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
     "alpha_token": re.compile(r"\balpha-token-[A-Za-z0-9_-]{8,}\b"),
     "credit_grant_token": re.compile(r"\bcredit-grant-token-[A-Za-z0-9_-]{8,}\b"),
+    "long_admission_token": re.compile(r"""admission_token["']?\s*[:=]\s*["'][^"']{20,}["']"""),
+    "long_credit_grant_token": re.compile(r"""credit_grant_token["']?\s*[:=]\s*["'][^"']{20,}["']"""),
 }
 
 
