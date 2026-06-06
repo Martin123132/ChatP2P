@@ -100,6 +100,11 @@ from .node_runtime import (
 from .ollama import DEFAULT_OLLAMA_BASE_URL
 from .jsonio import read_json_file
 from .operator_config import OperatorConfig, write_operator_config
+from .model_candidate import (
+    ModelCandidateIntakeConfig,
+    format_model_candidate_intake_summary,
+    run_model_candidate_intake,
+)
 from .model_governance import (
     ModelGovernanceConfig,
     format_model_governance_summary,
@@ -514,6 +519,48 @@ def model_eval_attach_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_model_eval_attach_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_candidate_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_candidate_intake(
+            ModelCandidateIntakeConfig(
+                registry_path=Path(args.registry),
+                model_id=args.model_id,
+                provider=args.provider,
+                project=args.project,
+                family=args.family,
+                variant=args.variant,
+                status=args.status,
+                license=args.license,
+                license_url=args.license_url,
+                source_url=args.source_url,
+                parameter_count_b=args.parameter_count_b,
+                architecture=args.architecture,
+                context_length_tokens=args.context_length_tokens,
+                domains=tuple(args.domain or []),
+                runtimes=tuple(args.runtime or []),
+                min_ram_gb=args.min_ram_gb,
+                min_vram_gb=args.min_vram_gb,
+                recommended_capability_tier=args.recommended_capability_tier,
+                manifest_sha256=args.manifest_sha256,
+                weights_sha256=args.weights_sha256,
+                quantization=args.quantization,
+                notes=args.notes,
+                out_path=Path(args.out) if args.out else None,
+                write=args.write,
+                backup=not args.no_backup,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_candidate_intake_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -3357,6 +3404,69 @@ def build_parser() -> argparse.ArgumentParser:
     )
     model_eval_attach_parser.add_argument("--json", action="store_true", help="Print the full JSON attach report")
     model_eval_attach_parser.set_defaults(func=model_eval_attach_command)
+
+    model_candidate_parser = model_subcommands.add_parser(
+        "candidate",
+        help="Preview or write structured base-model candidate metadata",
+    )
+    model_candidate_parser.add_argument(
+        "--registry",
+        default=".mesh/model-registry.json",
+        help="Path to the base model registry JSON",
+    )
+    model_candidate_parser.add_argument("--model-id", required=True, help="Candidate model id")
+    model_candidate_parser.add_argument("--provider", default=None, help="Model provider or publisher")
+    model_candidate_parser.add_argument("--project", default=None, help="Source project or model card name")
+    model_candidate_parser.add_argument("--family", default="base_chat_model", help="Model family")
+    model_candidate_parser.add_argument("--variant", default=None, help="Model variant, size, or tag")
+    model_candidate_parser.add_argument(
+        "--status",
+        choices=["candidate", "proposal"],
+        default=None,
+        help="Candidate registry status; approval is not allowed here",
+    )
+    model_candidate_parser.add_argument("--license", default=None, help="Confirmed license name")
+    model_candidate_parser.add_argument("--license-url", default=None, help="License URL")
+    model_candidate_parser.add_argument("--source-url", default=None, help="Model card/source URL")
+    model_candidate_parser.add_argument("--parameter-count-b", type=float, default=None, help="Parameter count in billions")
+    model_candidate_parser.add_argument("--architecture", default=None, help="Architecture, such as dense_transformer")
+    model_candidate_parser.add_argument("--context-length-tokens", type=int, default=None, help="Context length in tokens")
+    model_candidate_parser.add_argument(
+        "--domain",
+        action="append",
+        default=None,
+        help="Domain tag; repeat for multiple domains",
+    )
+    model_candidate_parser.add_argument(
+        "--runtime",
+        action="append",
+        default=None,
+        help="Runtime support spec id:status[:notes], for example ollama:verified:local smoke passed",
+    )
+    model_candidate_parser.add_argument("--min-ram-gb", type=float, default=None, help="Minimum RAM in GB")
+    model_candidate_parser.add_argument("--min-vram-gb", type=float, default=None, help="Minimum VRAM in GB")
+    model_candidate_parser.add_argument(
+        "--recommended-capability-tier",
+        default=None,
+        help="Recommended contributor capability tier",
+    )
+    model_candidate_parser.add_argument("--manifest-sha256", default=None, help="Manifest SHA256")
+    model_candidate_parser.add_argument("--weights-sha256", default=None, help="Weights SHA256")
+    model_candidate_parser.add_argument("--quantization", default=None, help="Quantization label")
+    model_candidate_parser.add_argument("--notes", default=None, help="Short candidate notes")
+    model_candidate_parser.add_argument("--out", default=None, help="Optional JSON intake report path")
+    model_candidate_parser.add_argument(
+        "--write",
+        action="store_true",
+        help="Write the candidate metadata into the registry; omitted means dry-run",
+    )
+    model_candidate_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not write a .bak copy of the registry when --write updates an existing file",
+    )
+    model_candidate_parser.add_argument("--json", action="store_true", help="Print the full JSON intake report")
+    model_candidate_parser.set_defaults(func=model_candidate_command)
 
     chat_parser = subcommands.add_parser("chat", help="Local chat product-loop proofs")
     chat_subcommands = chat_parser.add_subparsers(dest="chat_command", required=True)

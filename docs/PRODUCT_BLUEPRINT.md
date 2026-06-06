@@ -112,6 +112,8 @@ Model Governance V0 creates the first strict contract for a community-shaped mod
 
 Base Model Registry V0 creates the approval checklist for the first actual model the network may serve. `chatp2p model registry` tracks candidate base models, license/source evidence, runtime support, hardware fit, artifact hashes, eval completion, and governance review status. A model marked `approved` fails validation unless that evidence is complete, which keeps the project from confusing a wish list with a safe default route.
 
+Model Candidate Intake V0 turns model selection into a structured local workflow instead of manual JSON edits. `chatp2p model candidate` can preview or write candidate metadata, runtimes, hardware fit, hashes, domains, and license/source fields. It writes only `candidate` or `proposal` statuses and refuses to modify approved entries, keeping intake separate from governance approval.
+
 Model Eval Harness V0 makes the first eval evidence artifact. `chatp2p model eval` runs a deterministic local harness by default, writes JSON/Markdown reports, checks domain/regression/safety/local-smoke behavior, and records whether license/source evidence is still blocking approval. It never approves a model or edits the registry; the output is evidence to attach to a future model registry update.
 
 Model Eval Attach V0 closes the loop between eval reports and the model registry. `chatp2p model attach-eval` previews registry evidence updates by default, then requires `--write` to persist completed evals, success criteria, and a compact evidence history entry. It refuses failed eval reports and preserves the candidate status, so evidence can move forward without accidentally approving a base model.
