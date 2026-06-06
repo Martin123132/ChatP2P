@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from chatp2p.chat_gateway import (
@@ -67,6 +68,7 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert 'id="readinessBadge"' in page
     assert 'id="modelRoute"' in page
     assert 'id="modelCatalog"' in page
+    assert 'id="modelSelect"' in page
     assert 'id="coordinatorState"' in page
     assert 'id="commandHint"' in page
     assert 'id="balance"' in page
@@ -76,6 +78,7 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert "Safe action:" in page
     assert "Balance ${balance}" in page
     assert 'sendButton.textContent = value ? "Sending" : "Send"' in page
+    assert "model: selectedModel()" in page
     assert "innerHTML" not in page
     assert "\u00b7" not in page
     assert token not in json.dumps({"health": health, "status": status, "transcript": transcript})
@@ -231,6 +234,45 @@ def test_chat_gateway_readiness_blocks_when_model_has_no_live_worker(tmp_path):
     assert readiness["summary"]["recommended_next_action"] == "wait_for_model_capable_worker_or_change_model"
     assert readiness["action_hint"]["commands"][0]["id"] == "check_node_status"
     assert "node status" in readiness["action_hint"]["primary_command"]
+
+
+def test_chat_gateway_readiness_accepts_model_query_override(tmp_path):
+    coordinator_server, coordinator_thread, coordinator_url, _worker_identity = _start_coordinator_with_worker(
+        requester_balance=2,
+        models=["other-model"],
+    )
+    try:
+        server, thread, base_url = _start_gateway(
+            ChatGatewayConfig(
+                out_dir=tmp_path / "chat-session",
+                session_id="demo",
+                coordinator_url=coordinator_url,
+                model="tiny-test-model",
+                requester_account_id="requester_gateway_account",
+                port=0,
+            )
+        )
+        try:
+            default_readiness = _get_json(f"{base_url}/api/chat/readiness")
+            override_readiness = _get_json(f"{base_url}/api/chat/readiness?model=other-model")
+            override_catalog = _get_json(f"{base_url}/api/chat/models?model=other-model")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+    finally:
+        coordinator_server.shutdown()
+        coordinator_server.server_close()
+        coordinator_thread.join(timeout=2)
+
+    assert default_readiness["status"] == "blocked"
+    assert default_readiness["summary"]["model"] == "tiny-test-model"
+    assert default_readiness["summary"]["live_eligible_node_count"] == 0
+    assert override_readiness["status"] == "pass"
+    assert override_readiness["summary"]["model"] == "other-model"
+    assert override_readiness["summary"]["live_eligible_node_count"] == 1
+    assert override_catalog["summary"]["selected_model"] == "other-model"
+    assert override_catalog["summary"]["selected_model_sendable"] is True
 
 
 def test_chat_gateway_readiness_blocks_unresolved_session_before_other_actions(tmp_path):
@@ -453,6 +495,106 @@ def test_chat_gateway_continue_creates_funded_turn(tmp_path):
     assert "alpha-token" not in json.dumps({"report": report, "status": status, "transcript": transcript})
 
 
+def test_chat_gateway_continue_uses_request_model_override(tmp_path):
+    fake = _start_fake_ollama(model="other-model", answer="Override answer.")
+    coordinator = Coordinator(identity=NodeIdentity.generate(prefix="coordinator"))
+    requester_id = "requester_gateway_account"
+    coordinator.apply_credit_delta(
+        account_id=requester_id,
+        account_type="requester",
+        delta=2,
+        reason="operator_credit_grant",
+    )
+    coordinator_server = create_coordinator_http_server(coordinator, host="127.0.0.1", port=0)
+    coordinator_thread = threading.Thread(target=coordinator_server.serve_forever, daemon=True)
+    coordinator_thread.start()
+
+    worker_errors = []
+    try:
+        coordinator_host, coordinator_port = coordinator_server.server_address
+        coordinator_url = f"http://{coordinator_host}:{coordinator_port}"
+        client = CoordinatorClient(coordinator_url)
+        worker_identity = NodeIdentity.generate(prefix="worker")
+        worker = WorkerNode(
+            identity=worker_identity,
+            capability_profile=_ollama_capabilities(models=["other-model"], base_url=fake.base_url),
+            ollama_base_url=fake.base_url,
+        )
+        registration = NodeRegistration.create(node=worker_identity, capabilities=worker.capabilities())
+        assert client.register(registration)["accepted"] is True
+
+        gateway_server, gateway_thread, gateway_url = _start_gateway(
+            ChatGatewayConfig(
+                out_dir=tmp_path / "chat-session",
+                session_id="demo",
+                coordinator_url=coordinator_url,
+                model="tiny-test-model",
+                requester_account_id=requester_id,
+                timeout_seconds=10,
+                poll_interval=0.1,
+                port=0,
+            )
+        )
+        worker_thread = threading.Thread(
+            target=_run_worker_until_jobs,
+            args=(client, worker, worker_errors, 1),
+            daemon=True,
+        )
+        worker_thread.start()
+        try:
+            report = _post_json(
+                f"{gateway_url}/api/chat/continue",
+                {"prompt": "Hello override", "model": "other-model"},
+            )
+            transcript = _get_json(f"{gateway_url}/api/session/transcript")
+        finally:
+            gateway_server.shutdown()
+            gateway_server.server_close()
+            gateway_thread.join(timeout=2)
+        worker_thread.join(timeout=2)
+    finally:
+        fake.stop()
+        coordinator_server.shutdown()
+        coordinator_server.server_close()
+        coordinator_thread.join(timeout=2)
+
+    assert worker_errors == []
+    assert report["status"] == "pass"
+    assert report["summary"]["latest_turn"]["answer"] == "Override answer."
+    assert transcript["turns"][0]["model"] == "other-model"
+    assert transcript["turns"][0]["answer"] == "Override answer."
+    assert worker_identity.node_id not in json.dumps(transcript)
+
+
+def test_chat_gateway_continue_rejects_invalid_model_without_spend(tmp_path):
+    server, thread, base_url = _start_gateway(
+        ChatGatewayConfig(
+            out_dir=tmp_path / "chat-session",
+            session_id="demo",
+            coordinator_url="http://127.0.0.1:9",
+            model="tiny-test-model",
+            requester_account_id="requester_gateway_account",
+            client_timeout_seconds=0.1,
+            port=0,
+        )
+    )
+    try:
+        status_code, payload = _post_json_error(
+            f"{base_url}/api/chat/continue",
+            {"prompt": "Do not spend", "model": "bad model"},
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert status_code == 400
+    assert payload["status"] == "fail"
+    assert payload["summary"]["recommended_next_action"] == "choose_valid_model"
+    assert "model" in payload["error"]
+    assert not (tmp_path / "chat-session" / "chat-session.json").exists()
+
+
 def test_chat_gateway_continue_blocks_unresolved_turn_without_spend(tmp_path):
     session_path = _write_failed_session_fixture(tmp_path / "chat-session")
     before = json.loads(session_path.read_text(encoding="utf-8"))
@@ -609,6 +751,20 @@ def _post_json(url, payload):
         headers={"Content-Type": "application/json"},
     )
     return _request_json(request)
+
+
+def _post_json_error(url, payload):
+    body = json.dumps(payload).encode("utf-8")
+    request = Request(
+        url,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        return 200, _request_json(request)
+    except HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
 def _request_json(request):

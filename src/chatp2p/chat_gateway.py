@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import html
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 
 from .alpha import load_alpha_invite
 from .chat_session import (
@@ -35,6 +35,8 @@ CHAT_GATEWAY_MODEL_CATALOG_SCHEMA = "chatp2p.chat-gateway-model-catalog.v1"
 DEFAULT_CHAT_GATEWAY_HOST = "127.0.0.1"
 DEFAULT_CHAT_GATEWAY_PORT = 8787
 DEFAULT_CHAT_GATEWAY_MAX_REQUEST_BYTES = 16_384
+CHAT_GATEWAY_MAX_MODEL_LENGTH = 128
+CHAT_GATEWAY_MODEL_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-/")
 
 
 @dataclass(frozen=True)
@@ -92,10 +94,18 @@ def create_chat_gateway_server(config: ChatGatewayConfig) -> ThreadingHTTPServer
                 _json_response(self, 200, _transcript_payload(config))
                 return
             if parsed.path == "/api/chat/readiness":
-                _json_response(self, 200, _readiness_payload(config))
+                request_config, error = _config_from_query_model(config, parsed.query)
+                if error:
+                    _json_response(self, 400, _bad_model_payload(error))
+                    return
+                _json_response(self, 200, _readiness_payload(request_config))
                 return
             if parsed.path == "/api/chat/models":
-                _json_response(self, 200, _model_catalog_payload(config))
+                request_config, error = _config_from_query_model(config, parsed.query)
+                if error:
+                    _json_response(self, 400, _bad_model_payload(error))
+                    return
+                _json_response(self, 200, _model_catalog_payload(request_config))
                 return
             _json_response(self, 404, {"ok": False, "status": "fail", "error": "not found"})
 
@@ -123,7 +133,11 @@ def create_chat_gateway_server(config: ChatGatewayConfig) -> ThreadingHTTPServer
                         },
                     )
                     return
-                _json_response(self, 200, _continue_payload(config, prompt=prompt))
+                request_config, error = _config_from_model_override(config, request.get("model"))
+                if error:
+                    _json_response(self, 400, _bad_model_payload(error))
+                    return
+                _json_response(self, 200, _continue_payload(request_config, prompt=prompt))
                 return
             _json_response(self, 404, {"ok": False, "status": "fail", "error": "not found"})
 
@@ -445,9 +459,55 @@ def _model_catalog_payload(config: ChatGatewayConfig) -> dict[str, Any]:
     )
 
 
+def _config_from_query_model(config: ChatGatewayConfig, query: str) -> tuple[ChatGatewayConfig, str | None]:
+    values = parse_qs(query, keep_blank_values=True).get("model") or []
+    if not values:
+        return config, None
+    return _config_from_model_override(config, values[-1])
+
+
+def _config_from_model_override(config: ChatGatewayConfig, value: Any) -> tuple[ChatGatewayConfig, str | None]:
+    if value is None:
+        return config, None
+    model, error = _validate_model_override(value)
+    if error:
+        return config, error
+    return replace(config, model=model), None
+
+
+def _validate_model_override(value: Any) -> tuple[str, str | None]:
+    if not isinstance(value, str):
+        return "", "model must be a string"
+    model = value.strip()
+    if not model:
+        return "", "model must be a non-empty string"
+    if model != value:
+        return "", "model must not contain leading or trailing whitespace"
+    if len(model) > CHAT_GATEWAY_MAX_MODEL_LENGTH:
+        return "", f"model must be at most {CHAT_GATEWAY_MAX_MODEL_LENGTH} characters"
+    if any(ord(char) < 32 or ord(char) == 127 or char.isspace() for char in model):
+        return "", "model must not contain whitespace or control characters"
+    if any(char not in CHAT_GATEWAY_MODEL_CHARS for char in model):
+        return "", "model may contain only letters, numbers, '.', '_', ':', '-', and '/'"
+    return model, None
+
+
+def _bad_model_payload(error: str) -> dict[str, Any]:
+    return {
+        "schema": CHAT_GATEWAY_REPORT_SCHEMA,
+        "ok": False,
+        "status": "fail",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "error": error,
+        "errors": [error],
+        "summary": {"recommended_next_action": "choose_valid_model"},
+    }
+
+
 def _render_gateway_html(config: ChatGatewayConfig) -> str:
     title = html.escape(config.session_id)
     model = html.escape(config.model)
+    model_json = json.dumps(config.model)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -474,11 +534,12 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     .bar {{ max-width: 1040px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 16px; }}
     h1 {{ font-size: 20px; margin: 0; font-weight: 700; }}
     .sub {{ color: var(--muted); font-size: 13px; margin-top: 3px; }}
-    button, textarea {{ font: inherit; }}
+    button, textarea, select {{ font: inherit; }}
     .actions {{ display: flex; flex-wrap: wrap; gap: 8px; }}
     button {{ border: 1px solid #cbd1d8; background: #fff; color: #111827; border-radius: 6px; padding: 8px 12px; cursor: pointer; min-height: 38px; }}
     button.primary {{ background: var(--accent); border-color: var(--accent); color: #fff; }}
     button:disabled {{ opacity: .55; cursor: wait; }}
+    select {{ border: 1px solid #cbd1d8; background: #fff; color: #111827; border-radius: 6px; padding: 6px 8px; min-height: 32px; max-width: 220px; }}
     #status {{ display: grid; gap: 8px; max-width: 1040px; margin: 0 auto; padding: 14px 20px 0; }}
     .status-row {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }}
     .badge {{ display: inline-flex; align-items: center; min-height: 24px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); background: #fff; color: var(--muted); font-size: 12px; font-weight: 650; }}
@@ -528,6 +589,7 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
       <div class="status-row">
         <span id="stateBadge" class="badge">loading</span>
         <span id="readinessBadge" class="badge">readiness</span>
+        <select id="modelSelect" aria-label="Model"></select>
         <span id="balance"></span>
         <span id="modelRoute"></span>
         <span id="coordinatorState"></span>
@@ -553,13 +615,21 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     const coordinatorStateEl = document.querySelector("#coordinatorState");
     const nextActionEl = document.querySelector("#nextAction");
     const modelCatalogEl = document.querySelector("#modelCatalog");
+    const modelSelectEl = document.querySelector("#modelSelect");
     const blockedBanner = document.querySelector("#blockedBanner");
     const commandHintEl = document.querySelector("#commandHint");
     const turnsEl = document.querySelector("#turns");
     const promptEl = document.querySelector("#prompt");
     const sendButton = document.querySelector("#sendButton");
     const buttons = Array.from(document.querySelectorAll("button"));
+    const defaultModel = {model_json};
     const blockedActions = new Set(["run_session_resume_dry_run", "run_session_sync_then_resume_dry_run", "wait_for_worker_result", "resume_failed_turn", "sync_session_then_resume_failed_turn"]);
+    function selectedModel() {{
+      return modelSelectEl.value || defaultModel;
+    }}
+    function modelQuery() {{
+      return `?model=${{encodeURIComponent(selectedModel())}}`;
+    }}
     function setBusy(value) {{
       buttons.forEach((button) => button.disabled = value);
       sendButton.textContent = value ? "Sending" : "Send";
@@ -576,11 +646,34 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     }}
     function renderModelCatalog(report) {{
       const summary = report.summary || {{}};
+      const models = report.models || [];
       const sendable = (report.models || []).filter((item) => item.sendable);
       const names = sendable.map((item) => `${{item.model}} (${{item.live_worker_count}})`);
-      const selected = summary.selected_model || "{model}";
-      const recommended = summary.recommended_model || "none";
-      modelCatalogEl.textContent = `Model ${{selected}} - Recommended ${{recommended}} - Available ${{names.join(", ") || "none"}}`;
+      const selected = summary.selected_model || defaultModel;
+      const recommendedModel = summary.recommended_model || "";
+      renderModelOptions(models, selected, recommendedModel);
+      modelCatalogEl.textContent = `Model ${{selected}} - Recommended ${{recommendedModel || "none"}} - Available ${{names.join(", ") || "none"}}`;
+    }}
+    function renderModelOptions(models, selected, recommended) {{
+      const current = selectedModel();
+      const choices = [];
+      function addChoice(value) {{
+        if (value && !choices.includes(value)) choices.push(value);
+      }}
+      addChoice(current);
+      addChoice(selected);
+      addChoice(recommended);
+      (models || []).filter((item) => item.sendable).forEach((item) => addChoice(item.model));
+      (models || []).forEach((item) => addChoice(item.model));
+      addChoice(defaultModel);
+      modelSelectEl.replaceChildren();
+      choices.forEach((name) => {{
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        modelSelectEl.append(option);
+      }});
+      modelSelectEl.value = choices.includes(current) ? current : selected || recommended || defaultModel;
     }}
     function renderReadiness(report) {{
       const summary = report.summary || {{}};
@@ -679,8 +772,8 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     async function refreshReadiness() {{
       try {{
         const [readinessResponse, modelsResponse] = await Promise.all([
-          fetch("/api/chat/readiness"),
-          fetch("/api/chat/models")
+          fetch(`/api/chat/readiness${{modelQuery()}}`),
+          fetch(`/api/chat/models${{modelQuery()}}`)
         ]);
         renderReadiness(await readinessResponse.json());
         renderModelCatalog(await modelsResponse.json());
@@ -703,6 +796,7 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     document.querySelector("#statusButton").onclick = refreshTranscript;
     document.querySelector("#syncButton").onclick = async () => {{ await request("/api/session/sync", {{ method: "POST" }}); await refreshTranscript(); }};
     document.querySelector("#resumeButton").onclick = () => request("/api/session/resume-dry-run", {{ method: "POST" }});
+    modelSelectEl.onchange = refreshReadiness;
     document.querySelector("#chatForm").onsubmit = async (event) => {{
       event.preventDefault();
       const prompt = promptEl.value.trim();
@@ -711,7 +805,7 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
       await request("/api/chat/continue", {{
         method: "POST",
         headers: {{ "Content-Type": "application/json" }},
-        body: JSON.stringify({{ prompt }})
+        body: JSON.stringify({{ prompt, model: selectedModel() }})
       }});
       await refreshTranscript();
     }};

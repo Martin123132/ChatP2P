@@ -94,6 +94,8 @@ Chat Gateway Action Hints V0 makes those readiness blockers directly actionable.
 
 Chat Model Catalog V0 adds read-only model supply visibility to the localhost gateway. The UI can now show the selected model, a recommended live model when one exists, and the advertised model inventory from redacted node samples before the operator spends credits on the next turn.
 
+Chat Gateway Model Picker V0 turns that catalog into an explicit local choice. The readiness and continue endpoints accept a validated model override, the page lets the operator pick among advertised models, and bad model names are rejected before any credit-spending path can run.
+
 Local Chat Demo V0 packages the whole product loop into one localhost command. It starts a temporary coordinator, fake Ollama-compatible runtime, worker, funded requester account, and gateway so the operator can prove `start -> open chat -> send prompt -> worker answers -> credits move` without a partner node or real model download.
 
 Chat Demo Modes V0 keeps the fake no-dependency demo as the default and adds `--mode ollama` for a real local model. Ollama mode preflights the requested model before opening the gateway, so the operator gets a clear setup error instead of a broken chat surface.
