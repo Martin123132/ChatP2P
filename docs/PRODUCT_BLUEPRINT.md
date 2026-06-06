@@ -86,6 +86,8 @@ Chat REPL V0 makes that contract feel like a usable chat surface without adding 
 
 Chat Gateway V0 exposes that same safe loop to a future UI over localhost HTTP. It serves health, status, transcript, sync, resume dry-run, and guarded continue endpoints plus a tiny local test page, while still keeping all credit spend behind `chat continue` and blocking unresolved turns.
 
+Chat UI V0 turns the gateway page into a usable local chat surface. It renders transcript-backed user and assistant turns, visible turn state, requester balance, loading state, and blocked-turn safe actions without adding new spend paths or a public web server.
+
 Operator Credit Tools V1 adds the missing controlled top-up path. Operators can inspect requester and worker balances with a read-only `operator credits` report, then grant requester credits with `operator grant-requester-credits` through a separate operator-only grant token. The normal alpha invite/admission token can still create jobs, but it cannot mint credits.
 
 ## Future Lane: ISP Edge / Broadband Bundle

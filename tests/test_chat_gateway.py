@@ -55,6 +55,17 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert transcript["status"] == "no_session"
     assert transcript["turns"] == []
     assert "/api/session/transcript" in page
+    assert "/api/chat/continue" in page
+    assert "Session demo - tiny-test-model" in page
+    assert 'id="blockedBanner"' in page
+    assert 'id="balance"' in page
+    assert 'id="sendButton"' in page
+    assert "turn user status-" in page
+    assert "turn assistant status-" in page
+    assert "Safe action:" in page
+    assert "Balance ${balance}" in page
+    assert 'sendButton.textContent = value ? "Sending" : "Send"' in page
+    assert "innerHTML = `<span" not in page
     assert token not in json.dumps({"health": health, "status": status, "transcript": transcript})
 
 

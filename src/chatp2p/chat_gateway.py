@@ -328,6 +328,7 @@ def _continue_payload(config: ChatGatewayConfig, *, prompt: str) -> dict[str, An
 
 def _render_gateway_html(config: ChatGatewayConfig) -> str:
     title = html.escape(config.session_id)
+    model = html.escape(config.model)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -335,63 +336,175 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ChatP2P {title}</title>
   <style>
-    body {{ margin: 0; font-family: Segoe UI, system-ui, sans-serif; background: #f6f7f9; color: #17191c; }}
-    main {{ max-width: 920px; margin: 0 auto; padding: 24px; display: grid; gap: 16px; }}
-    header {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; }}
-    h1 {{ font-size: 22px; margin: 0; font-weight: 650; }}
+    :root {{
+      color-scheme: light;
+      --bg: #f5f7fa;
+      --panel: #ffffff;
+      --ink: #151922;
+      --muted: #626d7c;
+      --line: #d6dde6;
+      --accent: #0f766e;
+      --warn: #9a3412;
+      --bad: #b91c1c;
+      --wait: #1d4ed8;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; font-family: Segoe UI, system-ui, sans-serif; background: var(--bg); color: var(--ink); }}
+    main {{ min-height: 100vh; display: grid; grid-template-rows: auto 1fr auto; }}
+    header {{ padding: 16px 20px; border-bottom: 1px solid var(--line); background: var(--panel); }}
+    .bar {{ max-width: 1040px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 16px; }}
+    h1 {{ font-size: 20px; margin: 0; font-weight: 700; }}
+    .sub {{ color: var(--muted); font-size: 13px; margin-top: 3px; }}
     button, textarea {{ font: inherit; }}
     .actions {{ display: flex; flex-wrap: wrap; gap: 8px; }}
-    button {{ border: 1px solid #cbd1d8; background: #fff; color: #111827; border-radius: 6px; padding: 8px 12px; cursor: pointer; }}
-    button.primary {{ background: #0f766e; border-color: #0f766e; color: #fff; }}
+    button {{ border: 1px solid #cbd1d8; background: #fff; color: #111827; border-radius: 6px; padding: 8px 12px; cursor: pointer; min-height: 38px; }}
+    button.primary {{ background: var(--accent); border-color: var(--accent); color: #fff; }}
     button:disabled {{ opacity: .55; cursor: wait; }}
-    #status {{ border: 1px solid #d7dde5; background: #fff; border-radius: 8px; padding: 12px; min-height: 56px; }}
-    #turns {{ display: grid; gap: 10px; }}
-    .turn {{ border: 1px solid #d7dde5; background: #fff; border-radius: 8px; padding: 12px; white-space: pre-wrap; }}
-    .meta {{ color: #5b6573; font-size: 13px; margin-bottom: 4px; }}
-    form {{ display: grid; gap: 10px; }}
-    textarea {{ min-height: 96px; resize: vertical; border: 1px solid #cbd1d8; border-radius: 8px; padding: 10px; }}
+    #status {{ display: grid; gap: 8px; max-width: 1040px; margin: 0 auto; padding: 14px 20px 0; }}
+    .status-row {{ display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }}
+    .badge {{ display: inline-flex; align-items: center; min-height: 24px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); background: #fff; color: var(--muted); font-size: 12px; font-weight: 650; }}
+    .badge.pass {{ color: #047857; border-color: #a7f3d0; background: #ecfdf5; }}
+    .badge.fail, .badge.blocked {{ color: var(--bad); border-color: #fecaca; background: #fef2f2; }}
+    .badge.submitted {{ color: var(--wait); border-color: #bfdbfe; background: #eff6ff; }}
+    .banner {{ display: none; border: 1px solid #fed7aa; background: #fff7ed; color: var(--warn); border-radius: 8px; padding: 10px 12px; }}
+    .banner.visible {{ display: block; }}
+    #turns {{ max-width: 1040px; width: 100%; margin: 0 auto; padding: 16px 20px 120px; display: grid; gap: 14px; align-content: start; }}
+    .empty {{ border: 1px dashed #cbd5e1; border-radius: 8px; padding: 18px; color: var(--muted); background: rgba(255,255,255,.72); }}
+    .turn {{ display: grid; gap: 8px; max-width: min(760px, 92%); }}
+    .turn.user {{ justify-self: end; }}
+    .turn.assistant {{ justify-self: start; }}
+    .bubble {{ border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 12px 14px; white-space: pre-wrap; line-height: 1.45; overflow-wrap: anywhere; }}
+    .turn.user .bubble {{ background: #e8f5f3; border-color: #b7dfd9; }}
+    .turn.assistant .bubble {{ background: #fff; }}
+    .meta {{ color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }}
+    footer {{ position: fixed; left: 0; right: 0; bottom: 0; border-top: 1px solid var(--line); background: rgba(245,247,250,.96); backdrop-filter: blur(8px); }}
+    form {{ max-width: 1040px; margin: 0 auto; padding: 12px 20px; display: grid; grid-template-columns: 1fr auto; gap: 10px; }}
+    textarea {{ min-height: 50px; max-height: 180px; resize: vertical; border: 1px solid #cbd1d8; border-radius: 8px; padding: 10px; background: #fff; }}
+    @media (max-width: 720px) {{
+      .bar {{ align-items: flex-start; flex-direction: column; }}
+      form {{ grid-template-columns: 1fr; }}
+      .turn {{ max-width: 100%; }}
+    }}
   </style>
 </head>
 <body>
   <main>
     <header>
-      <h1>ChatP2P</h1>
-      <div class="actions">
-        <button id="statusButton" type="button">Status</button>
-        <button id="syncButton" type="button">Sync</button>
-        <button id="resumeButton" type="button">Resume Dry Run</button>
+      <div class="bar">
+        <div>
+          <h1>ChatP2P</h1>
+          <div class="sub">Session {title} - {model}</div>
+        </div>
+        <div class="actions">
+          <button id="statusButton" type="button">Refresh</button>
+          <button id="syncButton" type="button">Sync</button>
+          <button id="resumeButton" type="button">Resume Dry Run</button>
+        </div>
       </div>
     </header>
-    <section id="status"></section>
+    <section id="status">
+      <div class="status-row">
+        <span id="stateBadge" class="badge">loading</span>
+        <span id="balance"></span>
+        <span id="nextAction"></span>
+      </div>
+      <div id="blockedBanner" class="banner"></div>
+    </section>
     <section id="turns"></section>
+  </main>
+  <footer>
     <form id="chatForm">
       <textarea id="prompt" name="prompt" autocomplete="off"></textarea>
-      <button class="primary" type="submit">Send</button>
+      <button id="sendButton" class="primary" type="submit">Send</button>
     </form>
-  </main>
+  </footer>
   <script>
-    const statusEl = document.querySelector("#status");
+    const stateBadge = document.querySelector("#stateBadge");
+    const balanceEl = document.querySelector("#balance");
+    const nextActionEl = document.querySelector("#nextAction");
+    const blockedBanner = document.querySelector("#blockedBanner");
     const turnsEl = document.querySelector("#turns");
     const promptEl = document.querySelector("#prompt");
+    const sendButton = document.querySelector("#sendButton");
     const buttons = Array.from(document.querySelectorAll("button"));
-    function setBusy(value) {{ buttons.forEach((button) => button.disabled = value); }}
+    const blockedActions = new Set(["run_session_resume_dry_run", "run_session_sync_then_resume_dry_run", "wait_for_worker_result", "resume_failed_turn", "sync_session_then_resume_failed_turn"]);
+    function setBusy(value) {{
+      buttons.forEach((button) => button.disabled = value);
+      sendButton.textContent = value ? "Sending" : "Send";
+    }}
+    function badgeClass(status) {{
+      return `badge ${{status || ""}}`;
+    }}
+    function formatBalance(turns) {{
+      for (let index = turns.length - 1; index >= 0; index -= 1) {{
+        const balance = turns[index].requester_balance_after;
+        if (balance !== null && balance !== undefined) return `Balance ${{balance}}`;
+      }}
+      return "";
+    }}
     function render(report) {{
       const summary = report.summary || {{}};
-      statusEl.textContent = `${{report.status || "unknown"}} | ${{summary.recommended_next_action || ""}}`;
+      const turns = report.turns || [];
+      const status = report.status || "unknown";
+      const nextAction = summary.recommended_next_action || "";
+      stateBadge.className = badgeClass(status);
+      stateBadge.textContent = status;
+      balanceEl.textContent = formatBalance(turns);
+      nextActionEl.textContent = nextAction ? `Next ${{nextAction}}` : "";
+      const blocked = status === "blocked" || status === "fail" || blockedActions.has(nextAction);
+      blockedBanner.className = blocked ? "banner visible" : "banner";
+      blockedBanner.textContent = blocked ? `Safe action: ${{nextAction || "inspect_chat_session_status"}}` : "";
       turnsEl.innerHTML = "";
-      (report.turns || []).forEach((turn) => {{
-        const node = document.createElement("article");
-        node.className = "turn";
-        const meta = document.createElement("div");
-        meta.className = "meta";
-        meta.textContent = `${{turn.turn_id || ""}} | ${{turn.status || ""}} | ${{turn.job_status || ""}}`;
-        const user = document.createElement("div");
-        user.textContent = `You: ${{turn.prompt || turn.prompt_preview || ""}}`;
-        const assistant = document.createElement("div");
-        assistant.textContent = turn.answer ? `Assistant: ${{turn.answer}}` : "";
-        node.append(meta, user, assistant);
-        turnsEl.append(node);
+      if (!turns.length) {{
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "No turns yet.";
+        turnsEl.append(empty);
+        return;
+      }}
+      turns.forEach((turn) => {{
+        const userNode = document.createElement("article");
+        userNode.className = `turn user status-${{turn.status || "unknown"}}`;
+        const userMeta = document.createElement("div");
+        userMeta.className = "meta";
+        const turnBadge = document.createElement("span");
+        turnBadge.className = `badge ${{turn.status || ""}}`;
+        turnBadge.textContent = turn.status || "unknown";
+        const turnId = document.createElement("span");
+        turnId.textContent = turn.turn_id || "";
+        const jobStatus = document.createElement("span");
+        jobStatus.textContent = turn.job_status || "";
+        userMeta.append(turnBadge, turnId, jobStatus);
+        const userBubble = document.createElement("div");
+        userBubble.className = "bubble";
+        userBubble.textContent = turn.prompt || turn.prompt_preview || "";
+        userNode.append(userMeta, userBubble);
+        turnsEl.append(userNode);
+        if (turn.answer || turn.errors?.length) {{
+          const assistantNode = document.createElement("article");
+          assistantNode.className = `turn assistant status-${{turn.status || "unknown"}}`;
+          const meta = document.createElement("div");
+          meta.className = "meta";
+          meta.textContent = [turn.model, turn.worker_node_id_redacted].filter(Boolean).join(" - ");
+          const bubble = document.createElement("div");
+          bubble.className = "bubble";
+          bubble.textContent = turn.answer || turn.errors.join("\\n");
+          assistantNode.append(meta, bubble);
+          turnsEl.append(assistantNode);
+        }} else {{
+          const pendingNode = document.createElement("article");
+          pendingNode.className = `turn assistant status-${{turn.status || "unknown"}}`;
+          const meta = document.createElement("div");
+          meta.className = "meta";
+          meta.textContent = turn.model || "";
+          const bubble = document.createElement("div");
+          bubble.className = "bubble";
+          bubble.textContent = turn.status === "submitted" ? "Waiting for result." : "";
+          pendingNode.append(meta, bubble);
+          turnsEl.append(pendingNode);
+        }}
       }});
+      turnsEl.scrollTop = turnsEl.scrollHeight;
     }}
     async function request(path, options = {{}}) {{
       setBusy(true);
