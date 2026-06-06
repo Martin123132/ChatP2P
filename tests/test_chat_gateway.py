@@ -4,6 +4,7 @@ import time
 from urllib.request import Request, urlopen
 
 from chatp2p.chat_gateway import (
+    CHAT_GATEWAY_MODEL_CATALOG_SCHEMA,
     CHAT_GATEWAY_READINESS_SCHEMA,
     CHAT_GATEWAY_REPORT_SCHEMA,
     CHAT_GATEWAY_TRANSCRIPT_SCHEMA,
@@ -51,6 +52,7 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert health["config"]["auth"]["admission_token_present"] is True
     assert health["endpoints"]["session_transcript"] == "/api/session/transcript"
     assert health["endpoints"]["chat_readiness"] == "/api/chat/readiness"
+    assert health["endpoints"]["chat_models"] == "/api/chat/models"
     assert status["status"] == "no_session"
     assert status["summary"]["recommended_next_action"] == "continue_chat_session"
     assert transcript["schema"] == CHAT_GATEWAY_TRANSCRIPT_SCHEMA
@@ -58,11 +60,13 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert transcript["turns"] == []
     assert "/api/session/transcript" in page
     assert "/api/chat/readiness" in page
+    assert "/api/chat/models" in page
     assert "/api/chat/continue" in page
     assert "Session demo - tiny-test-model" in page
     assert 'id="blockedBanner"' in page
     assert 'id="readinessBadge"' in page
     assert 'id="modelRoute"' in page
+    assert 'id="modelCatalog"' in page
     assert 'id="coordinatorState"' in page
     assert 'id="commandHint"' in page
     assert 'id="balance"' in page
@@ -73,6 +77,7 @@ def test_chat_gateway_health_and_empty_status_redact_token(tmp_path):
     assert "Balance ${balance}" in page
     assert 'sendButton.textContent = value ? "Sending" : "Send"' in page
     assert "innerHTML" not in page
+    assert "\u00b7" not in page
     assert token not in json.dumps({"health": health, "status": status, "transcript": transcript})
 
 
@@ -263,6 +268,112 @@ def test_chat_gateway_readiness_blocks_unresolved_session_before_other_actions(t
     assert readiness["action_hint"]["commands"][0]["id"] == "preview_resume"
     assert "chat session-resume" in readiness["action_hint"]["primary_command"]
     assert "--dry-run" in readiness["action_hint"]["primary_command"]
+
+
+def test_chat_gateway_model_catalog_lists_sendable_models_redacts_nodes(tmp_path):
+    coordinator_server, coordinator_thread, coordinator_url, worker_identity = _start_coordinator_with_worker(
+        requester_balance=2,
+        models=["tiny-test-model", "other-model"],
+    )
+    try:
+        server, thread, base_url = _start_gateway(
+            ChatGatewayConfig(
+                out_dir=tmp_path / "chat-session",
+                session_id="demo",
+                coordinator_url=coordinator_url,
+                model="tiny-test-model",
+                requester_account_id="requester_gateway_account",
+                port=0,
+            )
+        )
+        try:
+            catalog = _get_json(f"{base_url}/api/chat/models")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+    finally:
+        coordinator_server.shutdown()
+        coordinator_server.server_close()
+        coordinator_thread.join(timeout=2)
+
+    serialized = json.dumps(catalog)
+    assert catalog["schema"] == CHAT_GATEWAY_MODEL_CATALOG_SCHEMA
+    assert catalog["status"] == "pass"
+    assert catalog["summary"]["selected_model"] == "tiny-test-model"
+    assert catalog["summary"]["selected_model_sendable"] is True
+    assert catalog["summary"]["available_model_count"] == 2
+    assert catalog["summary"]["sendable_model_count"] == 2
+    assert catalog["summary"]["recommended_model"] == "tiny-test-model"
+    assert catalog["summary"]["recommended_next_action"] == "continue_chat_session"
+    assert {item["model"] for item in catalog["models"]} == {"tiny-test-model", "other-model"}
+    assert all(item["sendable"] is True for item in catalog["models"])
+    assert worker_identity.node_id not in serialized
+    assert worker_identity.public_key not in serialized
+
+
+def test_chat_gateway_model_catalog_recommends_available_model_when_selected_missing(tmp_path):
+    coordinator_server, coordinator_thread, coordinator_url, _worker_identity = _start_coordinator_with_worker(
+        requester_balance=2,
+        models=["other-model"],
+    )
+    try:
+        server, thread, base_url = _start_gateway(
+            ChatGatewayConfig(
+                out_dir=tmp_path / "chat-session",
+                session_id="demo",
+                coordinator_url=coordinator_url,
+                model="tiny-test-model",
+                requester_account_id="requester_gateway_account",
+                port=0,
+            )
+        )
+        try:
+            catalog = _get_json(f"{base_url}/api/chat/models")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+    finally:
+        coordinator_server.shutdown()
+        coordinator_server.server_close()
+        coordinator_thread.join(timeout=2)
+
+    assert catalog["status"] == "pass"
+    assert catalog["summary"]["selected_model_sendable"] is False
+    assert catalog["summary"]["recommended_model"] == "other-model"
+    assert catalog["summary"]["recommended_next_action"] == "change_model_to_recommended_model"
+
+
+def test_chat_gateway_model_catalog_handles_unreachable_coordinator(tmp_path):
+    token = "alpha-token-model-catalog-secret"
+    server, thread, base_url = _start_gateway(
+        ChatGatewayConfig(
+            out_dir=tmp_path / "chat-session",
+            session_id="demo",
+            coordinator_url="http://127.0.0.1:9",
+            model="tiny-test-model",
+            requester_account_id="requester_gateway_account",
+            admission_token=token,
+            client_timeout_seconds=0.1,
+            port=0,
+        )
+    )
+    try:
+        catalog = _get_json(f"{base_url}/api/chat/models")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    serialized = json.dumps(catalog)
+    assert catalog["schema"] == CHAT_GATEWAY_MODEL_CATALOG_SCHEMA
+    assert catalog["ok"] is False
+    assert catalog["status"] == "warn"
+    assert catalog["summary"]["available_model_count"] == 0
+    assert catalog["summary"]["recommended_next_action"] == "start_or_check_local_coordinator"
+    assert catalog["models"] == []
+    assert token not in serialized
 
 
 def test_chat_gateway_continue_creates_funded_turn(tmp_path):

@@ -92,6 +92,8 @@ Chat Readiness V0 adds the missing pre-send check for that local UI. The gateway
 
 Chat Gateway Action Hints V0 makes those readiness blockers directly actionable. The gateway returns safe local command hints for session sync, resume dry-run, coordinator status checks, requester credit inspection, and credit-grant dry-runs without exposing tokens or contacting partner machines.
 
+Chat Model Catalog V0 adds read-only model supply visibility to the localhost gateway. The UI can now show the selected model, a recommended live model when one exists, and the advertised model inventory from redacted node samples before the operator spends credits on the next turn.
+
 Local Chat Demo V0 packages the whole product loop into one localhost command. It starts a temporary coordinator, fake Ollama-compatible runtime, worker, funded requester account, and gateway so the operator can prove `start -> open chat -> send prompt -> worker answers -> credits move` without a partner node or real model download.
 
 Chat Demo Modes V0 keeps the fake no-dependency demo as the default and adds `--mode ollama` for a real local model. Ollama mode preflights the requested model before opening the gateway, so the operator gets a clear setup error instead of a broken chat surface.

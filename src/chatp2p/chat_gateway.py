@@ -31,6 +31,7 @@ from .runtime_metadata import collect_software_metadata, software_metadata_publi
 CHAT_GATEWAY_REPORT_SCHEMA = "chatp2p.chat-gateway-report.v1"
 CHAT_GATEWAY_TRANSCRIPT_SCHEMA = "chatp2p.chat-gateway-transcript.v1"
 CHAT_GATEWAY_READINESS_SCHEMA = "chatp2p.chat-gateway-readiness.v1"
+CHAT_GATEWAY_MODEL_CATALOG_SCHEMA = "chatp2p.chat-gateway-model-catalog.v1"
 DEFAULT_CHAT_GATEWAY_HOST = "127.0.0.1"
 DEFAULT_CHAT_GATEWAY_PORT = 8787
 DEFAULT_CHAT_GATEWAY_MAX_REQUEST_BYTES = 16_384
@@ -92,6 +93,9 @@ def create_chat_gateway_server(config: ChatGatewayConfig) -> ThreadingHTTPServer
                 return
             if parsed.path == "/api/chat/readiness":
                 _json_response(self, 200, _readiness_payload(config))
+                return
+            if parsed.path == "/api/chat/models":
+                _json_response(self, 200, _model_catalog_payload(config))
                 return
             _json_response(self, 404, {"ok": False, "status": "fail", "error": "not found"})
 
@@ -159,6 +163,7 @@ def _health_payload(*, config: dict[str, Any], software: dict[str, Any]) -> dict
             "session_status": "/api/session/status",
             "session_transcript": "/api/session/transcript",
             "chat_readiness": "/api/chat/readiness",
+            "chat_models": "/api/chat/models",
             "session_sync": "/api/session/sync",
             "session_resume_dry_run": "/api/session/resume-dry-run",
             "chat_continue": "/api/chat/continue",
@@ -336,27 +341,16 @@ def _continue_payload(config: ChatGatewayConfig, *, prompt: str) -> dict[str, An
 
 def _readiness_payload(config: ChatGatewayConfig) -> dict[str, Any]:
     generated_at = datetime.now(timezone.utc).isoformat()
-    errors: list[str] = []
     warnings: list[str] = []
     connection = _resolve_gateway_connection(config)
     transcript = _transcript_payload(config)
     session = _readiness_session(transcript)
-
-    snapshot: dict[str, Any] | None = None
-    coordinator_error: str | None = None
-    try:
-        client = CoordinatorClient(
-            connection["coordinator_url"],
-            admission_token=connection["token"],
-            timeout_seconds=config.client_timeout_seconds,
-        )
-        snapshot = client.snapshot()
-    except Exception as exc:
-        coordinator_error = _format_gateway_exception(exc)
-        errors.append(coordinator_error)
+    snapshot_info = _fetch_snapshot(connection=connection, timeout_seconds=config.client_timeout_seconds)
+    snapshot = snapshot_info["snapshot"]
+    catalog = _model_catalog_from_snapshot(snapshot=snapshot, selected_model=config.model)
 
     requester = _readiness_requester(snapshot=snapshot, account_id=config.requester_account_id, job_cost=config.job_cost)
-    routing = _readiness_model_routing(snapshot=snapshot, model=config.model)
+    routing = _model_routing_from_catalog(catalog=catalog, model=config.model)
     warnings.extend(routing["warnings"])
 
     can_send = (
@@ -367,7 +361,7 @@ def _readiness_payload(config: ChatGatewayConfig) -> dict[str, Any]:
     )
     recommended_next_action = _readiness_recommended_next_action(
         session=session,
-        coordinator_ok=snapshot is not None,
+        coordinator_ok=snapshot_info["ok"],
         credits_sufficient=requester["credits_sufficient"],
         live_eligible_node_count=routing["live_eligible_node_count"],
     )
@@ -387,7 +381,7 @@ def _readiness_payload(config: ChatGatewayConfig) -> dict[str, Any]:
             "summary": {
                 "status": status,
                 "can_send": can_send,
-                "coordinator_reachable": snapshot is not None,
+                "coordinator_reachable": snapshot_info["ok"],
                 "requester_balance": requester["balance"],
                 "job_cost": config.job_cost,
                 "credits_sufficient": requester["credits_sufficient"],
@@ -399,17 +393,53 @@ def _readiness_payload(config: ChatGatewayConfig) -> dict[str, Any]:
             },
             "action_hint": action_hint,
             "coordinator": {
-                "ok": snapshot is not None,
+                "ok": snapshot_info["ok"],
                 "url": connection["coordinator_url"],
-                "error": coordinator_error,
+                "error": snapshot_info["error"],
                 "status": _snapshot_status_summary(snapshot),
             },
             "requester": requester,
             "model_routing": routing,
+            "model_catalog": catalog["summary"],
             "session": session,
             "invite": connection["invite_summary"],
             "warnings": warnings,
-            "errors": errors,
+            "errors": list(snapshot_info["errors"]),
+        },
+        config,
+    )
+
+
+def _model_catalog_payload(config: ChatGatewayConfig) -> dict[str, Any]:
+    generated_at = datetime.now(timezone.utc).isoformat()
+    connection = _resolve_gateway_connection(config)
+    snapshot_info = _fetch_snapshot(connection=connection, timeout_seconds=config.client_timeout_seconds)
+    catalog = _model_catalog_from_snapshot(snapshot=snapshot_info["snapshot"], selected_model=config.model)
+    status = "pass" if snapshot_info["ok"] and catalog["summary"]["available_model_count"] > 0 else "warn"
+    return _redact_report(
+        {
+            "schema": CHAT_GATEWAY_MODEL_CATALOG_SCHEMA,
+            "ok": snapshot_info["ok"],
+            "status": status,
+            "generated_at": generated_at,
+            "summary": {
+                **catalog["summary"],
+                "status": status,
+                "recommended_next_action": _model_catalog_recommended_next_action(
+                    coordinator_ok=snapshot_info["ok"],
+                    selected_model_sendable=catalog["summary"]["selected_model_sendable"],
+                    recommended_model=catalog["summary"]["recommended_model"],
+                ),
+            },
+            "coordinator": {
+                "ok": snapshot_info["ok"],
+                "url": connection["coordinator_url"],
+                "error": snapshot_info["error"],
+                "status": _snapshot_status_summary(snapshot_info["snapshot"]),
+            },
+            "models": catalog["models"],
+            "warnings": catalog["warnings"],
+            "errors": list(snapshot_info["errors"]),
         },
         config,
     )
@@ -459,6 +489,7 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     .banner.visible {{ display: block; }}
     .command {{ display: none; border: 1px solid #d1d5db; background: #111827; color: #f9fafb; border-radius: 8px; padding: 10px 12px; font-family: Consolas, ui-monospace, monospace; font-size: 12px; overflow-wrap: anywhere; }}
     .command.visible {{ display: block; }}
+    .models {{ display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 13px; }}
     #turns {{ max-width: 1040px; width: 100%; margin: 0 auto; padding: 16px 20px 120px; display: grid; gap: 14px; align-content: start; }}
     .empty {{ border: 1px dashed #cbd5e1; border-radius: 8px; padding: 18px; color: var(--muted); background: rgba(255,255,255,.72); }}
     .turn {{ display: grid; gap: 8px; max-width: min(760px, 92%); }}
@@ -502,6 +533,7 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
         <span id="coordinatorState"></span>
         <span id="nextAction"></span>
       </div>
+      <div id="modelCatalog" class="models"></div>
       <div id="blockedBanner" class="banner"></div>
       <div id="commandHint" class="command"></div>
     </section>
@@ -520,6 +552,7 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     const modelRouteEl = document.querySelector("#modelRoute");
     const coordinatorStateEl = document.querySelector("#coordinatorState");
     const nextActionEl = document.querySelector("#nextAction");
+    const modelCatalogEl = document.querySelector("#modelCatalog");
     const blockedBanner = document.querySelector("#blockedBanner");
     const commandHintEl = document.querySelector("#commandHint");
     const turnsEl = document.querySelector("#turns");
@@ -540,6 +573,14 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
         if (balance !== null && balance !== undefined) return `Balance ${{balance}}`;
       }}
       return "";
+    }}
+    function renderModelCatalog(report) {{
+      const summary = report.summary || {{}};
+      const sendable = (report.models || []).filter((item) => item.sendable);
+      const names = sendable.map((item) => `${{item.model}} (${{item.live_worker_count}})`);
+      const selected = summary.selected_model || "{model}";
+      const recommended = summary.recommended_model || "none";
+      modelCatalogEl.textContent = `Model ${{selected}} - Recommended ${{recommended}} - Available ${{names.join(", ") || "none"}}`;
     }}
     function renderReadiness(report) {{
       const summary = report.summary || {{}};
@@ -637,8 +678,12 @@ def _render_gateway_html(config: ChatGatewayConfig) -> str:
     }}
     async function refreshReadiness() {{
       try {{
-        const response = await fetch("/api/chat/readiness");
-        renderReadiness(await response.json());
+        const [readinessResponse, modelsResponse] = await Promise.all([
+          fetch("/api/chat/readiness"),
+          fetch("/api/chat/models")
+        ]);
+        renderReadiness(await readinessResponse.json());
+        renderModelCatalog(await modelsResponse.json());
       }} catch (_error) {{
         readinessBadge.className = badgeClass("fail");
         readinessBadge.textContent = "readiness failed";
@@ -763,6 +808,19 @@ def _resolve_gateway_connection(config: ChatGatewayConfig) -> dict[str, Any]:
     }
 
 
+def _fetch_snapshot(*, connection: dict[str, Any], timeout_seconds: float) -> dict[str, Any]:
+    try:
+        client = CoordinatorClient(
+            connection["coordinator_url"],
+            admission_token=connection["token"],
+            timeout_seconds=timeout_seconds,
+        )
+        return {"ok": True, "snapshot": client.snapshot(), "error": None, "errors": []}
+    except Exception as exc:
+        error = _format_gateway_exception(exc)
+        return {"ok": False, "snapshot": None, "error": error, "errors": [error]}
+
+
 def _readiness_session(transcript: dict[str, Any]) -> dict[str, Any]:
     summary = transcript.get("summary") if isinstance(transcript.get("summary"), dict) else {}
     status = str(transcript.get("status") or summary.get("status") or "unknown")
@@ -796,13 +854,11 @@ def _readiness_requester(*, snapshot: dict[str, Any] | None, account_id: str, jo
     }
 
 
-def _readiness_model_routing(*, snapshot: dict[str, Any] | None, model: str) -> dict[str, Any]:
+def _model_catalog_from_snapshot(*, snapshot: dict[str, Any] | None, selected_model: str) -> dict[str, Any]:
     nodes = (snapshot or {}).get("nodes") or []
-    eligible_node_count = 0
-    live_eligible_node_count = 0
     live_node_count = 0
     legacy_node_count = 0
-    eligible_samples: list[dict[str, Any]] = []
+    models: dict[str, dict[str, Any]] = {}
 
     node_items = nodes if isinstance(nodes, list) else []
     for node in node_items:
@@ -812,37 +868,86 @@ def _readiness_model_routing(*, snapshot: dict[str, Any] | None, model: str) -> 
         if liveness == "live":
             live_node_count += 1
         supported = [str(item) for item in node.get("supported_job_types") or [] if isinstance(item, str)]
-        models = [str(item) for item in node.get("ollama_models") or [] if isinstance(item, str)]
+        advertised_models = [str(item) for item in node.get("ollama_models") or [] if isinstance(item, str)]
         if not supported:
             legacy_node_count += 1
-        eligible = "inference.chat.v1" in supported and model in models
-        if not eligible:
+        if "inference.chat.v1" not in supported:
             continue
-        eligible_node_count += 1
-        if liveness == "live":
-            live_eligible_node_count += 1
-        if len(eligible_samples) < 5:
-            eligible_samples.append(
+        for model in advertised_models:
+            entry = models.setdefault(
+                model,
                 {
-                    "node_id_redacted": _redact_node_id(node.get("node_id")),
-                    "liveness_status": liveness,
-                    "ollama_models": models,
-                    "software": node.get("software") if isinstance(node.get("software"), dict) else None,
-                }
+                    "model": model,
+                    "worker_count": 0,
+                    "live_worker_count": 0,
+                    "sendable": False,
+                    "node_samples": [],
+                },
             )
+            entry["worker_count"] += 1
+            if liveness == "live":
+                entry["live_worker_count"] += 1
+                entry["sendable"] = True
+            if len(entry["node_samples"]) < 5:
+                entry["node_samples"].append(
+                    {
+                        "node_id_redacted": _redact_node_id(node.get("node_id")),
+                        "liveness_status": liveness,
+                        "software": software_metadata_public_view(node.get("software")),
+                    }
+                )
 
     warnings = []
     if legacy_node_count:
         warnings.append("legacy_nodes_without_supported_job_types")
+    model_list = sorted(models.values(), key=lambda item: (not item["sendable"], item["model"]))
+    selected = next((item for item in model_list if item["model"] == selected_model), None)
+    recommended_model = (
+        selected_model
+        if selected and selected["sendable"]
+        else next((item["model"] for item in model_list if item["sendable"]), None)
+    )
     return {
-        "model": model,
-        "live_node_count": live_node_count,
-        "eligible_node_count": eligible_node_count,
-        "live_eligible_node_count": live_eligible_node_count,
-        "legacy_node_count": legacy_node_count,
-        "eligible_node_samples": eligible_samples,
+        "summary": {
+            "selected_model": selected_model,
+            "selected_model_sendable": bool(selected and selected["sendable"]),
+            "recommended_model": recommended_model,
+            "available_model_count": len(model_list),
+            "sendable_model_count": sum(1 for item in model_list if item["sendable"]),
+            "live_node_count": live_node_count,
+            "legacy_node_count": legacy_node_count,
+        },
+        "models": model_list,
         "warnings": warnings,
     }
+
+
+def _model_routing_from_catalog(*, catalog: dict[str, Any], model: str) -> dict[str, Any]:
+    model_entry = next((item for item in catalog["models"] if item["model"] == model), None)
+    return {
+        "model": model,
+        "live_node_count": catalog["summary"]["live_node_count"],
+        "eligible_node_count": _int_or_zero((model_entry or {}).get("worker_count")),
+        "live_eligible_node_count": _int_or_zero((model_entry or {}).get("live_worker_count")),
+        "legacy_node_count": catalog["summary"]["legacy_node_count"],
+        "eligible_node_samples": (model_entry or {}).get("node_samples") or [],
+        "warnings": list(catalog["warnings"]),
+    }
+
+
+def _model_catalog_recommended_next_action(
+    *,
+    coordinator_ok: bool,
+    selected_model_sendable: bool,
+    recommended_model: str | None,
+) -> str:
+    if not coordinator_ok:
+        return "start_or_check_local_coordinator"
+    if selected_model_sendable:
+        return "continue_chat_session"
+    if recommended_model is not None:
+        return "change_model_to_recommended_model"
+    return "wait_for_model_capable_worker_or_change_model"
 
 
 def _snapshot_status_summary(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
