@@ -795,6 +795,16 @@ The first product goal is a one-click node that lets normal machines contribute 
 
 Model Governance V0 turns the "community-shaped model" idea into a local registry contract. It defines membership tiers, approved weight-pack rules, adapter submission gates, domain review roles, and tamper response. It does not train or download a model; it records the rules for who may influence future model/adaptor releases and rejects direct core-weight editing in V0.
 
+Base Model Registry V0 tracks candidate open-weight base models before the network serves them. It does not download weights or claim a model is approved; it records the evidence needed before a candidate can become the default route: license, source URL, hashes, runtime support, hardware tier, eval plan, local smoke result, and governance review.
+
+```powershell
+python -m chatp2p.cli model registry `
+  --registry D:\ChatP2PData\model-registry.json `
+  --out D:\ChatP2PData\model-registry-report.json `
+  --init `
+  --json
+```
+
 ```powershell
 python -m chatp2p.cli model governance `
   --registry D:\ChatP2PData\model-governance.json `

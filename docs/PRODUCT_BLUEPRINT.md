@@ -110,6 +110,8 @@ Operator Credit Tools V1 adds the missing controlled top-up path. Operators can 
 
 Model Governance V0 creates the first strict contract for a community-shaped model network. `chatp2p model governance` can initialize and inspect a registry of contribution tiers, approved weight-pack policy, domain roles, adapter submission gates, safety rules, and tamper response. V0 keeps direct core-weight editing disabled, treats credits and reputation as separate signals, and warns until a real open-weight base model, license, and hashes replace the placeholder pack.
 
+Base Model Registry V0 creates the approval checklist for the first actual model the network may serve. `chatp2p model registry` tracks candidate base models, license/source evidence, runtime support, hardware fit, artifact hashes, eval completion, and governance review status. A model marked `approved` fails validation unless that evidence is complete, which keeps the project from confusing a wish list with a safe default route.
+
 ## Future Lane: ISP Edge / Broadband Bundle
 
 Keep a second product architecture lane for an ISP-edge simulation, but do not let it interrupt the current alpha path. The idea is not "AI inside fibre"; it is a broadband-provider-style deployment model where a provider runs a coordinator, subscribers run light gateway/device nodes, regional edge workers provide stronger capacity, and policy routes work through local, provider-edge, trusted-peer, then placeholder fallback paths.

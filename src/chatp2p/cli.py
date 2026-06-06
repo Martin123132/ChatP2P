@@ -105,6 +105,11 @@ from .model_governance import (
     format_model_governance_summary,
     run_model_governance,
 )
+from .model_registry import (
+    ModelRegistryConfig,
+    format_model_registry_summary,
+    run_model_registry,
+)
 from .operator_actions import (
     build_operator_action_queue,
     format_operator_action_queue_summary,
@@ -434,6 +439,27 @@ def model_governance_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_model_governance_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_registry_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_registry(
+            ModelRegistryConfig(
+                registry_path=Path(args.registry),
+                out_path=Path(args.out) if args.out else None,
+                init=args.init,
+                force=args.force,
+            )
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_registry_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -3176,6 +3202,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     model_parser = subcommands.add_parser("model", help="Model registry and governance tools")
     model_subcommands = model_parser.add_subparsers(dest="model_command", required=True)
+    model_registry_parser = model_subcommands.add_parser(
+        "registry",
+        help="Inspect or initialize the base model candidate registry",
+    )
+    model_registry_parser.add_argument(
+        "--registry",
+        default=".mesh/model-registry.json",
+        help="Path to the base model registry JSON",
+    )
+    model_registry_parser.add_argument("--out", default=None, help="Optional JSON report path")
+    model_registry_parser.add_argument("--init", action="store_true", help="Write the default registry before reporting")
+    model_registry_parser.add_argument("--force", action="store_true", help="Replace an existing registry during --init")
+    model_registry_parser.add_argument("--json", action="store_true", help="Print the full JSON registry report")
+    model_registry_parser.set_defaults(func=model_registry_command)
+
     model_governance_parser = model_subcommands.add_parser(
         "governance",
         help="Inspect or initialize the model contribution governance registry",
