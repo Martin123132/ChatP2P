@@ -456,6 +456,62 @@ def test_operator_console_reports_model_release_status(tmp_path):
     assert "runtime_check_needed" in html_report
 
 
+def test_operator_console_reports_model_route_plan(tmp_path):
+    repo = _clean_repo(tmp_path)
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    invite_path = private_dir / "primary-alpha-invite.json"
+    write_alpha_invite(
+        invite_path,
+        AlphaInvite.create(coordinator="http://127.0.0.1:8765", admission_token="secret-token-123456"),
+    )
+    reliability_dir = tmp_path / "reliability-pack"
+    reliability_dir.mkdir()
+    _write_reliability_summary(reliability_dir, can_continue=True)
+    route_plan_path = tmp_path / "model-route-plan.json"
+    route_plan_path.write_text(
+        json.dumps(
+            {
+                "schema": "chatp2p.model-route-plan-report.v1",
+                "ok": True,
+                "status": "pass",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "summary": {
+                    "selected_model_id": "qwen2.5-7b-instruct",
+                    "recommended_chat_model": "qwen2.5-7b-instruct",
+                    "route_ready": True,
+                    "network_checked": True,
+                    "coordinator_reachable": True,
+                    "live_model_capable_worker_count": 1,
+                    "approved_model_count": 1,
+                    "routeable_model_count": 1,
+                    "recommended_next_action": "continue_chat_session_with_route_plan",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = run_operator_console(
+        OperatorConsoleConfig(
+            repo=repo,
+            home=tmp_path / ".mesh",
+            primary_invite_path=invite_path,
+            reliability_dir=reliability_dir,
+            out_dir=tmp_path / "operator-console",
+            model_route_plan_path=route_plan_path,
+            skip_network_checks=True,
+        )
+    )
+
+    assert report["model_route_plan"]["status"] == "pass"
+    assert report["model_route_plan"]["route_ready"] is True
+    assert report["summary"]["model_route_plan_next_action"] == "continue_chat_session_with_route_plan"
+    html_report = Path(report["artifacts"]["html"]).read_text(encoding="utf-8")
+    assert "Model Route Plan" in html_report
+    assert "qwen2.5-7b-instruct" in html_report
+
+
 def test_operator_console_reports_last_action_run(tmp_path):
     repo = _clean_repo(tmp_path)
     private_dir = tmp_path / "private"
@@ -663,6 +719,8 @@ def test_operator_console_cli_parses(tmp_path):
             "--skip-daily-check-task-query",
             "--model-release-status",
             str(tmp_path / "model-release-status.json"),
+            "--model-route-plan",
+            str(tmp_path / "model-route-plan.json"),
             "--json",
         ]
     )
@@ -678,6 +736,7 @@ def test_operator_console_cli_parses(tmp_path):
     assert args.daily_check_task_name == "ChatP2P Daily Check Test"
     assert args.skip_daily_check_task_query is True
     assert args.model_release_status == str(tmp_path / "model-release-status.json")
+    assert args.model_route_plan == str(tmp_path / "model-route-plan.json")
 
 
 def _clean_repo(tmp_path):

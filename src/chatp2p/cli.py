@@ -165,6 +165,11 @@ from .model_release_status import (
     format_model_release_status_summary,
     run_model_release_status,
 )
+from .model_route_plan import (
+    ModelRoutePlanConfig,
+    format_model_route_plan_summary,
+    run_model_route_plan,
+)
 from .model_runtime import (
     ModelRuntimeAttachConfig,
     ModelRuntimeCheckConfig,
@@ -872,6 +877,34 @@ def model_release_status_command(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def model_route_plan_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_route_plan(
+            ModelRoutePlanConfig(
+                registry_path=Path(args.registry),
+                governance_path=Path(args.governance),
+                out_dir=Path(args.out),
+                preferred_model=args.preferred_model,
+                coordinator_url=args.coordinator,
+                invite_path=Path(args.invite) if args.invite else None,
+                admission_token=args.admission_token,
+                skip_network_checks=args.skip_network_checks,
+                timeout_seconds=args.timeout_seconds,
+                job_type=args.job_type,
+                runtime=args.runtime,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_route_plan_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
 def model_runtime_check_command(args: argparse.Namespace) -> None:
     try:
         report = run_model_runtime_check(
@@ -1353,6 +1386,7 @@ def operator_console_command(args: argparse.Namespace) -> None:
                 daily_check_task_name=args.daily_check_task_name,
                 query_daily_check_task=not args.skip_daily_check_task_query,
                 model_release_status_path=Path(args.model_release_status) if args.model_release_status else None,
+                model_route_plan_path=Path(args.model_route_plan) if args.model_route_plan else None,
             )
         )
     except (OSError, ValueError) as exc:
@@ -1396,6 +1430,7 @@ def operator_daily_check_command(args: argparse.Namespace) -> None:
                 stale_report_days=args.stale_report_days,
                 stale_report_max_items=args.stale_report_max_items,
                 model_release_status_path=Path(args.model_release_status) if args.model_release_status else None,
+                model_route_plan_path=Path(args.model_route_plan) if args.model_route_plan else None,
             )
         )
     except (OSError, ValueError) as exc:
@@ -4250,6 +4285,61 @@ def build_parser() -> argparse.ArgumentParser:
     model_release_status_parser.add_argument("--json", action="store_true", help="Print the full JSON status report")
     model_release_status_parser.set_defaults(func=model_release_status_command)
 
+    model_route_plan_parser = model_subcommands.add_parser(
+        "route-plan",
+        help="Plan approved model routing without creating jobs or mutating nodes",
+    )
+    model_route_plan_parser.add_argument(
+        "--registry",
+        default=".mesh/model-registry.json",
+        help="Path to the base model registry JSON",
+    )
+    model_route_plan_parser.add_argument(
+        "--governance",
+        default=".mesh/model-governance.json",
+        help="Path to the model governance registry JSON",
+    )
+    model_route_plan_parser.add_argument(
+        "--out",
+        default=".mesh/model-route-plan",
+        help="Output directory for model-route-plan.json and .md",
+    )
+    model_route_plan_parser.add_argument(
+        "--preferred-model",
+        default=None,
+        help="Preferred model id to route; omitted chooses the safest approved routeable model",
+    )
+    model_route_plan_parser.add_argument(
+        "--coordinator",
+        default=None,
+        help="Coordinator base URL. Defaults to invite coordinator or http://127.0.0.1:8765",
+    )
+    model_route_plan_parser.add_argument("--invite", default=None, help="Optional alpha invite JSON for coordinator/auth")
+    model_route_plan_parser.add_argument("--admission-token", default=None, help="Admission token for public alpha coordinators")
+    model_route_plan_parser.add_argument(
+        "--skip-network-checks",
+        action="store_true",
+        help="Skip coordinator snapshot checks and write an offline route plan",
+    )
+    model_route_plan_parser.add_argument(
+        "--timeout-seconds",
+        default=5.0,
+        type=float,
+        help="Timeout for coordinator snapshot checks",
+    )
+    model_route_plan_parser.add_argument(
+        "--job-type",
+        default="inference.chat.v1",
+        help="Job type a worker must support to be routeable",
+    )
+    model_route_plan_parser.add_argument(
+        "--runtime",
+        default="ollama",
+        help="Runtime support id required in the model registry",
+    )
+    model_route_plan_parser.add_argument("--json", action="store_true", help="Print the full JSON route-plan report")
+    model_route_plan_parser.set_defaults(func=model_route_plan_command)
+
     model_runtime_check_parser = model_subcommands.add_parser(
         "runtime-check",
         help="Verify a candidate against a local runtime without approving it",
@@ -5594,6 +5684,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional model-release-status JSON to summarize in the operator console",
     )
+    operator_console_parser.add_argument(
+        "--model-route-plan",
+        default=None,
+        help="Optional model-route-plan JSON to summarize in the operator console",
+    )
     operator_console_parser.add_argument("--json", action="store_true", help="Print the full JSON report")
     operator_console_parser.set_defaults(func=operator_console_command)
 
@@ -5721,6 +5816,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--model-release-status",
         default=None,
         help="Optional model-release-status JSON to summarize in the daily check",
+    )
+    operator_daily_check_parser.add_argument(
+        "--model-route-plan",
+        default=None,
+        help="Optional model-route-plan JSON to summarize in the daily check",
     )
     operator_daily_check_parser.add_argument("--json", action="store_true", help="Print the full JSON report")
     operator_daily_check_parser.set_defaults(func=operator_daily_check_command)

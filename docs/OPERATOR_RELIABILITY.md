@@ -84,6 +84,8 @@ Use `summary.can_continue_without_partner`, `summary.recommended_next_action`, a
 
 Revision sync compares live node-advertised software metadata with the local public repo HEAD by default. Pass `--expected-public-revision <sha>` to pin the comparison to a release commit. Nodes that have not refreshed since revision metadata shipped are reported as `unknown`, not failed; a live node with a different revision produces `wait_for_partner_autopull`, and synced live nodes produce `partner_synced_continue` once the rest of the gate is clear.
 
+Model route planning can be displayed in the same static console. Run `chatp2p model route-plan` to write `model-route-plan.json`, then pass `--model-route-plan D:\ChatP2PData\model-route-plan\model-route-plan.json` to `operator console` or `operator daily-check`. This is read-only: it checks approved model evidence and live model-capable worker advertisements, but it never creates chat jobs or restarts nodes.
+
 When the queue says `wait_for_partner_autopull`, use `operator sync-status` to confirm the state from the latest console snapshot without contacting the partner machine or restarting anything:
 
 ```powershell

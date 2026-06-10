@@ -74,6 +74,7 @@ class OperatorConsoleConfig:
     daily_check_task_name: str | None = DEFAULT_DAILY_CHECK_TASK_NAME
     query_daily_check_task: bool = True
     model_release_status_path: Path | None = None
+    model_route_plan_path: Path | None = None
 
 
 def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
@@ -144,6 +145,11 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
         now=now,
         freshness_seconds=config.freshness_seconds,
     )
+    model_route_plan = _model_route_plan_summary(
+        config.model_route_plan_path,
+        now=now,
+        freshness_seconds=config.freshness_seconds,
+    )
     summary = _operator_summary(
         primary=primary,
         backup=backup,
@@ -153,6 +159,7 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
         daily_check=daily_check,
         software=software,
         model_release=model_release,
+        model_route_plan=model_route_plan,
         skip_network_checks=config.skip_network_checks,
     )
 
@@ -210,6 +217,7 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
             "daily_check_task_name": config.daily_check_task_name,
             "query_daily_check_task": config.query_daily_check_task,
             "model_release_status_path": str(config.model_release_status_path) if config.model_release_status_path else None,
+            "model_route_plan_path": str(config.model_route_plan_path) if config.model_route_plan_path else None,
         },
         "summary": summary,
         "local": local,
@@ -221,6 +229,7 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
         "privacy_scan": _privacy_summary(privacy_scan),
         "software": software,
         "model_release": model_release,
+        "model_route_plan": model_route_plan,
         "partner_autopilot": partner_autopilot,
         "daily_check_automation": daily_check,
         "action_runner": {
@@ -269,6 +278,8 @@ def format_operator_console_summary(report: dict[str, Any]) -> str:
     self_heal = report.get("self_heal") or {}
     software = report.get("software") or {}
     model_release = report.get("model_release") or {}
+    model_route_plan = report.get("model_route_plan") or {}
+    model_route_plan = report.get("model_route_plan") or {}
     lines = [
         f"ChatP2P operator console: {str(report.get('status', 'unknown')).upper()}",
         f"Can continue without partner: {_yes_no(summary.get('can_continue_without_partner'))}",
@@ -279,6 +290,7 @@ def format_operator_console_summary(report: dict[str, Any]) -> str:
         f"Self-heal: {self_heal.get('status', 'missing')} issues={self_heal.get('repairable_issue_count', 0)}",
         f"Software sync: {software.get('status', 'unknown')} expected={_short_revision(software.get('expected_public_revision'))}",
         f"Model release: {model_release.get('status', 'not_configured')} stage={model_release.get('pipeline_stage', 'unknown')}",
+        f"Model route plan: {model_route_plan.get('status', 'not_configured')} ready={_yes_no(model_route_plan.get('route_ready'))}",
         f"Primary lane: {_lane_brief((report.get('lanes') or {}).get('primary', {}))}",
         f"Backup lane: {_lane_brief((report.get('lanes') or {}).get('backup', {}))}",
         f"Privacy scan: {str((report.get('privacy_scan') or {}).get('status', 'unknown')).upper()}",
@@ -306,6 +318,7 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
     self_heal = report.get("self_heal") or {}
     software = report.get("software") or {}
     model_release = report.get("model_release") or {}
+    model_route_plan = report.get("model_route_plan") or {}
     top_action = action_queue.get("next_action") or {}
     next_runner = action_runner.get("next_action") or {}
     last_action_run = action_runner.get("last_run") or {}
@@ -322,6 +335,7 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
         f"- Self-heal: `{self_heal.get('status', 'missing')}` ({self_heal.get('repairable_issue_count', 0)} repairable issue(s))",
         f"- Software sync: `{software.get('status', 'unknown')}`",
         f"- Model release: `{model_release.get('status', 'not_configured')}` stage=`{model_release.get('pipeline_stage', 'unknown')}`",
+        f"- Model route plan: `{model_route_plan.get('status', 'not_configured')}` route_ready=`{model_route_plan.get('route_ready')}`",
         f"- Last action run: `{last_action_run.get('status', 'missing')}`",
         f"- Generated at: `{report.get('generated_at')}`",
         "",
@@ -385,6 +399,7 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
         )
     lines.extend(_software_sync_markdown_section(software))
     lines.extend(_model_release_markdown_section(model_release))
+    lines.extend(_model_route_plan_markdown_section(model_route_plan))
     lines.extend(
         [
             "",
@@ -538,6 +553,7 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
     self_heal = report.get("self_heal") or {}
     software = report.get("software") or {}
     model_release = report.get("model_release") or {}
+    model_route_plan = report.get("model_route_plan") or {}
     top_action = action_queue.get("next_action") or {}
     status = str(report.get("status", "unknown"))
     status_class = "ok" if status == "pass" else ("warn" if status == "warn" else "fail")
@@ -692,6 +708,10 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
           <p class="value">{html.escape(str(model_release.get("status", "not_configured")).upper())}</p>
         </div>
         <div class="panel">
+          <p class="label">Model route plan</p>
+          <p class="value">{html.escape(str(model_route_plan.get("status", "not_configured")).upper())}</p>
+        </div>
+        <div class="panel">
       <p class="label">Generated</p>
           <p class="value">{html.escape(str(report.get("generated_at", "-")))}</p>
         </div>
@@ -725,6 +745,10 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
     <section>
       <h2>Model Release</h2>
       {_model_release_table(model_release)}
+    </section>
+    <section>
+      <h2>Model Route Plan</h2>
+      {_model_route_plan_table(model_route_plan)}
     </section>
     <section>
       <h2>Lanes</h2>
@@ -1493,6 +1517,85 @@ def _model_release_status_summary(
     }
 
 
+def _model_route_plan_summary(
+    path: Path | None,
+    *,
+    now: datetime,
+    freshness_seconds: float,
+) -> dict[str, Any]:
+    if path is None:
+        return {
+            "configured": False,
+            "status": "not_configured",
+            "ok": None,
+            "path": None,
+            "fresh": None,
+            "route_ready": None,
+            "recommended_next_action": None,
+        }
+    resolved = path.expanduser().resolve()
+    if not resolved.exists():
+        return {
+            "configured": True,
+            "status": "missing",
+            "ok": False,
+            "path": str(resolved),
+            "exists": False,
+            "fresh": False,
+            "route_ready": None,
+            "recommended_next_action": None,
+        }
+    try:
+        data = read_json_file(resolved, description="model route plan report")
+    except (OSError, ValueError) as exc:
+        return {
+            "configured": True,
+            "status": "fail",
+            "ok": False,
+            "path": str(resolved),
+            "exists": True,
+            "fresh": False,
+            "error": _error_message(exc),
+            "route_ready": None,
+            "recommended_next_action": None,
+        }
+    if not isinstance(data, dict):
+        return {
+            "configured": True,
+            "status": "fail",
+            "ok": False,
+            "path": str(resolved),
+            "exists": True,
+            "fresh": False,
+            "error": "model route plan report is not a JSON object",
+            "route_ready": None,
+            "recommended_next_action": None,
+        }
+    generated_at = data.get("generated_at")
+    age_seconds = _age_seconds(generated_at, now=now)
+    summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+    return {
+        "configured": True,
+        "status": data.get("status", "unknown"),
+        "ok": data.get("ok") if isinstance(data.get("ok"), bool) else None,
+        "path": str(resolved),
+        "exists": True,
+        "schema": data.get("schema"),
+        "generated_at": generated_at,
+        "age_seconds": age_seconds,
+        "fresh": age_seconds is not None and age_seconds <= freshness_seconds,
+        "selected_model_id": summary.get("selected_model_id"),
+        "recommended_chat_model": summary.get("recommended_chat_model"),
+        "route_ready": summary.get("route_ready"),
+        "network_checked": summary.get("network_checked"),
+        "coordinator_reachable": summary.get("coordinator_reachable"),
+        "live_model_capable_worker_count": summary.get("live_model_capable_worker_count"),
+        "approved_model_count": summary.get("approved_model_count"),
+        "routeable_model_count": summary.get("routeable_model_count"),
+        "recommended_next_action": summary.get("recommended_next_action"),
+    }
+
+
 def _action_run_report_summary(path: Path, *, now: datetime, freshness_seconds: float) -> dict[str, Any]:
     resolved = path.expanduser().resolve()
     if not resolved.exists():
@@ -1666,6 +1769,7 @@ def _history_entry(report: dict[str, Any]) -> dict[str, Any]:
     action_runner = report.get("action_runner") or {}
     last_action_run = action_runner.get("last_run") or {}
     model_release = report.get("model_release") or {}
+    model_route_plan = report.get("model_route_plan") or {}
     return {
         "generated_at": report.get("generated_at"),
         "status": report.get("status"),
@@ -1680,6 +1784,9 @@ def _history_entry(report: dict[str, Any]) -> dict[str, Any]:
         "model_release_status": model_release.get("status"),
         "model_release_pipeline_stage": model_release.get("pipeline_stage"),
         "model_release_next_action": model_release.get("recommended_next_action"),
+        "model_route_plan_status": model_route_plan.get("status"),
+        "model_route_plan_route_ready": model_route_plan.get("route_ready"),
+        "model_route_plan_next_action": model_route_plan.get("recommended_next_action"),
         "action_run_status": last_action_run.get("status"),
         "action_run_action_id": last_action_run.get("action_id"),
         "stale_report_candidates": stale_reports.get("candidate_count"),
@@ -1702,6 +1809,9 @@ def _history_changes(previous: dict[str, Any] | None, current: dict[str, Any]) -
         "model_release_status": "model_release_status",
         "model_release_pipeline_stage": "model_release_pipeline_stage",
         "model_release_next_action": "model_release_next_action",
+        "model_route_plan_status": "model_route_plan_status",
+        "model_route_plan_route_ready": "model_route_plan_route_ready",
+        "model_route_plan_next_action": "model_route_plan_next_action",
         "action_run_status": "action_run_status",
         "action_run_action_id": "action_run_action_id",
         "stale_report_candidates": "stale_report_candidates",
@@ -1826,6 +1936,7 @@ def _operator_summary(
     daily_check: dict[str, Any],
     software: dict[str, Any],
     model_release: dict[str, Any],
+    model_route_plan: dict[str, Any],
     skip_network_checks: bool,
 ) -> dict[str, Any]:
     primary_ready = bool(primary.get("ready"))
@@ -1862,6 +1973,12 @@ def _operator_summary(
         warnings.append(f"model release status report is {model_release.get('status')}")
     elif model_release.get("configured") and model_release.get("fresh") is False:
         warnings.append("model release status report is stale")
+    if model_route_plan.get("configured") and model_route_plan.get("status") in {"missing", "fail"}:
+        warnings.append(f"model route plan report is {model_route_plan.get('status')}")
+    elif model_route_plan.get("configured") and model_route_plan.get("fresh") is False:
+        warnings.append("model route plan report is stale")
+    elif model_route_plan.get("configured") and model_route_plan.get("route_ready") is False:
+        warnings.append("model route plan is not route ready")
     if not backup.get("configured"):
         warnings.append("backup invite is not configured")
     if not privacy_ok:
@@ -1883,6 +2000,9 @@ def _operator_summary(
         "model_release_status": model_release.get("status"),
         "model_release_pipeline_stage": model_release.get("pipeline_stage"),
         "model_release_next_action": model_release.get("recommended_next_action"),
+        "model_route_plan_status": model_route_plan.get("status"),
+        "model_route_plan_route_ready": model_route_plan.get("route_ready"),
+        "model_route_plan_next_action": model_route_plan.get("recommended_next_action"),
         "reliability_can_continue_without_partner": reliability_can_continue,
         "can_continue_without_partner": can_continue,
         "recommended_next_action": _recommended_next_action(
@@ -2093,6 +2213,48 @@ def _model_release_table(model_release: dict[str, Any]) -> str:
         ("Blocked gates", ", ".join(str(item) for item in blocked) or "none"),
         ("Report fresh", _yes_no(model_release.get("fresh"))),
         ("Report path", model_release.get("path") or "-"),
+    ]
+    body = "\n".join(
+        "<tr>"
+        f"<th>{html.escape(str(label))}</th>"
+        f"<td>{html.escape(str(value))}</td>"
+        "</tr>"
+        for label, value in rows
+    )
+    return f"<table><tbody>{body}</tbody></table>"
+
+
+def _model_route_plan_markdown_section(model_route_plan: dict[str, Any]) -> list[str]:
+    lines = [
+        "",
+        "## Model Route Plan",
+        "",
+        f"- Status: `{model_route_plan.get('status', 'not_configured')}`",
+        f"- Selected model: `{model_route_plan.get('selected_model_id') or 'unknown'}`",
+        f"- Recommended chat model: `{model_route_plan.get('recommended_chat_model') or 'none'}`",
+        f"- Route ready: `{model_route_plan.get('route_ready')}`",
+        f"- Network checked: `{model_route_plan.get('network_checked')}`",
+        f"- Coordinator reachable: `{model_route_plan.get('coordinator_reachable')}`",
+        f"- Live capable workers: `{model_route_plan.get('live_model_capable_worker_count')}`",
+        f"- Next action: `{model_route_plan.get('recommended_next_action') or 'not_configured'}`",
+        f"- Report fresh: `{model_route_plan.get('fresh')}`",
+        f"- Report path: `{model_route_plan.get('path')}`",
+    ]
+    return lines
+
+
+def _model_route_plan_table(model_route_plan: dict[str, Any]) -> str:
+    rows = [
+        ("Status", model_route_plan.get("status", "not_configured")),
+        ("Selected model", model_route_plan.get("selected_model_id") or "unknown"),
+        ("Recommended chat model", model_route_plan.get("recommended_chat_model") or "none"),
+        ("Route ready", _yes_no(model_route_plan.get("route_ready"))),
+        ("Network checked", _yes_no(model_route_plan.get("network_checked"))),
+        ("Coordinator reachable", _yes_no(model_route_plan.get("coordinator_reachable"))),
+        ("Live capable workers", model_route_plan.get("live_model_capable_worker_count")),
+        ("Next action", model_route_plan.get("recommended_next_action") or "not_configured"),
+        ("Report fresh", _yes_no(model_route_plan.get("fresh"))),
+        ("Report path", model_route_plan.get("path") or "-"),
     ]
     body = "\n".join(
         "<tr>"

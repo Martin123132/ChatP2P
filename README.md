@@ -825,6 +825,8 @@ Model Release Sequence V0 is the operator planner for the candidate-pack folder.
 
 Model Release Status V0 is the at-a-glance pipeline view. `chatp2p model release-status` reruns the sequence/check flow, summarizes candidate-pack, runtime, artifact, eval, governance, bundle, and promotion readiness, then writes JSON/Markdown for Operator Console to display. It is read-only and never approves or edits registries.
 
+Model Route Plan V0 is the read-only bridge from "approved model" to "can chat route to it now?" `chatp2p model route-plan` checks registry/governance evidence, requires an approved and release-ready model, counts live model-capable workers from the coordinator snapshot when network checks are enabled, and writes JSON/Markdown. It never creates chat jobs, grants credits, restarts nodes, or contacts a partner machine outside the configured coordinator snapshot check.
+
 Model Release Promote V0 is the explicit approval step after a passing release-check report. `chatp2p model release-promote` reruns release-check against the current registry/governance files, previews by default, and only writes `status: approved` when both `--write` and `--confirm-release-ready` are supplied.
 
 ```powershell
@@ -1011,6 +1013,18 @@ python -m chatp2p.cli model release-status `
 ```
 
 Pass `--model-release-status D:\ChatP2PData\model-release-status\model-release-status.json` to `operator console` or `operator daily-check` when you want the static operator report to include model pipeline state.
+
+```powershell
+python -m chatp2p.cli model route-plan `
+  --registry D:\ChatP2PData\model-registry.json `
+  --governance D:\ChatP2PData\model-governance.json `
+  --out D:\ChatP2PData\model-route-plan `
+  --preferred-model qwen2.5-7b-instruct `
+  --invite D:\ChatP2PData\alpha-invite.json `
+  --json
+```
+
+Use `--skip-network-checks` for offline planning. In that mode the report can show the best approved model candidate, but it will not mark the route ready until a coordinator snapshot proves a live worker advertises the selected model. Pass `--model-route-plan D:\ChatP2PData\model-route-plan\model-route-plan.json` to `operator console` or `operator daily-check` when you want the static operator report to include routing readiness.
 
 ```powershell
 python -m chatp2p.cli model release-promote `
