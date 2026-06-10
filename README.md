@@ -801,6 +801,8 @@ Model Candidate Intake V0 adds a safer way to enter real candidate metadata with
 
 Model Eval Harness V0 turns that checklist into repeatable local evidence. The default `fake` mode is deterministic and does not download weights, spend credits, call a partner node, or approve a model. It writes JSON and Markdown evidence for domain, regression, safety, local smoke, and license/source checks so the next real model decision is based on artifacts rather than guesswork.
 
+Model Release Check V0 is the final read-only gate before a candidate can become the default model. It checks registry evidence, governance review, runtime support, hashes, eval completion, and matching approved weight-pack policy, then reports the exact blocker and next action. It never approves or edits a model.
+
 ```powershell
 python -m chatp2p.cli model registry `
   --registry D:\ChatP2PData\model-registry.json `
@@ -851,6 +853,15 @@ python -m chatp2p.cli model attach-eval `
 ```
 
 Add `--write` only when the preview is correct. The attach step updates eval evidence fields and writes a registry backup by default; it never changes the model status to `approved`.
+
+```powershell
+python -m chatp2p.cli model release-check `
+  --registry D:\ChatP2PData\model-registry.json `
+  --governance D:\ChatP2PData\model-governance.json `
+  --model-id example-open-8b `
+  --out D:\ChatP2PData\model-release-check.json `
+  --json
+```
 
 The default registry intentionally starts with a placeholder base weight pack, so the report warns until a real open-weight base model, license, and hashes are selected. Credits remain spendable usage accounting; reputation and tier gates decide who can submit adapters, review domains, or vote on releases.
 

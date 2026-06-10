@@ -118,6 +118,8 @@ Model Eval Harness V0 makes the first eval evidence artifact. `chatp2p model eva
 
 Model Eval Attach V0 closes the loop between eval reports and the model registry. `chatp2p model attach-eval` previews registry evidence updates by default, then requires `--write` to persist completed evals, success criteria, and a compact evidence history entry. It refuses failed eval reports and preserves the candidate status, so evidence can move forward without accidentally approving a base model.
 
+Model Release Check V0 is the strict read-only gate before default routing. `chatp2p model release-check` verifies license/source evidence, model shape, runtime support, hardware requirements, hashes, eval completion, model governance review, governance policy, and a matching approved weight pack. It reports the first safe next action and never mutates or approves the candidate.
+
 ## Future Lane: ISP Edge / Broadband Bundle
 
 Keep a second product architecture lane for an ISP-edge simulation, but do not let it interrupt the current alpha path. The idea is not "AI inside fibre"; it is a broadband-provider-style deployment model where a provider runs a coordinator, subscribers run light gateway/device nodes, regional edge workers provide stronger capacity, and policy routes work through local, provider-edge, trusted-peer, then placeholder fallback paths.

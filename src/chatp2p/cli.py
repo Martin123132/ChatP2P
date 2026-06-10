@@ -123,6 +123,11 @@ from .model_registry import (
     format_model_registry_summary,
     run_model_registry,
 )
+from .model_release import (
+    ModelReleaseCheckConfig,
+    format_model_release_check_summary,
+    run_model_release_check,
+)
 from .operator_actions import (
     build_operator_action_queue,
     format_operator_action_queue_summary,
@@ -561,6 +566,27 @@ def model_candidate_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_model_candidate_intake_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_release_check_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_release_check(
+            ModelReleaseCheckConfig(
+                registry_path=Path(args.registry),
+                governance_path=Path(args.governance),
+                model_id=args.model_id,
+                out_path=Path(args.out) if args.out else None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_release_check_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -3467,6 +3493,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     model_candidate_parser.add_argument("--json", action="store_true", help="Print the full JSON intake report")
     model_candidate_parser.set_defaults(func=model_candidate_command)
+
+    model_release_check_parser = model_subcommands.add_parser(
+        "release-check",
+        help="Check whether a model candidate is ready for release without approving it",
+    )
+    model_release_check_parser.add_argument(
+        "--registry",
+        default=".mesh/model-registry.json",
+        help="Path to the base model registry JSON",
+    )
+    model_release_check_parser.add_argument(
+        "--governance",
+        default=".mesh/model-governance.json",
+        help="Path to the model governance registry JSON",
+    )
+    model_release_check_parser.add_argument(
+        "--model-id",
+        required=True,
+        help="Model id from the registry to check",
+    )
+    model_release_check_parser.add_argument("--out", default=None, help="Optional JSON release-check report path")
+    model_release_check_parser.add_argument("--json", action="store_true", help="Print the full JSON release-check report")
+    model_release_check_parser.set_defaults(func=model_release_check_command)
 
     chat_parser = subcommands.add_parser("chat", help="Local chat product-loop proofs")
     chat_subcommands = chat_parser.add_subparsers(dest="chat_command", required=True)
