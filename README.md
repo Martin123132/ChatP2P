@@ -803,6 +803,8 @@ Model Candidate Pack V0 turns the shortlist recommendation into an isolated evid
 
 Model Runtime Check V0 verifies whether a candidate actually runs on a local runtime. `chatp2p model runtime-check` checks Ollama reachability, confirms the requested model is already present, runs a tiny smoke prompt when possible, and writes JSON/Markdown evidence. It does not pull models, edit registries, call partner nodes, or approve the candidate.
 
+Model Runtime Attach V0 closes that runtime-evidence loop. `chatp2p model attach-runtime` reads a passing runtime-check report, previews the runtime registry update by default, writes only with `--write`, refuses approved model entries, and never changes model status.
+
 Model Artifact Manifest V0 records exact artifact hash evidence for a candidate. `chatp2p model artifact-manifest` can hash local manifest/weights files or normalize known SHA256 values from a trusted source, records quantization, and writes JSON/Markdown plus a dry-run candidate update preview. It does not download weights, edit registries, or approve the candidate.
 
 Model Artifact Attach V0 closes that hash-evidence loop. `chatp2p model attach-artifacts` reads a reviewed artifact-manifest report, previews the registry artifact field updates by default, and only writes with explicit `--write`. It refuses approved model entries and never changes model status.
@@ -856,6 +858,16 @@ python -m chatp2p.cli model runtime-check `
   --out D:\ChatP2PData\model-runtime-check `
   --json
 ```
+
+```powershell
+python -m chatp2p.cli model attach-runtime `
+  --registry D:\ChatP2PData\model-candidate-pack\staging-model-registry.json `
+  --runtime-report D:\ChatP2PData\model-runtime-check\model-runtime-check.json `
+  --out D:\ChatP2PData\model-runtime-attach.json `
+  --json
+```
+
+Add `--write` only after reviewing the runtime-attach report. The command records verified runtime support on the candidate entry; it still does not approve the model.
 
 ```powershell
 python -m chatp2p.cli model artifact-manifest `

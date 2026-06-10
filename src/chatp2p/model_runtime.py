@@ -16,6 +16,7 @@ from .ollama import DEFAULT_OLLAMA_BASE_URL, OllamaError, generate_ollama, list_
 
 
 MODEL_RUNTIME_CHECK_REPORT_SCHEMA = "chatp2p.model-runtime-check-report.v1"
+MODEL_RUNTIME_ATTACH_REPORT_SCHEMA = "chatp2p.model-runtime-attach-report.v1"
 MODEL_RUNTIME_SUPPORTED_RUNTIMES = {"ollama"}
 
 _SENSITIVE_PATTERNS: dict[str, re.Pattern[str]] = {
@@ -41,6 +42,15 @@ class ModelRuntimeCheckConfig:
     ollama_timeout_seconds: float = 30.0
     prompt: str = "Reply with exactly: ok"
     expected_text: str = "ok"
+
+
+@dataclass(frozen=True)
+class ModelRuntimeAttachConfig:
+    registry_path: Path = Path(".mesh/model-registry.json")
+    runtime_report_path: Path = Path(".mesh/model-runtime-check/model-runtime-check.json")
+    out_path: Path | None = None
+    write: bool = False
+    backup: bool = True
 
 
 def run_model_runtime_check(config: ModelRuntimeCheckConfig) -> dict[str, Any]:
@@ -161,6 +171,136 @@ def run_model_runtime_check(config: ModelRuntimeCheckConfig) -> dict[str, Any]:
     return report
 
 
+def run_model_runtime_attach(config: ModelRuntimeAttachConfig) -> dict[str, Any]:
+    """Attach a passing runtime-check report to a model registry entry."""
+
+    started_at = time.time()
+    registry_path = config.registry_path.expanduser().resolve()
+    runtime_report_path = config.runtime_report_path.expanduser().resolve()
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    registry, registry_status, load_warnings = _load_registry(registry_path)
+    warnings.extend(load_warnings)
+    runtime_report = read_json_file(runtime_report_path, description="model runtime-check report")
+    if not isinstance(runtime_report, dict):
+        raise ValueError("model runtime-check report must be a JSON object")
+
+    if runtime_report.get("schema") != MODEL_RUNTIME_CHECK_REPORT_SCHEMA:
+        errors.append("runtime report schema is not chatp2p.model-runtime-check-report.v1")
+    report_summary = runtime_report.get("summary") if isinstance(runtime_report.get("summary"), dict) else {}
+    report_runtime = runtime_report.get("runtime") if isinstance(runtime_report.get("runtime"), dict) else {}
+    report_config = runtime_report.get("config") if isinstance(runtime_report.get("config"), dict) else {}
+    model_id = _safe_text(report_config.get("model_id") or (runtime_report.get("selected_model") or {}).get("id"))
+    runtime_id = _safe_text(report_runtime.get("id") or report_config.get("runtime"))
+    if not model_id:
+        errors.append("runtime report is missing model id")
+    if not runtime_id:
+        errors.append("runtime report is missing runtime id")
+    if runtime_report.get("ok") is not True or runtime_report.get("status") != "pass":
+        errors.append("runtime report must have ok=true and status=pass before attach")
+    if report_summary.get("runtime_verified") is not True:
+        errors.append("runtime report must have summary.runtime_verified=true before attach")
+    if report_summary.get("model_present") is not True or report_summary.get("smoke_passed") is not True:
+        errors.append("runtime report must show model_present=true and smoke_passed=true before attach")
+
+    validation_before = validate_model_registry(registry)
+    warnings.extend(f"model registry: {warning}" for warning in validation_before["warnings"])
+    errors.extend(f"model registry: {error}" for error in validation_before["errors"])
+
+    model = _find_model(registry, model_id or "")
+    if model_id and model is None:
+        errors.append(f"model_id not found in registry: {model_id}")
+    if isinstance(model, dict) and model.get("status") == "approved":
+        errors.append("approved model entries cannot be modified by attach-runtime")
+
+    updated_registry = json.loads(json.dumps(registry))
+    updated_model = _find_model(updated_registry, model_id or "")
+    before_status = _safe_text(model.get("status")) if isinstance(model, dict) else None
+    runtime_before = _runtime_entry(model, runtime_id or "") if isinstance(model, dict) and runtime_id else None
+    changes: list[dict[str, Any]] = []
+    if not errors and isinstance(updated_model, dict) and runtime_id:
+        changes.extend(
+            _apply_runtime_evidence(
+                updated_model,
+                runtime_id=runtime_id,
+                runtime_report=runtime_report,
+            )
+        )
+
+    after_model = _find_model(updated_registry, model_id or "")
+    after_status = _safe_text(after_model.get("status")) if isinstance(after_model, dict) else None
+    runtime_after = _runtime_entry(after_model, runtime_id or "") if isinstance(after_model, dict) and runtime_id else None
+    if before_status != after_status:
+        errors.append("attach-runtime must not change model status")
+
+    validation_after = validate_model_registry(updated_registry if not errors else registry)
+    warnings.extend(f"updated model registry: {warning}" for warning in validation_after["warnings"])
+    if validation_after["errors"]:
+        errors.extend(f"updated model registry validation failed: {error}" for error in validation_after["errors"])
+
+    write_result = {"requested": config.write, "status": "dry_run", "registry_path": str(registry_path)}
+    if config.write and not errors:
+        if config.backup and registry_path.exists():
+            backup_path = registry_path.with_suffix(registry_path.suffix + ".bak")
+            backup_path.write_text(json.dumps(registry, indent=2, sort_keys=True), encoding="utf-8")
+            write_result["backup_path"] = str(backup_path)
+        registry_path.parent.mkdir(parents=True, exist_ok=True)
+        registry_path.write_text(json.dumps(updated_registry, indent=2, sort_keys=True), encoding="utf-8")
+        write_result["status"] = "written"
+    elif config.write and errors:
+        write_result["status"] = "blocked"
+
+    status = "fail" if errors else ("warn" if warnings else "pass")
+    report: dict[str, Any] = {
+        "schema": MODEL_RUNTIME_ATTACH_REPORT_SCHEMA,
+        "ok": not errors,
+        "status": status,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(time.time() - started_at, 3),
+        "dry_run": not config.write,
+        "config": {
+            "registry_path": _safe_text(str(registry_path)),
+            "runtime_report_path": _safe_text(str(runtime_report_path)),
+            "out_path": _safe_text(str(config.out_path.expanduser().resolve())) if config.out_path else None,
+            "write": config.write,
+            "backup": config.backup,
+        },
+        "registry_status": registry_status,
+        "model": {
+            "id": model_id,
+            "status_before": before_status,
+            "status_after": after_status,
+            "approval_status_changed": before_status != after_status and after_status == "approved",
+        },
+        "runtime": {
+            "id": runtime_id,
+            "ollama_model": _safe_text(report_runtime.get("ollama_model")),
+            "support_status_before": _safe_text((runtime_before or {}).get("support_status")),
+            "support_status_after": _safe_text((runtime_after or {}).get("support_status")),
+            "verified_at": _safe_text((runtime_after or {}).get("verified_at")),
+        },
+        "summary": {
+            "change_count": len(changes),
+            "runtime_verified_attached": (runtime_after or {}).get("support_status") == "verified",
+            "does_not_approve_model": True,
+            "model_status_unchanged": before_status == after_status,
+            "recommended_next_action": _attach_runtime_next_action(errors=errors, write=config.write),
+        },
+        "write": write_result,
+        "changes": changes,
+        "registry_validation_summary": validation_after["summary"],
+        "warnings": warnings,
+        "errors": [_safe_text(error) for error in errors],
+    }
+    if config.out_path is not None:
+        out_path = config.out_path.expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+        report["artifacts"] = {"json": str(out_path)}
+    return report
+
+
 def format_model_runtime_check_summary(report: dict[str, Any]) -> str:
     summary = report.get("summary") or {}
     lines = [
@@ -170,6 +310,33 @@ def format_model_runtime_check_summary(report: dict[str, Any]) -> str:
         f"Reachable: {summary.get('reachable')}",
         f"Model present: {summary.get('model_present')}",
         f"Smoke passed: {summary.get('smoke_passed')}",
+        f"Next: {summary.get('recommended_next_action')}",
+    ]
+    if report.get("warnings"):
+        lines.append("Warnings:")
+        lines.extend(f"- {warning}" for warning in report["warnings"])
+    if report.get("errors"):
+        lines.append("Errors:")
+        lines.extend(f"- {error}" for error in report["errors"])
+    if (report.get("artifacts") or {}).get("json"):
+        lines.append(f"Report: {(report.get('artifacts') or {}).get('json')}")
+    return "\n".join(lines)
+
+
+def format_model_runtime_attach_summary(report: dict[str, Any]) -> str:
+    summary = report.get("summary") or {}
+    model = report.get("model") or {}
+    runtime = report.get("runtime") or {}
+    write = report.get("write") or {}
+    lines = [
+        f"Model runtime attach: {str(report.get('status', 'unknown')).upper()}",
+        f"Model: {model.get('id')}",
+        f"Runtime: {runtime.get('id')}",
+        f"Mode: {'dry-run' if report.get('dry_run') else 'write'}",
+        f"Changes: {summary.get('change_count')}",
+        f"Runtime status: {runtime.get('support_status_before')} -> {runtime.get('support_status_after')}",
+        f"Model status: {model.get('status_before')} -> {model.get('status_after')}",
+        f"Write: {write.get('status')}",
         f"Next: {summary.get('recommended_next_action')}",
     ]
     if report.get("warnings"):
@@ -376,6 +543,67 @@ def _recommended_next_action(
     if (runtime_entry or {}).get("support_status") != "verified":
         return "attach_runtime_evidence_to_candidate_registry"
     return "runtime_verified_continue_release_gates"
+
+
+def _attach_runtime_next_action(*, errors: list[str], write: bool) -> str:
+    if errors:
+        return "fix_runtime_attach_errors"
+    if not write:
+        return "rerun_attach_runtime_with_write_after_review"
+    return "run_model_release_check"
+
+
+def _apply_runtime_evidence(
+    model: dict[str, Any],
+    *,
+    runtime_id: str,
+    runtime_report: dict[str, Any],
+) -> list[dict[str, Any]]:
+    runtimes = model.get("runtimes") if isinstance(model.get("runtimes"), list) else []
+    model["runtimes"] = runtimes
+    runtime = _runtime_entry(model, runtime_id)
+    changes: list[dict[str, Any]] = []
+    if runtime is None:
+        runtime = {"id": runtime_id}
+        runtimes.append(runtime)
+        changes.append({"field": "runtimes", "status": "appended", "runtime_id": _safe_text(runtime_id)})
+
+    report_runtime = runtime_report.get("runtime") if isinstance(runtime_report.get("runtime"), dict) else {}
+    report_summary = runtime_report.get("summary") if isinstance(runtime_report.get("summary"), dict) else {}
+    values = {
+        "support_status": "verified",
+        "notes": "verified by model-runtime-check",
+        "verified_at": _safe_text(runtime_report.get("generated_at")),
+        "ollama_model": _safe_text(report_runtime.get("ollama_model")),
+        "evidence": {
+            "report_schema": MODEL_RUNTIME_CHECK_REPORT_SCHEMA,
+            "runtime_verified": bool(report_summary.get("runtime_verified")),
+            "model_present": bool(report_summary.get("model_present")),
+            "smoke_passed": bool(report_summary.get("smoke_passed")),
+            "status": _safe_text(runtime_report.get("status")),
+        },
+    }
+    for key, value in values.items():
+        if runtime.get(key) == value:
+            continue
+        runtime[key] = value
+        changes.append({"field": f"runtimes.{runtime_id}.{key}", "status": "updated", "value_status": _value_status(value)})
+    return changes
+
+
+def _value_status(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, dict):
+        return f"object[{len(value)}]"
+    if isinstance(value, list):
+        return f"list[{len(value)}]"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, (int, float)):
+        return "number"
+    text = _safe_text(value) or ""
+    return "present" if text else "empty"
 
 
 def _check(check_id: str, status: str, title: str, message: str) -> dict[str, Any]:

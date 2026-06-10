@@ -118,6 +118,8 @@ Model Candidate Pack V0 makes the next step one command. `chatp2p model candidat
 
 Model Runtime Check V0 attacks the first remaining gate. `chatp2p model runtime-check` is read-only: it checks local Ollama reachability, verifies the selected model is already installed, runs a tiny smoke prompt only when the model is present, and records runtime evidence without pulling weights, editing registries, or approving the model.
 
+Model Runtime Attach V0 records verified runtime support without skipping review. `chatp2p model attach-runtime` consumes a passing runtime-check report, previews by default, writes only with `--write`, refuses already-approved model entries, and leaves model status unchanged.
+
 Model Artifact Manifest V0 attacks the hash-evidence gate. `chatp2p model artifact-manifest` hashes local manifest and weights files, or accepts known SHA256 values from a trusted source, then records quantization and emits a dry-run candidate update preview. The command is evidence-only: no downloads, no registry writes, and no approval.
 
 Model Artifact Attach V0 connects that evidence to the registry safely. `chatp2p model attach-artifacts` previews artifact field updates by default, requires `--write` to persist them, writes a backup unless disabled, refuses approved model entries, and never changes model status.

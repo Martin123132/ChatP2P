@@ -148,8 +148,11 @@ from .model_release import (
     run_model_release_check,
 )
 from .model_runtime import (
+    ModelRuntimeAttachConfig,
     ModelRuntimeCheckConfig,
+    format_model_runtime_attach_summary,
     format_model_runtime_check_summary,
+    run_model_runtime_attach,
     run_model_runtime_check,
 )
 from .model_shortlist import (
@@ -767,6 +770,28 @@ def model_runtime_check_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_model_runtime_check_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_runtime_attach_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_runtime_attach(
+            ModelRuntimeAttachConfig(
+                registry_path=Path(args.registry),
+                runtime_report_path=Path(args.runtime_report),
+                out_path=Path(args.out) if args.out else None,
+                write=args.write,
+                backup=not args.no_backup,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_runtime_attach_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -3992,6 +4017,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     model_runtime_check_parser.add_argument("--json", action="store_true", help="Print the full JSON runtime report")
     model_runtime_check_parser.set_defaults(func=model_runtime_check_command)
+
+    model_runtime_attach_parser = model_subcommands.add_parser(
+        "attach-runtime",
+        help="Preview or write verified runtime evidence into a candidate registry entry",
+    )
+    model_runtime_attach_parser.add_argument(
+        "--registry",
+        default=".mesh/model-registry.json",
+        help="Path to the model registry JSON",
+    )
+    model_runtime_attach_parser.add_argument(
+        "--runtime-report",
+        default=".mesh/model-runtime-check/model-runtime-check.json",
+        help="Path to a passing model-runtime-check JSON report",
+    )
+    model_runtime_attach_parser.add_argument("--out", default=None, help="Optional JSON runtime-attach report path")
+    model_runtime_attach_parser.add_argument(
+        "--write",
+        action="store_true",
+        help="Write verified runtime evidence into the model registry; omitted means dry-run",
+    )
+    model_runtime_attach_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not write a .bak copy of the model registry when --write is used",
+    )
+    model_runtime_attach_parser.add_argument("--json", action="store_true", help="Print the full JSON attach report")
+    model_runtime_attach_parser.set_defaults(func=model_runtime_attach_command)
 
     chat_parser = subcommands.add_parser("chat", help="Local chat product-loop proofs")
     chat_subcommands = chat_parser.add_subparsers(dest="chat_command", required=True)
