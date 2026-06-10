@@ -179,7 +179,7 @@ def _default_entries() -> list[dict[str, Any]]:
                 "commercial_use": "allowed_by_reported_license",
                 "review_status": "must_confirm_before_candidate_intake",
             },
-            "parameter_count_b": 4,
+            "parameter_count_b": 4.5,
             "context_length_tokens": 128000,
             "architecture": "dense_or_moe_open_model",
             "domains": ["general", "coding", "reasoning", "multimodal"],
