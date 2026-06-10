@@ -821,6 +821,8 @@ Model Release Check V0 is the final read-only gate before a candidate can become
 
 Model Release Bundle V0 turns the release evidence into one operator-readable dossier. `chatp2p model release-bundle` reruns release-check, summarizes each gate, optionally summarizes runtime/artifact/eval/governance evidence reports, writes JSON/Markdown, and prints the exact dry-run and write promotion commands. It remains read-only.
 
+Model Release Sequence V0 is the operator planner for the candidate-pack folder. `chatp2p model release-sequence` inspects the staging registry and known evidence reports, reruns release-check, writes JSON/Markdown, and returns the next safe command to run. Generated commands are dry-run/no-write by default; when a registry write is eventually needed the report says so explicitly.
+
 Model Release Promote V0 is the explicit approval step after a passing release-check report. `chatp2p model release-promote` reruns release-check against the current registry/governance files, previews by default, and only writes `status: approved` when both `--write` and `--confirm-release-ready` are supplied.
 
 ```powershell
@@ -977,6 +979,20 @@ python -m chatp2p.cli model release-bundle `
 ```
 
 The bundle writes `model-release-bundle.json`, `model-release-bundle.md`, and a fresh nested `model-release-check.json`. It does not approve the model.
+
+```powershell
+python -m chatp2p.cli model release-sequence `
+  --pack D:\ChatP2PData\model-candidate-pack `
+  --governance D:\ChatP2PData\model-governance.json `
+  --out D:\ChatP2PData\model-release-sequence `
+  --runtime-report D:\ChatP2PData\model-runtime-check\model-runtime-check.json `
+  --artifact-report D:\ChatP2PData\model-artifact-manifest\model-artifact-manifest.json `
+  --governance-pack-report D:\ChatP2PData\model-governance-pack.json `
+  --governance-review-report D:\ChatP2PData\model-governance-review.json `
+  --json
+```
+
+Run sequence whenever you are unsure what the next model-release command should be. It writes a planner report only.
 
 ```powershell
 python -m chatp2p.cli model release-promote `

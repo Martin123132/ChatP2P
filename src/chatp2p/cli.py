@@ -155,6 +155,11 @@ from .model_release_bundle import (
     format_model_release_bundle_summary,
     run_model_release_bundle,
 )
+from .model_release_sequence import (
+    ModelReleaseSequenceConfig,
+    format_model_release_sequence_summary,
+    run_model_release_sequence,
+)
 from .model_runtime import (
     ModelRuntimeAttachConfig,
     ModelRuntimeCheckConfig,
@@ -802,6 +807,33 @@ def model_release_bundle_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_model_release_bundle_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_release_sequence_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_release_sequence(
+            ModelReleaseSequenceConfig(
+                pack_dir=Path(args.pack),
+                governance_path=Path(args.governance),
+                out_dir=Path(args.out),
+                model_id=args.model_id,
+                runtime_report_path=Path(args.runtime_report) if args.runtime_report else None,
+                artifact_report_path=Path(args.artifact_report) if args.artifact_report else None,
+                governance_pack_report_path=Path(args.governance_pack_report) if args.governance_pack_report else None,
+                governance_review_report_path=Path(args.governance_review_report)
+                if args.governance_review_report
+                else None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_release_sequence_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -4093,6 +4125,49 @@ def build_parser() -> argparse.ArgumentParser:
     )
     model_release_bundle_parser.add_argument("--json", action="store_true", help="Print the full JSON bundle report")
     model_release_bundle_parser.set_defaults(func=model_release_bundle_command)
+
+    model_release_sequence_parser = model_subcommands.add_parser(
+        "release-sequence",
+        help="Plan the next safe command for a candidate-pack release workflow",
+    )
+    model_release_sequence_parser.add_argument(
+        "--pack",
+        default=".mesh/model-candidate-pack",
+        help="Candidate pack directory containing staging-model-registry.json",
+    )
+    model_release_sequence_parser.add_argument(
+        "--governance",
+        default=".mesh/model-governance.json",
+        help="Path to the model governance registry JSON",
+    )
+    model_release_sequence_parser.add_argument(
+        "--out",
+        default=".mesh/model-release-sequence",
+        help="Output directory for model-release-sequence.json and .md",
+    )
+    model_release_sequence_parser.add_argument(
+        "--model-id",
+        default=None,
+        help="Model id to inspect; defaults to selected_model_id from the candidate pack report",
+    )
+    model_release_sequence_parser.add_argument("--runtime-report", default=None, help="Optional model-runtime-check JSON")
+    model_release_sequence_parser.add_argument(
+        "--artifact-report",
+        default=None,
+        help="Optional model-artifact-manifest or artifact-attach JSON",
+    )
+    model_release_sequence_parser.add_argument(
+        "--governance-pack-report",
+        default=None,
+        help="Optional model-governance-pack JSON",
+    )
+    model_release_sequence_parser.add_argument(
+        "--governance-review-report",
+        default=None,
+        help="Optional model-governance-review JSON",
+    )
+    model_release_sequence_parser.add_argument("--json", action="store_true", help="Print the full JSON sequence report")
+    model_release_sequence_parser.set_defaults(func=model_release_sequence_command)
 
     model_runtime_check_parser = model_subcommands.add_parser(
         "runtime-check",

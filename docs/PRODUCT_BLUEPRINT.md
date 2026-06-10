@@ -138,6 +138,8 @@ Model Release Check V0 is the strict read-only gate before default routing. `cha
 
 Model Release Bundle V0 makes the final review auditable before approval. `chatp2p model release-bundle` reruns release-check, lists every gate, summarizes configured evidence reports, writes JSON/Markdown, and gives the operator exact promotion commands while remaining read-only.
 
+Model Release Sequence V0 makes the release pipeline navigable. `chatp2p model release-sequence` inspects a candidate-pack folder, reruns release-check, detects which evidence reports exist, and returns the next safe no-write command plus whether a reviewed write flag will eventually be needed.
+
 Model Release Promote V0 is the deliberate approval command after a passing release check. `chatp2p model release-promote` consumes a release-check report, reruns the check against current files to avoid stale promotion, previews by default, and requires `--write --confirm-release-ready` before setting the model status to `approved`.
 
 ## Future Lane: ISP Edge / Broadband Bundle
