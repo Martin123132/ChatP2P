@@ -128,6 +128,11 @@ from .model_release import (
     format_model_release_check_summary,
     run_model_release_check,
 )
+from .model_shortlist import (
+    ModelShortlistConfig,
+    format_model_shortlist_summary,
+    run_model_shortlist,
+)
 from .operator_actions import (
     build_operator_action_queue,
     format_operator_action_queue_summary,
@@ -587,6 +592,24 @@ def model_release_check_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_model_release_check_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_shortlist_command(args: argparse.Namespace) -> None:
+    report = run_model_shortlist(
+        ModelShortlistConfig(
+            out_dir=Path(args.out),
+            max_parameter_count_b=args.max_parameter_count_b,
+            prefer_license=args.prefer_license,
+            include_noncommercial=args.include_noncommercial,
+        )
+    )
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_shortlist_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -3358,6 +3381,34 @@ def build_parser() -> argparse.ArgumentParser:
     model_governance_parser.add_argument("--force", action="store_true", help="Replace an existing registry during --init")
     model_governance_parser.add_argument("--json", action="store_true", help="Print the full JSON governance report")
     model_governance_parser.set_defaults(func=model_governance_command)
+
+    model_shortlist_parser = model_subcommands.add_parser(
+        "shortlist",
+        help="Generate a read-only shortlist of first base-model candidates",
+    )
+    model_shortlist_parser.add_argument(
+        "--out",
+        default=".mesh/model-shortlist",
+        help="Output directory for model-shortlist.json and .md",
+    )
+    model_shortlist_parser.add_argument(
+        "--max-parameter-count-b",
+        type=float,
+        default=12.0,
+        help="Preferred upper bound for first-pass model size in billions of parameters",
+    )
+    model_shortlist_parser.add_argument(
+        "--prefer-license",
+        default="apache-2.0",
+        help="Preferred SPDX-like license id when ranking candidates",
+    )
+    model_shortlist_parser.add_argument(
+        "--include-noncommercial",
+        action="store_true",
+        help="Include noncommercial-only entries if they are added to the shortlist data",
+    )
+    model_shortlist_parser.add_argument("--json", action="store_true", help="Print the full JSON shortlist report")
+    model_shortlist_parser.set_defaults(func=model_shortlist_command)
 
     model_eval_parser = model_subcommands.add_parser(
         "eval",
