@@ -25,6 +25,7 @@ from .model_registry import (
 
 
 MODEL_RELEASE_CHECK_REPORT_SCHEMA = "chatp2p.model-release-check-report.v1"
+MODEL_RELEASE_PROMOTE_REPORT_SCHEMA = "chatp2p.model-release-promote-report.v1"
 MODEL_RELEASE_ALLOWED_STATUSES = {"candidate", "proposal", "approved"}
 
 _SHA256_RE = re.compile(r"^[A-Fa-f0-9]{64}$")
@@ -47,6 +48,15 @@ class ModelReleaseCheckConfig:
     governance_path: Path = Path(".mesh/model-governance.json")
     model_id: str = "chatp2p-base-candidate-v0"
     out_path: Path | None = None
+
+
+@dataclass(frozen=True)
+class ModelReleasePromoteConfig:
+    release_report_path: Path = Path(".mesh/model-release-check.json")
+    out_path: Path | None = None
+    write: bool = False
+    backup: bool = True
+    confirm_release_ready: bool = False
 
 
 def run_model_release_check(config: ModelReleaseCheckConfig) -> dict[str, Any]:
@@ -121,6 +131,144 @@ def run_model_release_check(config: ModelReleaseCheckConfig) -> dict[str, Any]:
     return report
 
 
+def run_model_release_promote(config: ModelReleasePromoteConfig) -> dict[str, Any]:
+    """Promote a release-ready candidate to approved, only after explicit confirmation."""
+
+    started_at = time.time()
+    release_report_path = config.release_report_path.expanduser().resolve()
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    release_report = read_json_file(release_report_path, description="model release-check report")
+    if not isinstance(release_report, dict):
+        raise ValueError("model release-check report must be a JSON object")
+    report_config = release_report.get("config") if isinstance(release_report.get("config"), dict) else {}
+    report_summary = release_report.get("summary") if isinstance(release_report.get("summary"), dict) else {}
+
+    if release_report.get("schema") != MODEL_RELEASE_CHECK_REPORT_SCHEMA:
+        errors.append("release report schema is not chatp2p.model-release-check-report.v1")
+    if release_report.get("status") != "pass" or report_summary.get("release_ready") is not True:
+        errors.append("release report must have status=pass and summary.release_ready=true before promotion")
+
+    registry_path_text = report_config.get("registry_path")
+    governance_path_text = report_config.get("governance_path")
+    model_id = _safe_text(report_config.get("model_id"))
+    if not registry_path_text:
+        errors.append("release report config is missing registry_path")
+    if not governance_path_text:
+        errors.append("release report config is missing governance_path")
+    if not model_id:
+        errors.append("release report config is missing model_id")
+
+    registry_path = Path(str(registry_path_text)).expanduser().resolve() if registry_path_text else Path(".")
+    governance_path = Path(str(governance_path_text)).expanduser().resolve() if governance_path_text else Path(".")
+
+    current_release_check: dict[str, Any] | None = None
+    if not errors:
+        current_release_check = run_model_release_check(
+            ModelReleaseCheckConfig(
+                registry_path=registry_path,
+                governance_path=governance_path,
+                model_id=model_id or "",
+            )
+        )
+        warnings.extend(f"current release-check: {warning}" for warning in current_release_check.get("warnings", []))
+        if current_release_check.get("status") != "pass" or (current_release_check.get("summary") or {}).get("release_ready") is not True:
+            errors.append("current registry/governance state is not release_ready; rerun release-check")
+
+    if config.write and not config.confirm_release_ready:
+        errors.append("--confirm-release-ready is required with --write")
+
+    registry: dict[str, Any] = {}
+    registry_status: dict[str, Any] = {"source": "unavailable", "exists": False}
+    validation_before: dict[str, Any] = {"warnings": [], "errors": [], "summary": {}}
+    model: dict[str, Any] | None = None
+    if registry_path_text:
+        registry, registry_status, load_warnings = _load_model_registry(registry_path)
+        warnings.extend(load_warnings)
+        validation_before = validate_model_registry(registry)
+        warnings.extend(f"model registry: {warning}" for warning in validation_before["warnings"])
+        errors.extend(f"model registry: {error}" for error in validation_before["errors"])
+        model = _find_model(registry, model_id or "")
+        if model_id and model is None:
+            errors.append(f"model_id not found in registry: {model_id}")
+    before_status = _safe_text(model.get("status")) if isinstance(model, dict) else None
+
+    updated_registry = json.loads(json.dumps(registry))
+    updated_model = _find_model(updated_registry, model_id or "")
+    changes: list[dict[str, Any]] = []
+    if not errors and isinstance(updated_model, dict):
+        if updated_model.get("status") != "approved":
+            updated_model["status"] = "approved"
+            changes.append({"field": "status", "status": "updated", "value_status": "approved"})
+        changes.extend(_merge_release_metadata(updated_model, release_report=release_report))
+
+    after_model = _find_model(updated_registry, model_id or "")
+    after_status = _safe_text(after_model.get("status")) if isinstance(after_model, dict) else None
+    validation_after = validate_model_registry(updated_registry if not errors else registry)
+    warnings.extend(f"updated model registry: {warning}" for warning in validation_after["warnings"])
+    if validation_after["errors"]:
+        errors.extend(f"updated model registry validation failed: {error}" for error in validation_after["errors"])
+
+    write_result = {"requested": config.write, "status": "dry_run", "registry_path": str(registry_path)}
+    if config.write and not errors:
+        if config.backup and registry_path.exists():
+            backup_path = registry_path.with_suffix(registry_path.suffix + ".bak")
+            backup_path.write_text(json.dumps(registry, indent=2, sort_keys=True), encoding="utf-8")
+            write_result["backup_path"] = str(backup_path)
+        registry_path.parent.mkdir(parents=True, exist_ok=True)
+        registry_path.write_text(json.dumps(updated_registry, indent=2, sort_keys=True), encoding="utf-8")
+        write_result["status"] = "written"
+    elif config.write and errors:
+        write_result["status"] = "blocked"
+
+    status = "fail" if errors else ("warn" if warnings else "pass")
+    report: dict[str, Any] = {
+        "schema": MODEL_RELEASE_PROMOTE_REPORT_SCHEMA,
+        "ok": not errors,
+        "status": status,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(time.time() - started_at, 3),
+        "dry_run": not config.write,
+        "config": {
+            "release_report_path": _safe_text(str(release_report_path)),
+            "registry_path": _safe_text(str(registry_path)),
+            "governance_path": _safe_text(str(governance_path)),
+            "model_id": model_id,
+            "out_path": _safe_text(str(config.out_path.expanduser().resolve())) if config.out_path else None,
+            "write": config.write,
+            "backup": config.backup,
+            "confirm_release_ready": config.confirm_release_ready,
+        },
+        "registry_status": registry_status,
+        "model": {
+            "id": model_id,
+            "status_before": before_status,
+            "status_after": after_status,
+            "approval_status_changed": before_status != after_status and after_status == "approved",
+        },
+        "summary": {
+            "release_ready_confirmed": current_release_check is not None
+            and (current_release_check.get("summary") or {}).get("release_ready") is True,
+            "change_count": len(changes),
+            "approval_action": "promote_to_approved" if config.write and not errors else "preview",
+            "requires_explicit_write": True,
+            "recommended_next_action": _promote_next_action(errors=errors, write=config.write),
+        },
+        "write": write_result,
+        "changes": changes,
+        "registry_validation_summary": validation_after["summary"],
+        "warnings": warnings,
+        "errors": [_safe_text(error) for error in errors],
+    }
+    if config.out_path is not None:
+        out_path = config.out_path.expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+        report["artifacts"] = {"json": str(out_path)}
+    return report
+
+
 def format_model_release_check_summary(report: dict[str, Any]) -> str:
     summary = report.get("summary") or {}
     model = report.get("model") or {}
@@ -130,6 +278,31 @@ def format_model_release_check_summary(report: dict[str, Any]) -> str:
         f"Release ready: {summary.get('release_ready')}",
         f"Gates: {summary.get('passed_gate_count')}/{summary.get('gate_count')} passed",
         f"Blocked: {', '.join(summary.get('blocked_gate_ids') or []) or 'none'}",
+        f"Next: {summary.get('recommended_next_action')}",
+    ]
+    if report.get("warnings"):
+        lines.append("Warnings:")
+        lines.extend(f"- {warning}" for warning in report["warnings"])
+    if report.get("errors"):
+        lines.append("Errors:")
+        lines.extend(f"- {error}" for error in report["errors"])
+    if (report.get("artifacts") or {}).get("json"):
+        lines.append(f"Report: {(report.get('artifacts') or {}).get('json')}")
+    return "\n".join(lines)
+
+
+def format_model_release_promote_summary(report: dict[str, Any]) -> str:
+    summary = report.get("summary") or {}
+    model = report.get("model") or {}
+    write = report.get("write") or {}
+    lines = [
+        f"Model release promote: {str(report.get('status', 'unknown')).upper()}",
+        f"Model: {model.get('id')}",
+        f"Mode: {'dry-run' if report.get('dry_run') else 'write'}",
+        f"Release ready confirmed: {summary.get('release_ready_confirmed')}",
+        f"Model status: {model.get('status_before')} -> {model.get('status_after')}",
+        f"Changes: {summary.get('change_count')}",
+        f"Write: {write.get('status')}",
         f"Next: {summary.get('recommended_next_action')}",
     ]
     if report.get("warnings"):
@@ -464,6 +637,52 @@ def _recommended_next_action(*, errors: list[str], gates: list[dict[str, Any]]) 
         if gate_id in failed_ids:
             return action
     return "promote_model_through_governance_release"
+
+
+def _promote_next_action(*, errors: list[str], write: bool) -> str:
+    if errors:
+        return "fix_model_release_promote_errors"
+    if not write:
+        return "rerun_release_promote_with_write_and_confirm"
+    return "publish_approved_model_registry_for_default_routing"
+
+
+def _merge_release_metadata(model: dict[str, Any], *, release_report: dict[str, Any]) -> list[dict[str, Any]]:
+    release = model.get("release") if isinstance(model.get("release"), dict) else {}
+    model["release"] = release
+    values = {
+        "status": "approved",
+        "approved_at": datetime.now(timezone.utc).isoformat(),
+        "release_check_schema": MODEL_RELEASE_CHECK_REPORT_SCHEMA,
+        "release_check_generated_at": _safe_text(release_report.get("generated_at")),
+        "release_gate_count": (release_report.get("summary") or {}).get("gate_count")
+        if isinstance(release_report.get("summary"), dict)
+        else None,
+    }
+    changes: list[dict[str, Any]] = []
+    for key, value in values.items():
+        if release.get(key) == value:
+            continue
+        release[key] = value
+        changes.append({"field": f"release.{key}", "status": "updated", "value_status": _value_status(value)})
+    return changes
+
+
+def _value_status(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, dict):
+        return f"object[{len(value)}]"
+    if isinstance(value, list):
+        return f"list[{len(value)}]"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, (int, float)):
+        return "number"
+    text = _safe_text(value) or ""
+    if _hash_ready(text):
+        return "sha256"
+    return "present" if text else "empty"
 
 
 def _find_model(registry: dict[str, Any], model_id: str) -> dict[str, Any] | None:

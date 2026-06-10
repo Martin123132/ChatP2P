@@ -5,8 +5,11 @@ from chatp2p.model_governance import default_model_governance_registry
 from chatp2p.model_registry import default_model_registry
 from chatp2p.model_release import (
     MODEL_RELEASE_CHECK_REPORT_SCHEMA,
+    MODEL_RELEASE_PROMOTE_REPORT_SCHEMA,
     ModelReleaseCheckConfig,
+    ModelReleasePromoteConfig,
     run_model_release_check,
+    run_model_release_promote,
 )
 
 
@@ -160,6 +163,125 @@ def test_model_release_check_parser_accepts_required_flags():
     assert args.json is True
 
 
+def test_model_release_promote_dry_run_previews_approval_without_writing(tmp_path):
+    registry_path, _governance_path, release_report_path = _write_ready_release_report(tmp_path)
+    before = json.loads(registry_path.read_text(encoding="utf-8"))
+
+    report = run_model_release_promote(
+        ModelReleasePromoteConfig(
+            release_report_path=release_report_path,
+            out_path=tmp_path / "release-promote.json",
+        )
+    )
+    after = json.loads(registry_path.read_text(encoding="utf-8"))
+
+    assert report["schema"] == MODEL_RELEASE_PROMOTE_REPORT_SCHEMA
+    assert report["ok"] is True
+    assert report["dry_run"] is True
+    assert report["summary"]["release_ready_confirmed"] is True
+    assert report["summary"]["approval_action"] == "preview"
+    assert report["summary"]["recommended_next_action"] == "rerun_release_promote_with_write_and_confirm"
+    assert report["model"]["status_before"] == "proposal"
+    assert report["model"]["status_after"] == "approved"
+    assert before == after
+    assert (tmp_path / "release-promote.json").exists()
+
+
+def test_model_release_promote_write_requires_confirmation(tmp_path):
+    _registry_path, _governance_path, release_report_path = _write_ready_release_report(tmp_path)
+
+    report = run_model_release_promote(
+        ModelReleasePromoteConfig(
+            release_report_path=release_report_path,
+            write=True,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["write"]["status"] == "blocked"
+    assert any("--confirm-release-ready is required" in error for error in report["errors"])
+
+
+def test_model_release_promote_write_approves_model_and_backs_up(tmp_path):
+    registry_path, _governance_path, release_report_path = _write_ready_release_report(tmp_path)
+
+    report = run_model_release_promote(
+        ModelReleasePromoteConfig(
+            release_report_path=release_report_path,
+            write=True,
+            confirm_release_ready=True,
+        )
+    )
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    model = registry["models"][0]
+
+    assert report["ok"] is True
+    assert report["dry_run"] is False
+    assert report["write"]["status"] == "written"
+    assert report["summary"]["approval_action"] == "promote_to_approved"
+    assert report["summary"]["recommended_next_action"] == "publish_approved_model_registry_for_default_routing"
+    assert report["model"]["approval_status_changed"] is True
+    assert model["status"] == "approved"
+    assert model["release"]["status"] == "approved"
+    assert model["release"]["release_check_schema"] == MODEL_RELEASE_CHECK_REPORT_SCHEMA
+    assert (tmp_path / "model-registry.json.bak").exists()
+
+
+def test_model_release_promote_blocks_not_ready_report(tmp_path):
+    registry_path = tmp_path / "model-registry.json"
+    governance_path = tmp_path / "model-governance.json"
+    release_report_path = tmp_path / "model-release-check.json"
+    registry_path.write_text(json.dumps(default_model_registry(), indent=2), encoding="utf-8")
+    governance_path.write_text(json.dumps(default_model_governance_registry(), indent=2), encoding="utf-8")
+    run_model_release_check(
+        ModelReleaseCheckConfig(
+            registry_path=registry_path,
+            governance_path=governance_path,
+            model_id="chatp2p-base-candidate-v0",
+            out_path=release_report_path,
+        )
+    )
+
+    report = run_model_release_promote(
+        ModelReleasePromoteConfig(
+            release_report_path=release_report_path,
+            write=True,
+            confirm_release_ready=True,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["write"]["status"] == "blocked"
+    assert any("release_ready=true" in error for error in report["errors"])
+
+
+def test_model_release_promote_parser_accepts_flags():
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "model",
+            "release-promote",
+            "--release-report",
+            "D:\\ChatP2PData\\model-release-check.json",
+            "--out",
+            "D:\\ChatP2PData\\model-release-promote.json",
+            "--write",
+            "--confirm-release-ready",
+            "--no-backup",
+            "--json",
+        ]
+    )
+
+    assert args.func.__name__ == "model_release_promote_command"
+    assert args.command == "model"
+    assert args.model_command == "release-promote"
+    assert args.write is True
+    assert args.confirm_release_ready is True
+    assert args.no_backup is True
+    assert args.json is True
+
+
 def _ready_model(*, status):
     return {
         "id": "chatp2p-base-ready-v0",
@@ -235,3 +357,24 @@ def _ready_governance_registry():
         "promotion_gate": "passed_eval_and_governance_review",
     }
     return registry
+
+
+def _write_ready_release_report(tmp_path):
+    registry = default_model_registry()
+    registry["models"][0] = _ready_model(status="proposal")
+    governance = _ready_governance_registry()
+    registry_path = tmp_path / "model-registry.json"
+    governance_path = tmp_path / "model-governance.json"
+    release_report_path = tmp_path / "model-release-check.json"
+    registry_path.write_text(json.dumps(registry, indent=2), encoding="utf-8")
+    governance_path.write_text(json.dumps(governance, indent=2), encoding="utf-8")
+    release_report = run_model_release_check(
+        ModelReleaseCheckConfig(
+            registry_path=registry_path,
+            governance_path=governance_path,
+            model_id="chatp2p-base-ready-v0",
+            out_path=release_report_path,
+        )
+    )
+    assert release_report["summary"]["release_ready"] is True
+    return registry_path, governance_path, release_report_path

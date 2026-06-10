@@ -819,6 +819,8 @@ Model Eval Harness V0 turns that checklist into repeatable local evidence. The d
 
 Model Release Check V0 is the final read-only gate before a candidate can become the default model. It checks registry evidence, governance review, runtime support, hashes, eval completion, and matching approved weight-pack policy, then reports the exact blocker and next action. It never approves or edits a model.
 
+Model Release Promote V0 is the explicit approval step after a passing release-check report. `chatp2p model release-promote` reruns release-check against the current registry/governance files, previews by default, and only writes `status: approved` when both `--write` and `--confirm-release-ready` are supplied.
+
 ```powershell
 python -m chatp2p.cli model registry `
   --registry D:\ChatP2PData\model-registry.json `
@@ -957,6 +959,15 @@ python -m chatp2p.cli model release-check `
   --out D:\ChatP2PData\model-release-check.json `
   --json
 ```
+
+```powershell
+python -m chatp2p.cli model release-promote `
+  --release-report D:\ChatP2PData\model-release-check.json `
+  --out D:\ChatP2PData\model-release-promote.json `
+  --json
+```
+
+Add `--write --confirm-release-ready` only after reviewing the promote report. This is the first command in the model pipeline that can mark a candidate `approved`.
 
 The default registry intentionally starts with a placeholder base weight pack, so the report warns until a real open-weight base model, license, and hashes are selected. Credits remain spendable usage accounting; reputation and tier gates decide who can submit adapters, review domains, or vote on releases.
 

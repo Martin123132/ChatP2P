@@ -136,6 +136,8 @@ Model Eval Attach V0 closes the loop between eval reports and the model registry
 
 Model Release Check V0 is the strict read-only gate before default routing. `chatp2p model release-check` verifies license/source evidence, model shape, runtime support, hardware requirements, hashes, eval completion, model governance review, governance policy, and a matching approved weight pack. It reports the first safe next action and never mutates or approves the candidate.
 
+Model Release Promote V0 is the deliberate approval command after a passing release check. `chatp2p model release-promote` consumes a release-check report, reruns the check against current files to avoid stale promotion, previews by default, and requires `--write --confirm-release-ready` before setting the model status to `approved`.
+
 ## Future Lane: ISP Edge / Broadband Bundle
 
 Keep a second product architecture lane for an ISP-edge simulation, but do not let it interrupt the current alpha path. The idea is not "AI inside fibre"; it is a broadband-provider-style deployment model where a provider runs a coordinator, subscribers run light gateway/device nodes, regional edge workers provide stronger capacity, and policy routes work through local, provider-edge, trusted-peer, then placeholder fallback paths.

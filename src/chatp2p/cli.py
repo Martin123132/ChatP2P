@@ -144,8 +144,11 @@ from .model_registry import (
 )
 from .model_release import (
     ModelReleaseCheckConfig,
+    ModelReleasePromoteConfig,
     format_model_release_check_summary,
+    format_model_release_promote_summary,
     run_model_release_check,
+    run_model_release_promote,
 )
 from .model_runtime import (
     ModelRuntimeAttachConfig,
@@ -744,6 +747,28 @@ def model_release_check_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_model_release_check_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_release_promote_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_release_promote(
+            ModelReleasePromoteConfig(
+                release_report_path=Path(args.release_report),
+                out_path=Path(args.out) if args.out else None,
+                write=args.write,
+                backup=not args.no_backup,
+                confirm_release_ready=args.confirm_release_ready,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_release_promote_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -3963,6 +3988,34 @@ def build_parser() -> argparse.ArgumentParser:
     model_release_check_parser.add_argument("--out", default=None, help="Optional JSON release-check report path")
     model_release_check_parser.add_argument("--json", action="store_true", help="Print the full JSON release-check report")
     model_release_check_parser.set_defaults(func=model_release_check_command)
+
+    model_release_promote_parser = model_subcommands.add_parser(
+        "release-promote",
+        help="Promote a release-ready candidate to approved with explicit confirmation",
+    )
+    model_release_promote_parser.add_argument(
+        "--release-report",
+        default=".mesh/model-release-check.json",
+        help="Path to a passing model-release-check JSON report",
+    )
+    model_release_promote_parser.add_argument("--out", default=None, help="Optional JSON release-promote report path")
+    model_release_promote_parser.add_argument(
+        "--write",
+        action="store_true",
+        help="Write approved status into the model registry; omitted means dry-run",
+    )
+    model_release_promote_parser.add_argument(
+        "--confirm-release-ready",
+        action="store_true",
+        help="Required with --write to confirm the operator reviewed a passing release-check report",
+    )
+    model_release_promote_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not write a .bak copy of the model registry when --write is used",
+    )
+    model_release_promote_parser.add_argument("--json", action="store_true", help="Print the full JSON promote report")
+    model_release_promote_parser.set_defaults(func=model_release_promote_command)
 
     model_runtime_check_parser = model_subcommands.add_parser(
         "runtime-check",
