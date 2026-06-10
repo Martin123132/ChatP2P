@@ -120,8 +120,11 @@ from .model_candidate_pack import (
 )
 from .model_governance import (
     ModelGovernanceConfig,
+    ModelGovernancePackConfig,
+    format_model_governance_pack_summary,
     format_model_governance_summary,
     run_model_governance,
+    run_model_governance_pack,
 )
 from .model_eval import (
     ModelEvalAttachConfig,
@@ -480,6 +483,32 @@ def model_governance_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_model_governance_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_governance_pack_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_governance_pack(
+            ModelGovernancePackConfig(
+                governance_path=Path(args.governance),
+                model_registry_path=Path(args.registry),
+                model_id=args.model_id,
+                out_path=Path(args.out) if args.out else None,
+                pack_id=args.pack_id,
+                status=args.status,
+                promotion_gate=args.promotion_gate,
+                write=args.write,
+                backup=not args.no_backup,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_governance_pack_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -3498,6 +3527,47 @@ def build_parser() -> argparse.ArgumentParser:
     model_governance_parser.add_argument("--force", action="store_true", help="Replace an existing registry during --init")
     model_governance_parser.add_argument("--json", action="store_true", help="Print the full JSON governance report")
     model_governance_parser.set_defaults(func=model_governance_command)
+
+    model_governance_pack_parser = model_subcommands.add_parser(
+        "governance-pack",
+        help="Preview or write a non-editable governance weight-pack record for a candidate",
+    )
+    model_governance_pack_parser.add_argument(
+        "--governance",
+        default=".mesh/model-governance.json",
+        help="Path to the governance registry JSON",
+    )
+    model_governance_pack_parser.add_argument(
+        "--registry",
+        default=".mesh/model-registry.json",
+        help="Path to the model registry JSON containing candidate artifact hashes",
+    )
+    model_governance_pack_parser.add_argument("--model-id", required=True, help="Model id from the model registry")
+    model_governance_pack_parser.add_argument("--out", default=None, help="Optional JSON governance-pack report path")
+    model_governance_pack_parser.add_argument("--pack-id", default=None, help="Optional governance weight-pack id")
+    model_governance_pack_parser.add_argument(
+        "--status",
+        choices=["proposal", "approved"],
+        default="proposal",
+        help="Governance pack status; proposal is the safe default",
+    )
+    model_governance_pack_parser.add_argument(
+        "--promotion-gate",
+        default="model_release_check_and_governance_review",
+        help="Promotion gate recorded on the governance weight pack",
+    )
+    model_governance_pack_parser.add_argument(
+        "--write",
+        action="store_true",
+        help="Write the governance pack into the governance registry; omitted means dry-run",
+    )
+    model_governance_pack_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not write a .bak copy of the governance registry when --write is used",
+    )
+    model_governance_pack_parser.add_argument("--json", action="store_true", help="Print the full JSON pack report")
+    model_governance_pack_parser.set_defaults(func=model_governance_pack_command)
 
     model_shortlist_parser = model_subcommands.add_parser(
         "shortlist",

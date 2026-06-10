@@ -807,6 +807,8 @@ Model Artifact Manifest V0 records exact artifact hash evidence for a candidate.
 
 Model Artifact Attach V0 closes that hash-evidence loop. `chatp2p model attach-artifacts` reads a reviewed artifact-manifest report, previews the registry artifact field updates by default, and only writes with explicit `--write`. It refuses approved model entries and never changes model status.
 
+Model Governance Pack V0 turns reviewed candidate hash evidence into a non-editable governance weight-pack record. `chatp2p model governance-pack` reads the model registry and governance registry, previews a proposed pack by default, requires `--write` to persist it, refuses to modify already-approved packs, and still does not approve the model.
+
 Model Candidate Intake V0 adds a safer way to enter real candidate metadata without hand-editing registry JSON. It previews changes by default, requires `--write` to persist them, writes a backup when updating an existing registry, and never permits approval through this path.
 
 Model Eval Harness V0 turns that checklist into repeatable local evidence. The default `fake` mode is deterministic and does not download weights, spend credits, call a partner node, or approve a model. It writes JSON and Markdown evidence for domain, regression, safety, local smoke, and license/source checks so the next real model decision is based on artifacts rather than guesswork.
@@ -873,6 +875,17 @@ python -m chatp2p.cli model attach-artifacts `
 ```
 
 Add `--write` only after reviewing the attach report. The command writes a registry backup by default and still does not approve the model.
+
+```powershell
+python -m chatp2p.cli model governance-pack `
+  --governance D:\ChatP2PData\model-governance.json `
+  --registry D:\ChatP2PData\model-candidate-pack\staging-model-registry.json `
+  --model-id qwen2.5-7b-instruct `
+  --out D:\ChatP2PData\model-governance-pack.json `
+  --json
+```
+
+Add `--write` only after reviewing the governance-pack report. The default pack status is `proposal`; `--status approved` is explicit and still only records governance state, not model approval.
 
 ```powershell
 python -m chatp2p.cli model candidate `

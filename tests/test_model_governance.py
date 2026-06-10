@@ -3,13 +3,21 @@ import json
 from chatp2p.cli import build_parser
 from chatp2p.model_governance import (
     MODEL_GOVERNANCE_DEFAULT_REGISTRY_ID,
+    MODEL_GOVERNANCE_PACK_REPORT_SCHEMA,
     MODEL_GOVERNANCE_REGISTRY_SCHEMA,
     MODEL_GOVERNANCE_REPORT_SCHEMA,
     ModelGovernanceConfig,
+    ModelGovernancePackConfig,
     default_model_governance_registry,
     run_model_governance,
+    run_model_governance_pack,
     validate_model_governance_registry,
 )
+from chatp2p.model_registry import default_model_registry
+
+
+VALID_SHA_A = "a" * 64
+VALID_SHA_B = "b" * 64
 
 
 def test_model_governance_default_registry_is_strict_but_not_ready_to_serve():
@@ -107,3 +115,231 @@ def test_model_governance_parser_accepts_init_and_report_flags():
     assert args.init is True
     assert args.force is True
     assert args.json is True
+
+
+def test_model_governance_pack_dry_run_creates_non_editable_proposal(tmp_path):
+    governance_path = tmp_path / "model-governance.json"
+    model_registry_path = _write_qwen_registry(tmp_path)
+    governance_path.write_text(json.dumps(default_model_governance_registry(), indent=2), encoding="utf-8")
+    before = json.loads(governance_path.read_text(encoding="utf-8"))
+
+    report = run_model_governance_pack(
+        ModelGovernancePackConfig(
+            governance_path=governance_path,
+            model_registry_path=model_registry_path,
+            model_id="qwen2.5-7b-instruct",
+            out_path=tmp_path / "governance-pack.json",
+        )
+    )
+    after = json.loads(governance_path.read_text(encoding="utf-8"))
+
+    assert report["schema"] == MODEL_GOVERNANCE_PACK_REPORT_SCHEMA
+    assert report["ok"] is True
+    assert report["dry_run"] is True
+    assert report["operation"] == "add"
+    assert report["summary"]["does_not_approve_model"] is True
+    assert report["summary"]["model_registry_write"] is False
+    assert report["summary"]["pack_status"] == "proposal"
+    assert report["summary"]["core_weight_editable"] is False
+    assert report["summary"]["recommended_next_action"] == "rerun_governance_pack_with_write_after_review"
+    assert report["pack"]["status"] == "proposal"
+    assert report["pack"]["base_model"] == "qwen2.5-7b-instruct"
+    assert before == after
+    assert (tmp_path / "governance-pack.json").exists()
+
+
+def test_model_governance_pack_write_adds_proposal_and_backup(tmp_path):
+    governance_path = tmp_path / "model-governance.json"
+    model_registry_path = _write_qwen_registry(tmp_path)
+    governance_path.write_text(json.dumps(default_model_governance_registry(), indent=2), encoding="utf-8")
+
+    report = run_model_governance_pack(
+        ModelGovernancePackConfig(
+            governance_path=governance_path,
+            model_registry_path=model_registry_path,
+            model_id="qwen2.5-7b-instruct",
+            write=True,
+        )
+    )
+    governance = json.loads(governance_path.read_text(encoding="utf-8"))
+    pack = governance["weight_packs"][-1]
+
+    assert report["ok"] is True
+    assert report["dry_run"] is False
+    assert report["write"]["status"] == "written"
+    assert report["summary"]["recommended_next_action"] == "review_and_promote_governance_pack_when_ready"
+    assert pack["base_model"] == "qwen2.5-7b-instruct"
+    assert pack["status"] == "proposal"
+    assert pack["core_weight_editable"] is False
+    assert pack["manifest_sha256"] == VALID_SHA_A
+    assert pack["weights_sha256"] == VALID_SHA_B
+    assert (tmp_path / "model-governance.json.bak").exists()
+
+
+def test_model_governance_pack_can_explicitly_preview_approved_pack(tmp_path):
+    governance_path = tmp_path / "model-governance.json"
+    model_registry_path = _write_qwen_registry(tmp_path)
+    governance_path.write_text(json.dumps(default_model_governance_registry(), indent=2), encoding="utf-8")
+
+    report = run_model_governance_pack(
+        ModelGovernancePackConfig(
+            governance_path=governance_path,
+            model_registry_path=model_registry_path,
+            model_id="qwen2.5-7b-instruct",
+            status="approved",
+        )
+    )
+
+    assert report["ok"] is True
+    assert report["dry_run"] is True
+    assert report["pack"]["status"] == "approved"
+    assert report["summary"]["does_not_approve_model"] is True
+
+
+def test_model_governance_pack_blocks_missing_hashes(tmp_path):
+    governance_path = tmp_path / "model-governance.json"
+    model_registry_path = _write_qwen_registry(tmp_path, hashed=False)
+    governance_path.write_text(json.dumps(default_model_governance_registry(), indent=2), encoding="utf-8")
+
+    report = run_model_governance_pack(
+        ModelGovernancePackConfig(
+            governance_path=governance_path,
+            model_registry_path=model_registry_path,
+            model_id="qwen2.5-7b-instruct",
+            write=True,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["write"]["status"] == "blocked"
+    assert any("manifest_sha256" in error for error in report["errors"])
+    assert any("weights_sha256" in error for error in report["errors"])
+
+
+def test_model_governance_pack_refuses_to_modify_existing_approved_pack(tmp_path):
+    governance = default_model_governance_registry()
+    governance["weight_packs"].append(
+        {
+            "id": "qwen2_5_7b_instruct_governance_pack_v0",
+            "type": "base_model",
+            "status": "approved",
+            "base_model": "qwen2.5-7b-instruct",
+            "license": "Apache-2.0",
+            "domains": ["general", "coding"],
+            "allowed_runtimes": ["ollama"],
+            "manifest_sha256": VALID_SHA_A,
+            "weights_sha256": VALID_SHA_B,
+            "core_weight_editable": False,
+            "promotion_gate": "already_approved",
+        }
+    )
+    governance_path = tmp_path / "model-governance.json"
+    governance_path.write_text(json.dumps(governance, indent=2), encoding="utf-8")
+    model_registry_path = _write_qwen_registry(tmp_path)
+
+    report = run_model_governance_pack(
+        ModelGovernancePackConfig(
+            governance_path=governance_path,
+            model_registry_path=model_registry_path,
+            model_id="qwen2.5-7b-instruct",
+            write=True,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["write"]["status"] == "blocked"
+    assert any("approved governance weight packs cannot be modified" in error for error in report["errors"])
+
+
+def test_model_governance_pack_parser_accepts_flags():
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "model",
+            "governance-pack",
+            "--governance",
+            "D:\\ChatP2PData\\model-governance.json",
+            "--registry",
+            "D:\\ChatP2PData\\model-registry.json",
+            "--model-id",
+            "qwen2.5-7b-instruct",
+            "--out",
+            "D:\\ChatP2PData\\model-governance-pack.json",
+            "--pack-id",
+            "qwen2_5_7b_instruct_governance_pack_v0",
+            "--status",
+            "approved",
+            "--promotion-gate",
+            "manual_review_complete",
+            "--write",
+            "--no-backup",
+            "--json",
+        ]
+    )
+
+    assert args.func.__name__ == "model_governance_pack_command"
+    assert args.command == "model"
+    assert args.model_command == "governance-pack"
+    assert args.status == "approved"
+    assert args.write is True
+    assert args.no_backup is True
+    assert args.json is True
+
+
+def _write_qwen_registry(tmp_path, *, hashed=True):
+    registry = default_model_registry()
+    registry["models"].append(
+        {
+            "id": "qwen2.5-7b-instruct",
+            "status": "candidate",
+            "provider": "Qwen",
+            "project": "Qwen2.5-7B-Instruct",
+            "family": "base_chat_model",
+            "variant": "Qwen2.5-7B-Instruct",
+            "license": "Apache-2.0",
+            "license_url": "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct",
+            "source_url": "https://huggingface.co/Qwen/Qwen2.5-7B-Instruct",
+            "parameter_count_b": 7.61,
+            "architecture": "transformer",
+            "context_length_tokens": 131072,
+            "domains": ["general", "coding", "maths"],
+            "runtimes": [
+                {"id": "ollama", "support_status": "candidate", "notes": "local smoke pending"},
+            ],
+            "hardware": {
+                "min_ram_gb": 16,
+                "min_vram_gb": 8,
+                "recommended_capability_tier": "gaming_laptop",
+            },
+            "artifacts": {
+                "manifest_sha256": VALID_SHA_A if hashed else "TBD",
+                "weights_sha256": VALID_SHA_B if hashed else "TBD",
+                "quantization": "q4_k_m" if hashed else "TBD",
+            },
+            "eval_plan": {
+                "required_evaluations": [
+                    "domain_eval",
+                    "regression_eval",
+                    "safety_eval",
+                    "license_review",
+                    "local_smoke",
+                ],
+                "success_criteria": {
+                    "minimum_domain_pass_rate": 0.7,
+                    "no_known_license_blocker": True,
+                    "local_chat_smoke_passes": True,
+                },
+                "completed_evaluations": [],
+            },
+            "governance": {
+                "proposal_id": None,
+                "review_status": "not_submitted",
+                "rollback_plan": None,
+                "approved_by": [],
+            },
+        }
+    )
+    registry_path = tmp_path / "model-registry.json"
+    registry_path.write_text(json.dumps(registry, indent=2, sort_keys=True), encoding="utf-8")
+    return registry_path
