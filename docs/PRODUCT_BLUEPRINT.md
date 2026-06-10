@@ -140,6 +140,8 @@ Model Release Bundle V0 makes the final review auditable before approval. `chatp
 
 Model Release Sequence V0 makes the release pipeline navigable. `chatp2p model release-sequence` inspects a candidate-pack folder, reruns release-check, detects which evidence reports exist, and returns the next safe no-write command plus whether a reviewed write flag will eventually be needed.
 
+Model Release Status V0 makes that pipeline visible to the operator loop. `chatp2p model release-status` summarizes candidate-pack, release-check gates, runtime/artifact/eval/governance evidence, bundle readiness, promotion readiness, and the next safe action, then Operator Console can display the report without running model mutations.
+
 Model Release Promote V0 is the deliberate approval command after a passing release check. `chatp2p model release-promote` consumes a release-check report, reruns the check against current files to avoid stale promotion, previews by default, and requires `--write --confirm-release-ready` before setting the model status to `approved`.
 
 ## Future Lane: ISP Edge / Broadband Bundle

@@ -45,6 +45,7 @@ class OperatorDailyCheckConfig:
     stale_report_root: Path | None = None
     stale_report_days: float = 2.0
     stale_report_max_items: int = 50
+    model_release_status_path: Path | None = None
 
 
 def run_operator_daily_check(config: OperatorDailyCheckConfig) -> dict[str, Any]:
@@ -84,6 +85,7 @@ def run_operator_daily_check(config: OperatorDailyCheckConfig) -> dict[str, Any]
             stale_report_days=config.stale_report_days,
             stale_report_max_items=config.stale_report_max_items,
             daily_check_dir=out_dir,
+            model_release_status_path=config.model_release_status_path,
         )
     )
     summary = _daily_summary(
@@ -115,6 +117,7 @@ def run_operator_daily_check(config: OperatorDailyCheckConfig) -> dict[str, Any]
             "include_deterministic_smoke": config.include_deterministic_smoke,
             "skip_network_checks": config.skip_network_checks,
             "expected_public_revision": config.expected_public_revision,
+            "model_release_status_path": str(config.model_release_status_path) if config.model_release_status_path else None,
         },
         "summary": summary,
         "steps": {
@@ -122,6 +125,7 @@ def run_operator_daily_check(config: OperatorDailyCheckConfig) -> dict[str, Any]
             "reliability_refresh": reliability_refresh,
             "operator_console": _console_step_summary(console),
             "self_heal": _self_heal_step_summary(self_heal),
+            "model_release": _model_release_step_summary(console.get("model_release") if isinstance(console, dict) else {}),
         },
         "artifacts": {
             "json": str(json_path),
@@ -184,6 +188,7 @@ def format_operator_daily_check_markdown(report: dict[str, Any]) -> str:
         ("reliability_refresh", "Reliability refresh"),
         ("operator_console", "Operator console"),
         ("self_heal", "Self-heal"),
+        ("model_release", "Model release"),
     ):
         step = steps.get(key, {})
         lines.append(f"| {label} | {step.get('status', 'unknown')} | {step.get('message', '')} |")
@@ -372,6 +377,26 @@ def _self_heal_step_summary(report: dict[str, Any]) -> dict[str, Any]:
         "message": f"{report.get('repairable_issue_count', 0)} repairable issue(s).",
         "repairable_issue_count": report.get("repairable_issue_count"),
         "top_self_heal_action": report.get("top_self_heal_action"),
+        "report_path": report.get("path"),
+    }
+
+
+def _model_release_step_summary(report: dict[str, Any]) -> dict[str, Any]:
+    if not report or not report.get("configured"):
+        return {
+            "ok": True,
+            "status": "not_configured",
+            "message": "Model release status report was not configured.",
+            "pipeline_stage": None,
+            "recommended_next_action": None,
+            "report_path": None,
+        }
+    return {
+        "ok": report.get("status") != "fail",
+        "status": report.get("status"),
+        "message": str(report.get("recommended_next_action") or ""),
+        "pipeline_stage": report.get("pipeline_stage"),
+        "recommended_next_action": report.get("recommended_next_action"),
         "report_path": report.get("path"),
     }
 

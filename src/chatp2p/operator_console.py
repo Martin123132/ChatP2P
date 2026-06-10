@@ -73,6 +73,7 @@ class OperatorConsoleConfig:
     daily_check_dir: Path | None = None
     daily_check_task_name: str | None = DEFAULT_DAILY_CHECK_TASK_NAME
     query_daily_check_task: bool = True
+    model_release_status_path: Path | None = None
 
 
 def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
@@ -138,6 +139,11 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
         primary=primary,
         backup=backup,
     )
+    model_release = _model_release_status_summary(
+        config.model_release_status_path,
+        now=now,
+        freshness_seconds=config.freshness_seconds,
+    )
     summary = _operator_summary(
         primary=primary,
         backup=backup,
@@ -146,6 +152,7 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
         partner_autopilot=partner_autopilot,
         daily_check=daily_check,
         software=software,
+        model_release=model_release,
         skip_network_checks=config.skip_network_checks,
     )
 
@@ -202,6 +209,7 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
             "daily_check_dir": str(config.daily_check_dir) if config.daily_check_dir else None,
             "daily_check_task_name": config.daily_check_task_name,
             "query_daily_check_task": config.query_daily_check_task,
+            "model_release_status_path": str(config.model_release_status_path) if config.model_release_status_path else None,
         },
         "summary": summary,
         "local": local,
@@ -212,6 +220,7 @@ def run_operator_console(config: OperatorConsoleConfig) -> dict[str, Any]:
         "reliability": reliability,
         "privacy_scan": _privacy_summary(privacy_scan),
         "software": software,
+        "model_release": model_release,
         "partner_autopilot": partner_autopilot,
         "daily_check_automation": daily_check,
         "action_runner": {
@@ -259,6 +268,7 @@ def format_operator_console_summary(report: dict[str, Any]) -> str:
     daily_check = report.get("daily_check_automation") or {}
     self_heal = report.get("self_heal") or {}
     software = report.get("software") or {}
+    model_release = report.get("model_release") or {}
     lines = [
         f"ChatP2P operator console: {str(report.get('status', 'unknown')).upper()}",
         f"Can continue without partner: {_yes_no(summary.get('can_continue_without_partner'))}",
@@ -268,6 +278,7 @@ def format_operator_console_summary(report: dict[str, Any]) -> str:
         f"Daily check automation: {daily_check.get('status', 'unknown')}",
         f"Self-heal: {self_heal.get('status', 'missing')} issues={self_heal.get('repairable_issue_count', 0)}",
         f"Software sync: {software.get('status', 'unknown')} expected={_short_revision(software.get('expected_public_revision'))}",
+        f"Model release: {model_release.get('status', 'not_configured')} stage={model_release.get('pipeline_stage', 'unknown')}",
         f"Primary lane: {_lane_brief((report.get('lanes') or {}).get('primary', {}))}",
         f"Backup lane: {_lane_brief((report.get('lanes') or {}).get('backup', {}))}",
         f"Privacy scan: {str((report.get('privacy_scan') or {}).get('status', 'unknown')).upper()}",
@@ -294,6 +305,7 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
     action_runner = report.get("action_runner") or {}
     self_heal = report.get("self_heal") or {}
     software = report.get("software") or {}
+    model_release = report.get("model_release") or {}
     top_action = action_queue.get("next_action") or {}
     next_runner = action_runner.get("next_action") or {}
     last_action_run = action_runner.get("last_run") or {}
@@ -309,6 +321,7 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
         f"- Daily check automation: `{daily_check.get('status', 'unknown')}`",
         f"- Self-heal: `{self_heal.get('status', 'missing')}` ({self_heal.get('repairable_issue_count', 0)} repairable issue(s))",
         f"- Software sync: `{software.get('status', 'unknown')}`",
+        f"- Model release: `{model_release.get('status', 'not_configured')}` stage=`{model_release.get('pipeline_stage', 'unknown')}`",
         f"- Last action run: `{last_action_run.get('status', 'missing')}`",
         f"- Generated at: `{report.get('generated_at')}`",
         "",
@@ -371,6 +384,7 @@ def format_operator_console_markdown(report: dict[str, Any]) -> str:
             + " |"
         )
     lines.extend(_software_sync_markdown_section(software))
+    lines.extend(_model_release_markdown_section(model_release))
     lines.extend(
         [
             "",
@@ -523,6 +537,7 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
     action_runner = report.get("action_runner") or {}
     self_heal = report.get("self_heal") or {}
     software = report.get("software") or {}
+    model_release = report.get("model_release") or {}
     top_action = action_queue.get("next_action") or {}
     status = str(report.get("status", "unknown"))
     status_class = "ok" if status == "pass" else ("warn" if status == "warn" else "fail")
@@ -673,6 +688,10 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
           <p class="value">{html.escape(str(software.get("status", "unknown")).upper())}</p>
         </div>
         <div class="panel">
+          <p class="label">Model release</p>
+          <p class="value">{html.escape(str(model_release.get("status", "not_configured")).upper())}</p>
+        </div>
+        <div class="panel">
       <p class="label">Generated</p>
           <p class="value">{html.escape(str(report.get("generated_at", "-")))}</p>
         </div>
@@ -702,6 +721,10 @@ def format_operator_console_html(report: dict[str, Any], markdown: str | None = 
     <section>
       <h2>Software Sync</h2>
       {_software_sync_table(software)}
+    </section>
+    <section>
+      <h2>Model Release</h2>
+      {_model_release_table(model_release)}
     </section>
     <section>
       <h2>Lanes</h2>
@@ -1392,6 +1415,84 @@ def _daily_check_automation_status(report: dict[str, Any], task: dict[str, Any])
     return "warn"
 
 
+def _model_release_status_summary(
+    path: Path | None,
+    *,
+    now: datetime,
+    freshness_seconds: float,
+) -> dict[str, Any]:
+    if path is None:
+        return {
+            "configured": False,
+            "status": "not_configured",
+            "ok": None,
+            "path": None,
+            "fresh": None,
+            "pipeline_stage": None,
+            "recommended_next_action": None,
+        }
+    resolved = path.expanduser().resolve()
+    if not resolved.exists():
+        return {
+            "configured": True,
+            "status": "missing",
+            "ok": False,
+            "path": str(resolved),
+            "exists": False,
+            "fresh": False,
+            "pipeline_stage": None,
+            "recommended_next_action": None,
+        }
+    try:
+        data = read_json_file(resolved, description="model release status report")
+    except (OSError, ValueError) as exc:
+        return {
+            "configured": True,
+            "status": "fail",
+            "ok": False,
+            "path": str(resolved),
+            "exists": True,
+            "fresh": False,
+            "error": _error_message(exc),
+            "pipeline_stage": None,
+            "recommended_next_action": None,
+        }
+    if not isinstance(data, dict):
+        return {
+            "configured": True,
+            "status": "fail",
+            "ok": False,
+            "path": str(resolved),
+            "exists": True,
+            "fresh": False,
+            "error": "model release status report is not a JSON object",
+            "pipeline_stage": None,
+            "recommended_next_action": None,
+        }
+    generated_at = data.get("generated_at")
+    age_seconds = _age_seconds(generated_at, now=now)
+    summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+    return {
+        "configured": True,
+        "status": data.get("status", "unknown"),
+        "ok": data.get("ok") if isinstance(data.get("ok"), bool) else None,
+        "path": str(resolved),
+        "exists": True,
+        "schema": data.get("schema"),
+        "generated_at": generated_at,
+        "age_seconds": age_seconds,
+        "fresh": age_seconds is not None and age_seconds <= freshness_seconds,
+        "model_id": summary.get("model_id"),
+        "pipeline_stage": summary.get("pipeline_stage"),
+        "release_ready": summary.get("release_ready"),
+        "blocked_gate_ids": summary.get("blocked_gate_ids") if isinstance(summary.get("blocked_gate_ids"), list) else [],
+        "next_action_id": summary.get("next_action_id"),
+        "recommended_next_action": summary.get("recommended_next_action"),
+        "write_flag_required_after_review": summary.get("write_flag_required_after_review"),
+        "ready_for_promotion_review": summary.get("ready_for_promotion_review"),
+    }
+
+
 def _action_run_report_summary(path: Path, *, now: datetime, freshness_seconds: float) -> dict[str, Any]:
     resolved = path.expanduser().resolve()
     if not resolved.exists():
@@ -1564,6 +1665,7 @@ def _history_entry(report: dict[str, Any]) -> dict[str, Any]:
     daily_check = report.get("daily_check_automation") or {}
     action_runner = report.get("action_runner") or {}
     last_action_run = action_runner.get("last_run") or {}
+    model_release = report.get("model_release") or {}
     return {
         "generated_at": report.get("generated_at"),
         "status": report.get("status"),
@@ -1575,6 +1677,9 @@ def _history_entry(report: dict[str, Any]) -> dict[str, Any]:
         "privacy_findings": privacy.get("finding_count"),
         "daily_check_status": daily_check.get("status"),
         "daily_check_report_status": (daily_check.get("report") or {}).get("status"),
+        "model_release_status": model_release.get("status"),
+        "model_release_pipeline_stage": model_release.get("pipeline_stage"),
+        "model_release_next_action": model_release.get("recommended_next_action"),
         "action_run_status": last_action_run.get("status"),
         "action_run_action_id": last_action_run.get("action_id"),
         "stale_report_candidates": stale_reports.get("candidate_count"),
@@ -1594,6 +1699,9 @@ def _history_changes(previous: dict[str, Any] | None, current: dict[str, Any]) -
         "privacy_findings": "privacy_findings",
         "daily_check_status": "daily_check_status",
         "daily_check_report_status": "daily_check_report_status",
+        "model_release_status": "model_release_status",
+        "model_release_pipeline_stage": "model_release_pipeline_stage",
+        "model_release_next_action": "model_release_next_action",
         "action_run_status": "action_run_status",
         "action_run_action_id": "action_run_action_id",
         "stale_report_candidates": "stale_report_candidates",
@@ -1717,6 +1825,7 @@ def _operator_summary(
     partner_autopilot: dict[str, Any],
     daily_check: dict[str, Any],
     software: dict[str, Any],
+    model_release: dict[str, Any],
     skip_network_checks: bool,
 ) -> dict[str, Any]:
     primary_ready = bool(primary.get("ready"))
@@ -1749,6 +1858,10 @@ def _operator_summary(
         warnings.append("one or more live nodes report a dirty source checkout")
     if software.get("has_local_dirty_checkout"):
         warnings.append("local public repo checkout has uncommitted changes")
+    if model_release.get("configured") and model_release.get("status") in {"missing", "fail"}:
+        warnings.append(f"model release status report is {model_release.get('status')}")
+    elif model_release.get("configured") and model_release.get("fresh") is False:
+        warnings.append("model release status report is stale")
     if not backup.get("configured"):
         warnings.append("backup invite is not configured")
     if not privacy_ok:
@@ -1767,6 +1880,9 @@ def _operator_summary(
         "primary_ready": primary_ready,
         "backup_ready": backup_ready,
         "privacy_ok": privacy_ok,
+        "model_release_status": model_release.get("status"),
+        "model_release_pipeline_stage": model_release.get("pipeline_stage"),
+        "model_release_next_action": model_release.get("recommended_next_action"),
         "reliability_can_continue_without_partner": reliability_can_continue,
         "can_continue_without_partner": can_continue,
         "recommended_next_action": _recommended_next_action(
@@ -1936,6 +2052,47 @@ def _software_sync_table(software: dict[str, Any]) -> str:
         ("Behind/different live nodes", software.get("behind_live_nodes", 0)),
         ("Unknown live nodes", software.get("unknown_live_nodes", 0)),
         ("Dirty live nodes", software.get("dirty_live_nodes", 0)),
+    ]
+    body = "\n".join(
+        "<tr>"
+        f"<th>{html.escape(str(label))}</th>"
+        f"<td>{html.escape(str(value))}</td>"
+        "</tr>"
+        for label, value in rows
+    )
+    return f"<table><tbody>{body}</tbody></table>"
+
+
+def _model_release_markdown_section(model_release: dict[str, Any]) -> list[str]:
+    lines = [
+        "",
+        "## Model Release",
+        "",
+        f"- Status: `{model_release.get('status', 'not_configured')}`",
+        f"- Model: `{model_release.get('model_id') or 'unknown'}`",
+        f"- Pipeline stage: `{model_release.get('pipeline_stage') or 'unknown'}`",
+        f"- Release ready: `{model_release.get('release_ready')}`",
+        f"- Next action: `{model_release.get('recommended_next_action') or 'not_configured'}`",
+        f"- Report fresh: `{model_release.get('fresh')}`",
+        f"- Report path: `{model_release.get('path')}`",
+    ]
+    blocked = model_release.get("blocked_gate_ids") if isinstance(model_release.get("blocked_gate_ids"), list) else []
+    if blocked:
+        lines.append(f"- Blocked gates: `{', '.join(str(item) for item in blocked)}`")
+    return lines
+
+
+def _model_release_table(model_release: dict[str, Any]) -> str:
+    blocked = model_release.get("blocked_gate_ids") if isinstance(model_release.get("blocked_gate_ids"), list) else []
+    rows = [
+        ("Status", model_release.get("status", "not_configured")),
+        ("Model", model_release.get("model_id") or "unknown"),
+        ("Pipeline stage", model_release.get("pipeline_stage") or "unknown"),
+        ("Release ready", _yes_no(model_release.get("release_ready"))),
+        ("Next action", model_release.get("recommended_next_action") or "not_configured"),
+        ("Blocked gates", ", ".join(str(item) for item in blocked) or "none"),
+        ("Report fresh", _yes_no(model_release.get("fresh"))),
+        ("Report path", model_release.get("path") or "-"),
     ]
     body = "\n".join(
         "<tr>"

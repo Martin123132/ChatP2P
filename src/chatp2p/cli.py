@@ -160,6 +160,11 @@ from .model_release_sequence import (
     format_model_release_sequence_summary,
     run_model_release_sequence,
 )
+from .model_release_status import (
+    ModelReleaseStatusConfig,
+    format_model_release_status_summary,
+    run_model_release_status,
+)
 from .model_runtime import (
     ModelRuntimeAttachConfig,
     ModelRuntimeCheckConfig,
@@ -838,6 +843,35 @@ def model_release_sequence_command(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def model_release_status_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_release_status(
+            ModelReleaseStatusConfig(
+                pack_dir=Path(args.pack),
+                governance_path=Path(args.governance),
+                out_dir=Path(args.out),
+                model_id=args.model_id,
+                runtime_report_path=Path(args.runtime_report) if args.runtime_report else None,
+                artifact_report_path=Path(args.artifact_report) if args.artifact_report else None,
+                eval_report_path=Path(args.eval_report) if args.eval_report else None,
+                governance_pack_report_path=Path(args.governance_pack_report) if args.governance_pack_report else None,
+                governance_review_report_path=Path(args.governance_review_report)
+                if args.governance_review_report
+                else None,
+                bundle_report_path=Path(args.bundle_report) if args.bundle_report else None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_release_status_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
 def model_runtime_check_command(args: argparse.Namespace) -> None:
     try:
         report = run_model_runtime_check(
@@ -1318,6 +1352,7 @@ def operator_console_command(args: argparse.Namespace) -> None:
                 daily_check_dir=Path(args.daily_check_dir) if args.daily_check_dir else None,
                 daily_check_task_name=args.daily_check_task_name,
                 query_daily_check_task=not args.skip_daily_check_task_query,
+                model_release_status_path=Path(args.model_release_status) if args.model_release_status else None,
             )
         )
     except (OSError, ValueError) as exc:
@@ -1360,6 +1395,7 @@ def operator_daily_check_command(args: argparse.Namespace) -> None:
                 stale_report_root=Path(args.stale_report_root) if args.stale_report_root else None,
                 stale_report_days=args.stale_report_days,
                 stale_report_max_items=args.stale_report_max_items,
+                model_release_status_path=Path(args.model_release_status) if args.model_release_status else None,
             )
         )
     except (OSError, ValueError) as exc:
@@ -4169,6 +4205,51 @@ def build_parser() -> argparse.ArgumentParser:
     model_release_sequence_parser.add_argument("--json", action="store_true", help="Print the full JSON sequence report")
     model_release_sequence_parser.set_defaults(func=model_release_sequence_command)
 
+    model_release_status_parser = model_subcommands.add_parser(
+        "release-status",
+        help="Summarize the model release pipeline without approving or editing registries",
+    )
+    model_release_status_parser.add_argument(
+        "--pack",
+        default=".mesh/model-candidate-pack",
+        help="Candidate pack directory containing staging-model-registry.json",
+    )
+    model_release_status_parser.add_argument(
+        "--governance",
+        default=".mesh/model-governance.json",
+        help="Path to the model governance registry JSON",
+    )
+    model_release_status_parser.add_argument(
+        "--out",
+        default=".mesh/model-release-status",
+        help="Output directory for model-release-status.json and .md",
+    )
+    model_release_status_parser.add_argument(
+        "--model-id",
+        default=None,
+        help="Model id to inspect; defaults to selected_model_id from the candidate pack report",
+    )
+    model_release_status_parser.add_argument("--runtime-report", default=None, help="Optional model-runtime-check JSON")
+    model_release_status_parser.add_argument(
+        "--artifact-report",
+        default=None,
+        help="Optional model-artifact-manifest or artifact-attach JSON",
+    )
+    model_release_status_parser.add_argument("--eval-report", default=None, help="Optional model-eval JSON")
+    model_release_status_parser.add_argument(
+        "--governance-pack-report",
+        default=None,
+        help="Optional model-governance-pack JSON",
+    )
+    model_release_status_parser.add_argument(
+        "--governance-review-report",
+        default=None,
+        help="Optional model-governance-review JSON",
+    )
+    model_release_status_parser.add_argument("--bundle-report", default=None, help="Optional model-release-bundle JSON")
+    model_release_status_parser.add_argument("--json", action="store_true", help="Print the full JSON status report")
+    model_release_status_parser.set_defaults(func=model_release_status_command)
+
     model_runtime_check_parser = model_subcommands.add_parser(
         "runtime-check",
         help="Verify a candidate against a local runtime without approving it",
@@ -5508,6 +5589,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip querying Windows Scheduled Tasks for the daily check task",
     )
+    operator_console_parser.add_argument(
+        "--model-release-status",
+        default=None,
+        help="Optional model-release-status JSON to summarize in the operator console",
+    )
     operator_console_parser.add_argument("--json", action="store_true", help="Print the full JSON report")
     operator_console_parser.set_defaults(func=operator_console_command)
 
@@ -5630,6 +5716,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=50,
         type=int,
         help="Maximum stale report candidates to include",
+    )
+    operator_daily_check_parser.add_argument(
+        "--model-release-status",
+        default=None,
+        help="Optional model-release-status JSON to summarize in the daily check",
     )
     operator_daily_check_parser.add_argument("--json", action="store_true", help="Print the full JSON report")
     operator_daily_check_parser.set_defaults(func=operator_daily_check_command)

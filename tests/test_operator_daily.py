@@ -129,6 +129,8 @@ def test_daily_check_cli_parses(tmp_path):
             str(tmp_path / "console"),
             "--expected-public-revision",
             "abc123",
+            "--model-release-status",
+            str(tmp_path / "model-release-status.json"),
             "--refresh-reliability-pack",
             "--include-deterministic-smoke",
             "--json",
@@ -140,6 +142,7 @@ def test_daily_check_cli_parses(tmp_path):
     assert args.include_deterministic_smoke is True
     assert args.console_out == str(tmp_path / "console")
     assert args.expected_public_revision == "abc123"
+    assert args.model_release_status == str(tmp_path / "model-release-status.json")
 
 
 def _privacy(*, ok):

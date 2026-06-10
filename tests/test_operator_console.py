@@ -403,6 +403,59 @@ def test_operator_console_reports_daily_check_automation(monkeypatch, tmp_path):
     assert "Daily check automation" in html_report
 
 
+def test_operator_console_reports_model_release_status(tmp_path):
+    repo = _clean_repo(tmp_path)
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    invite_path = private_dir / "primary-alpha-invite.json"
+    write_alpha_invite(
+        invite_path,
+        AlphaInvite.create(coordinator="http://127.0.0.1:8765", admission_token="secret-token-123456"),
+    )
+    reliability_dir = tmp_path / "reliability-pack"
+    reliability_dir.mkdir()
+    _write_reliability_summary(reliability_dir, can_continue=True)
+    status_path = tmp_path / "model-release-status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "schema": "chatp2p.model-release-status-report.v1",
+                "ok": True,
+                "status": "warn",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "summary": {
+                    "model_id": "qwen2.5-7b-instruct",
+                    "pipeline_stage": "runtime_check_needed",
+                    "release_ready": False,
+                    "blocked_gate_ids": ["runtime"],
+                    "next_action_id": "runtime_check",
+                    "recommended_next_action": "run_model_runtime_check",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = run_operator_console(
+        OperatorConsoleConfig(
+            repo=repo,
+            home=tmp_path / ".mesh",
+            primary_invite_path=invite_path,
+            reliability_dir=reliability_dir,
+            out_dir=tmp_path / "operator-console",
+            model_release_status_path=status_path,
+            skip_network_checks=True,
+        )
+    )
+
+    assert report["model_release"]["status"] == "warn"
+    assert report["model_release"]["pipeline_stage"] == "runtime_check_needed"
+    assert report["summary"]["model_release_next_action"] == "run_model_runtime_check"
+    html_report = Path(report["artifacts"]["html"]).read_text(encoding="utf-8")
+    assert "Model Release" in html_report
+    assert "runtime_check_needed" in html_report
+
+
 def test_operator_console_reports_last_action_run(tmp_path):
     repo = _clean_repo(tmp_path)
     private_dir = tmp_path / "private"
@@ -608,6 +661,8 @@ def test_operator_console_cli_parses(tmp_path):
             "--daily-check-task-name",
             "ChatP2P Daily Check Test",
             "--skip-daily-check-task-query",
+            "--model-release-status",
+            str(tmp_path / "model-release-status.json"),
             "--json",
         ]
     )
@@ -622,6 +677,7 @@ def test_operator_console_cli_parses(tmp_path):
     assert args.daily_check_dir == str(tmp_path / "daily-check")
     assert args.daily_check_task_name == "ChatP2P Daily Check Test"
     assert args.skip_daily_check_task_query is True
+    assert args.model_release_status == str(tmp_path / "model-release-status.json")
 
 
 def _clean_repo(tmp_path):

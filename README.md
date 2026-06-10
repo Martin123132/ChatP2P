@@ -823,6 +823,8 @@ Model Release Bundle V0 turns the release evidence into one operator-readable do
 
 Model Release Sequence V0 is the operator planner for the candidate-pack folder. `chatp2p model release-sequence` inspects the staging registry and known evidence reports, reruns release-check, writes JSON/Markdown, and returns the next safe command to run. Generated commands are dry-run/no-write by default; when a registry write is eventually needed the report says so explicitly.
 
+Model Release Status V0 is the at-a-glance pipeline view. `chatp2p model release-status` reruns the sequence/check flow, summarizes candidate-pack, runtime, artifact, eval, governance, bundle, and promotion readiness, then writes JSON/Markdown for Operator Console to display. It is read-only and never approves or edits registries.
+
 Model Release Promote V0 is the explicit approval step after a passing release-check report. `chatp2p model release-promote` reruns release-check against the current registry/governance files, previews by default, and only writes `status: approved` when both `--write` and `--confirm-release-ready` are supplied.
 
 ```powershell
@@ -993,6 +995,22 @@ python -m chatp2p.cli model release-sequence `
 ```
 
 Run sequence whenever you are unsure what the next model-release command should be. It writes a planner report only.
+
+```powershell
+python -m chatp2p.cli model release-status `
+  --pack D:\ChatP2PData\model-candidate-pack `
+  --governance D:\ChatP2PData\model-governance.json `
+  --out D:\ChatP2PData\model-release-status `
+  --runtime-report D:\ChatP2PData\model-runtime-check\model-runtime-check.json `
+  --artifact-report D:\ChatP2PData\model-artifact-manifest\model-artifact-manifest.json `
+  --eval-report D:\ChatP2PData\model-eval\model-eval-report.json `
+  --governance-pack-report D:\ChatP2PData\model-governance-pack.json `
+  --governance-review-report D:\ChatP2PData\model-governance-review.json `
+  --bundle-report D:\ChatP2PData\model-release-bundle\model-release-bundle.json `
+  --json
+```
+
+Pass `--model-release-status D:\ChatP2PData\model-release-status\model-release-status.json` to `operator console` or `operator daily-check` when you want the static operator report to include model pipeline state.
 
 ```powershell
 python -m chatp2p.cli model release-promote `
