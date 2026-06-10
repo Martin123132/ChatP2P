@@ -16,6 +16,7 @@ from .model_registry import MODEL_REGISTRY_SCHEMA, default_model_registry, valid
 
 
 MODEL_ARTIFACT_MANIFEST_REPORT_SCHEMA = "chatp2p.model-artifact-manifest-report.v1"
+MODEL_ARTIFACT_ATTACH_REPORT_SCHEMA = "chatp2p.model-artifact-attach-report.v1"
 
 _SHA256_RE = re.compile(r"^[A-Fa-f0-9]{64}$")
 _SENSITIVE_PATTERNS: dict[str, re.Pattern[str]] = {
@@ -42,6 +43,15 @@ class ModelArtifactManifestConfig:
     weights_sha256: str | None = None
     quantization: str | None = None
     source_url: str | None = None
+
+
+@dataclass(frozen=True)
+class ModelArtifactAttachConfig:
+    registry_path: Path = Path(".mesh/model-registry.json")
+    artifact_report_path: Path = Path(".mesh/model-artifact-manifest/model-artifact-manifest.json")
+    out_path: Path | None = None
+    write: bool = False
+    backup: bool = True
 
 
 def run_model_artifact_manifest(config: ModelArtifactManifestConfig) -> dict[str, Any]:
@@ -142,6 +152,119 @@ def run_model_artifact_manifest(config: ModelArtifactManifestConfig) -> dict[str
     return report
 
 
+def run_model_artifact_attach(config: ModelArtifactAttachConfig) -> dict[str, Any]:
+    """Attach artifact hash evidence to a model registry without approving the model."""
+
+    started_at = time.time()
+    registry_path = config.registry_path.expanduser().resolve()
+    artifact_report_path = config.artifact_report_path.expanduser().resolve()
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    registry = read_json_file(registry_path, description="model registry")
+    if not isinstance(registry, dict):
+        raise ValueError("model registry must be a JSON object")
+    artifact_report = read_json_file(artifact_report_path, description="model artifact manifest report")
+    if not isinstance(artifact_report, dict):
+        raise ValueError("model artifact manifest report must be a JSON object")
+
+    if registry.get("schema") != MODEL_REGISTRY_SCHEMA:
+        errors.append(f"registry schema must be {MODEL_REGISTRY_SCHEMA}")
+    if artifact_report.get("schema") != MODEL_ARTIFACT_MANIFEST_REPORT_SCHEMA:
+        errors.append(f"artifact report schema must be {MODEL_ARTIFACT_MANIFEST_REPORT_SCHEMA}")
+    if artifact_report.get("status") == "fail" or artifact_report.get("errors"):
+        errors.append("artifact manifest report has failures; rerun artifact-manifest before attaching evidence")
+
+    model_id = _artifact_report_model_id(artifact_report)
+    if not model_id:
+        errors.append("artifact manifest report does not identify a model id")
+    model = _find_model(registry, model_id) if model_id else None
+    if model_id and model is None:
+        errors.append(f"model_id not found in registry: {model_id}")
+    if isinstance(model, dict) and model.get("status") == "approved":
+        errors.append("approved model entries cannot be modified by attach-artifacts")
+
+    artifact_values = _artifact_values_from_report(artifact_report)
+    if not artifact_values["manifest_sha256"]:
+        errors.append("artifact manifest report is missing manifest_sha256")
+    if not artifact_values["weights_sha256"]:
+        errors.append("artifact manifest report is missing weights_sha256")
+    if not artifact_values["quantization"]:
+        errors.append("artifact manifest report is missing quantization")
+
+    before_status = _safe_text(model.get("status")) if isinstance(model, dict) else None
+    updated_registry = json.loads(json.dumps(registry))
+    updated_model = _find_model(updated_registry, model_id) if model_id else None
+    changes: list[dict[str, Any]] = []
+
+    if not errors and isinstance(updated_model, dict):
+        changes = _apply_artifacts_to_model(updated_model, artifact_values)
+
+    after_status = _safe_text(updated_model.get("status")) if isinstance(updated_model, dict) else None
+    if before_status != after_status:
+        errors.append("internal safety error: attach-artifacts attempted to change model status")
+
+    validation = validate_model_registry(updated_registry if not errors else registry)
+    warnings.extend(validation["warnings"])
+    if validation["errors"]:
+        errors.extend(f"updated registry validation failed: {error}" for error in validation["errors"])
+
+    write_result = {"requested": config.write, "status": "dry_run", "registry_path": str(registry_path)}
+    if config.write and not errors:
+        if config.backup:
+            backup_path = registry_path.with_suffix(registry_path.suffix + ".bak")
+            backup_path.write_text(json.dumps(registry, indent=2, sort_keys=True), encoding="utf-8")
+            write_result["backup_path"] = str(backup_path)
+        registry_path.write_text(json.dumps(updated_registry, indent=2, sort_keys=True), encoding="utf-8")
+        write_result["status"] = "written"
+    elif config.write and errors:
+        write_result["status"] = "blocked"
+
+    status = "fail" if errors else ("warn" if warnings else "pass")
+    report: dict[str, Any] = {
+        "schema": MODEL_ARTIFACT_ATTACH_REPORT_SCHEMA,
+        "ok": not errors,
+        "status": status,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(time.time() - started_at, 3),
+        "dry_run": not config.write,
+        "config": {
+            "registry_path": _safe_text(str(registry_path)),
+            "artifact_report_path": _safe_text(str(artifact_report_path)),
+            "out_path": _safe_text(str(config.out_path.expanduser().resolve())) if config.out_path else None,
+            "write": config.write,
+            "backup": config.backup,
+        },
+        "model": {
+            "id": _safe_text(model_id),
+            "status_before": before_status,
+            "status_after": after_status,
+            "approval_status_changed": before_status != after_status,
+        },
+        "summary": {
+            "change_count": len(changes),
+            "artifacts_complete": bool(
+                artifact_values["manifest_sha256"] and artifact_values["weights_sha256"] and artifact_values["quantization"]
+            ),
+            "does_not_approve_model": True,
+            "recommended_next_action": _attach_recommended_next_action(errors=errors, write=config.write),
+        },
+        "artifact_values": _safe_json(artifact_values),
+        "write": write_result,
+        "changes": changes,
+        "registry_validation_summary": validation["summary"],
+        "warnings": warnings,
+        "errors": [_safe_text(error) for error in errors],
+    }
+
+    if config.out_path is not None:
+        out_path = config.out_path.expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+        report["artifacts"] = {"json": str(out_path)}
+    return report
+
+
 def format_model_artifact_manifest_summary(report: dict[str, Any]) -> str:
     summary = report.get("summary") or {}
     lines = [
@@ -151,6 +274,31 @@ def format_model_artifact_manifest_summary(report: dict[str, Any]) -> str:
         f"Manifest hash: {_hash_status(summary.get('manifest_sha256'))}",
         f"Weights hash: {_hash_status(summary.get('weights_sha256'))}",
         f"Quantization: {summary.get('quantization')}",
+        f"Next: {summary.get('recommended_next_action')}",
+    ]
+    if report.get("warnings"):
+        lines.append("Warnings:")
+        lines.extend(f"- {warning}" for warning in report["warnings"])
+    if report.get("errors"):
+        lines.append("Errors:")
+        lines.extend(f"- {error}" for error in report["errors"])
+    if (report.get("artifacts") or {}).get("json"):
+        lines.append(f"Report: {(report.get('artifacts') or {}).get('json')}")
+    return "\n".join(lines)
+
+
+def format_model_artifact_attach_summary(report: dict[str, Any]) -> str:
+    summary = report.get("summary") or {}
+    model = report.get("model") or {}
+    write = report.get("write") or {}
+    lines = [
+        f"Model artifact attach: {str(report.get('status', 'unknown')).upper()}",
+        f"Model: {model.get('id')}",
+        f"Mode: {'dry-run' if report.get('dry_run') else 'write'}",
+        f"Changes: {summary.get('change_count')}",
+        f"Artifacts complete: {summary.get('artifacts_complete')}",
+        f"Model status: {model.get('status_before')} -> {model.get('status_after')}",
+        f"Write: {write.get('status')}",
         f"Next: {summary.get('recommended_next_action')}",
     ]
     if report.get("warnings"):
@@ -203,6 +351,51 @@ def format_model_artifact_manifest_markdown(report: dict[str, Any]) -> str:
         lines.extend(f"- {error}" for error in report["errors"])
     lines.append("")
     return "\n".join(lines)
+
+
+def _artifact_report_model_id(report: dict[str, Any]) -> str | None:
+    config = report.get("config") if isinstance(report.get("config"), dict) else {}
+    model_id = config.get("model_id")
+    if isinstance(model_id, str) and model_id.strip():
+        return model_id.strip()
+    selected = report.get("selected_model") if isinstance(report.get("selected_model"), dict) else {}
+    selected_id = selected.get("id")
+    return selected_id.strip() if isinstance(selected_id, str) and selected_id.strip() else None
+
+
+def _artifact_values_from_report(report: dict[str, Any]) -> dict[str, Any]:
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    manifest_sha = _safe_text(summary.get("manifest_sha256"))
+    weights_sha = _safe_text(summary.get("weights_sha256"))
+    quantization = _safe_text(summary.get("quantization"))
+    return {
+        "manifest_sha256": manifest_sha if _hash_ready(manifest_sha) else None,
+        "weights_sha256": weights_sha if _hash_ready(weights_sha) else None,
+        "quantization": quantization if quantization and quantization != "TBD" else None,
+    }
+
+
+def _apply_artifacts_to_model(model: dict[str, Any], values: dict[str, Any]) -> list[dict[str, Any]]:
+    artifacts = model.setdefault("artifacts", {})
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+        model["artifacts"] = artifacts
+    changes: list[dict[str, Any]] = []
+    for field_name in ("manifest_sha256", "weights_sha256", "quantization"):
+        value = values.get(field_name)
+        if artifacts.get(field_name) == value:
+            continue
+        artifacts[field_name] = value
+        changes.append({"field": f"artifacts.{field_name}", "status": "updated", "value_status": _value_status(value)})
+    return changes
+
+
+def _attach_recommended_next_action(*, errors: list[str], write: bool) -> str:
+    if errors:
+        return "fix_artifact_attach_errors"
+    if not write:
+        return "rerun_attach_artifacts_with_write_after_review"
+    return "run_model_release_check"
 
 
 def _hash_file_role(role: str, path: Path | None, *, errors: list[str]) -> dict[str, Any] | None:
@@ -332,8 +525,35 @@ def _safe_model_view(model: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+def _safe_json(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {_safe_text(key): _safe_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_safe_json(item) for item in value]
+    if isinstance(value, str):
+        return _safe_text(value)
+    return value
+
+
 def _hash_status(value: Any) -> str:
     return "present" if _SHA256_RE.fullmatch(str(value or "")) else "missing"
+
+
+def _hash_ready(value: Any) -> bool:
+    return bool(_SHA256_RE.fullmatch(str(value or "")))
+
+
+def _value_status(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, (int, float)):
+        return "number"
+    text = _safe_text(value) or ""
+    if _hash_ready(text):
+        return "sha256"
+    return "present" if text else "empty"
 
 
 def _safe_text(value: Any) -> str | None:

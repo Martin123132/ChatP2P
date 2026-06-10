@@ -1,10 +1,14 @@
 import hashlib
 import json
+from pathlib import Path
 
 from chatp2p.cli import build_parser
 from chatp2p.model_artifact import (
+    MODEL_ARTIFACT_ATTACH_REPORT_SCHEMA,
     MODEL_ARTIFACT_MANIFEST_REPORT_SCHEMA,
+    ModelArtifactAttachConfig,
     ModelArtifactManifestConfig,
+    run_model_artifact_attach,
     run_model_artifact_manifest,
 )
 from chatp2p.model_registry import default_model_registry
@@ -191,6 +195,129 @@ def test_model_artifact_manifest_parser_accepts_flags():
     assert args.json is True
 
 
+def test_model_artifact_attach_dry_run_preserves_registry(tmp_path):
+    registry_path = _write_qwen_registry(tmp_path)
+    artifact_report_path = _write_complete_artifact_report(tmp_path, registry_path)
+    before = json.loads(registry_path.read_text(encoding="utf-8"))
+
+    report = run_model_artifact_attach(
+        ModelArtifactAttachConfig(
+            registry_path=registry_path,
+            artifact_report_path=artifact_report_path,
+            out_path=tmp_path / "artifact-attach.json",
+        )
+    )
+    after = json.loads(registry_path.read_text(encoding="utf-8"))
+
+    assert report["schema"] == MODEL_ARTIFACT_ATTACH_REPORT_SCHEMA
+    assert report["ok"] is True
+    assert report["dry_run"] is True
+    assert report["summary"]["does_not_approve_model"] is True
+    assert report["summary"]["change_count"] == 3
+    assert report["summary"]["recommended_next_action"] == "rerun_attach_artifacts_with_write_after_review"
+    assert report["model"]["status_before"] == "candidate"
+    assert report["model"]["status_after"] == "candidate"
+    assert before == after
+    assert (tmp_path / "artifact-attach.json").exists()
+
+
+def test_model_artifact_attach_write_updates_artifacts_and_backup(tmp_path):
+    registry_path = _write_qwen_registry(tmp_path)
+    artifact_report_path = _write_complete_artifact_report(tmp_path, registry_path)
+
+    report = run_model_artifact_attach(
+        ModelArtifactAttachConfig(
+            registry_path=registry_path,
+            artifact_report_path=artifact_report_path,
+            out_path=tmp_path / "artifact-attach.json",
+            write=True,
+        )
+    )
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    qwen = registry["models"][-1]
+
+    assert report["ok"] is True
+    assert report["dry_run"] is False
+    assert report["write"]["status"] == "written"
+    assert report["summary"]["recommended_next_action"] == "run_model_release_check"
+    assert qwen["status"] == "candidate"
+    assert qwen["artifacts"]["manifest_sha256"] == VALID_SHA_A
+    assert qwen["artifacts"]["weights_sha256"] == VALID_SHA_B
+    assert qwen["artifacts"]["quantization"] == "q4_k_m"
+    assert (tmp_path / "model-registry.json.bak").exists()
+
+
+def test_model_artifact_attach_blocks_incomplete_artifact_report(tmp_path):
+    registry_path = _write_qwen_registry(tmp_path)
+    artifact_report = run_model_artifact_manifest(
+        ModelArtifactManifestConfig(
+            registry_path=registry_path,
+            model_id="qwen2.5-7b-instruct",
+            out_dir=tmp_path / "artifacts",
+            manifest_sha256=VALID_SHA_A,
+            quantization="q4_k_m",
+        )
+    )
+
+    report = run_model_artifact_attach(
+        ModelArtifactAttachConfig(
+            registry_path=registry_path,
+            artifact_report_path=Path(artifact_report["artifacts"]["json"]),
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["write"]["status"] == "dry_run"
+    assert any("missing weights_sha256" in error for error in report["errors"])
+
+
+def test_model_artifact_attach_refuses_approved_model(tmp_path):
+    registry_path = _write_qwen_registry(tmp_path)
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["models"][-1]["status"] = "approved"
+    registry_path.write_text(json.dumps(registry, indent=2, sort_keys=True), encoding="utf-8")
+    artifact_report_path = _write_complete_artifact_report(tmp_path, registry_path)
+
+    report = run_model_artifact_attach(
+        ModelArtifactAttachConfig(
+            registry_path=registry_path,
+            artifact_report_path=artifact_report_path,
+            write=True,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["write"]["status"] == "blocked"
+    assert any("approved model entries cannot be modified" in error for error in report["errors"])
+
+
+def test_model_artifact_attach_parser_accepts_flags():
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "model",
+            "attach-artifacts",
+            "--registry",
+            "D:\\ChatP2PData\\model-registry.json",
+            "--artifact-report",
+            "D:\\ChatP2PData\\model-artifact-manifest\\model-artifact-manifest.json",
+            "--out",
+            "D:\\ChatP2PData\\model-artifact-attach.json",
+            "--write",
+            "--no-backup",
+            "--json",
+        ]
+    )
+
+    assert args.func.__name__ == "model_artifact_attach_command"
+    assert args.command == "model"
+    assert args.model_command == "attach-artifacts"
+    assert args.write is True
+    assert args.no_backup is True
+    assert args.json is True
+
+
 def _write_qwen_registry(tmp_path):
     registry = default_model_registry()
     registry["models"].append(
@@ -251,3 +378,17 @@ def _write_qwen_registry(tmp_path):
 
 def _sha256_text(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def _write_complete_artifact_report(tmp_path, registry_path):
+    report = run_model_artifact_manifest(
+        ModelArtifactManifestConfig(
+            registry_path=registry_path,
+            model_id="qwen2.5-7b-instruct",
+            out_dir=tmp_path / "artifacts",
+            manifest_sha256=VALID_SHA_A,
+            weights_sha256=VALID_SHA_B,
+            quantization="q4_k_m",
+        )
+    )
+    return Path(report["artifacts"]["json"])

@@ -805,6 +805,8 @@ Model Runtime Check V0 verifies whether a candidate actually runs on a local run
 
 Model Artifact Manifest V0 records exact artifact hash evidence for a candidate. `chatp2p model artifact-manifest` can hash local manifest/weights files or normalize known SHA256 values from a trusted source, records quantization, and writes JSON/Markdown plus a dry-run candidate update preview. It does not download weights, edit registries, or approve the candidate.
 
+Model Artifact Attach V0 closes that hash-evidence loop. `chatp2p model attach-artifacts` reads a reviewed artifact-manifest report, previews the registry artifact field updates by default, and only writes with explicit `--write`. It refuses approved model entries and never changes model status.
+
 Model Candidate Intake V0 adds a safer way to enter real candidate metadata without hand-editing registry JSON. It previews changes by default, requires `--write` to persist them, writes a backup when updating an existing registry, and never permits approval through this path.
 
 Model Eval Harness V0 turns that checklist into repeatable local evidence. The default `fake` mode is deterministic and does not download weights, spend credits, call a partner node, or approve a model. It writes JSON and Markdown evidence for domain, regression, safety, local smoke, and license/source checks so the next real model decision is based on artifacts rather than guesswork.
@@ -861,6 +863,16 @@ python -m chatp2p.cli model artifact-manifest `
   --out D:\ChatP2PData\model-artifact-manifest `
   --json
 ```
+
+```powershell
+python -m chatp2p.cli model attach-artifacts `
+  --registry D:\ChatP2PData\model-candidate-pack\staging-model-registry.json `
+  --artifact-report D:\ChatP2PData\model-artifact-manifest\model-artifact-manifest.json `
+  --out D:\ChatP2PData\model-artifact-attach.json `
+  --json
+```
+
+Add `--write` only after reviewing the attach report. The command writes a registry backup by default and still does not approve the model.
 
 ```powershell
 python -m chatp2p.cli model candidate `

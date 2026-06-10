@@ -101,8 +101,11 @@ from .ollama import DEFAULT_OLLAMA_BASE_URL
 from .jsonio import read_json_file
 from .operator_config import OperatorConfig, write_operator_config
 from .model_artifact import (
+    ModelArtifactAttachConfig,
     ModelArtifactManifestConfig,
+    format_model_artifact_attach_summary,
     format_model_artifact_manifest_summary,
+    run_model_artifact_attach,
     run_model_artifact_manifest,
 )
 from .model_candidate import (
@@ -525,6 +528,28 @@ def model_artifact_manifest_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_model_artifact_manifest_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_artifact_attach_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_artifact_attach(
+            ModelArtifactAttachConfig(
+                registry_path=Path(args.registry),
+                artifact_report_path=Path(args.artifact_report),
+                out_path=Path(args.out) if args.out else None,
+                write=args.write,
+                backup=not args.no_backup,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_artifact_attach_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -3539,6 +3564,34 @@ def build_parser() -> argparse.ArgumentParser:
     model_artifact_manifest_parser.add_argument("--source-url", default=None, help="Optional source URL for the artifacts")
     model_artifact_manifest_parser.add_argument("--json", action="store_true", help="Print the full JSON artifact report")
     model_artifact_manifest_parser.set_defaults(func=model_artifact_manifest_command)
+
+    model_artifact_attach_parser = model_subcommands.add_parser(
+        "attach-artifacts",
+        help="Attach artifact hash evidence to the registry without approving the model",
+    )
+    model_artifact_attach_parser.add_argument(
+        "--registry",
+        default=".mesh/model-registry.json",
+        help="Path to the model registry JSON",
+    )
+    model_artifact_attach_parser.add_argument(
+        "--artifact-report",
+        default=".mesh/model-artifact-manifest/model-artifact-manifest.json",
+        help="Path to model-artifact-manifest.json",
+    )
+    model_artifact_attach_parser.add_argument("--out", default=None, help="Optional JSON attach report path")
+    model_artifact_attach_parser.add_argument(
+        "--write",
+        action="store_true",
+        help="Write artifact hashes into the registry; omitted means dry-run",
+    )
+    model_artifact_attach_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not write a .bak copy of the registry when --write is used",
+    )
+    model_artifact_attach_parser.add_argument("--json", action="store_true", help="Print the full JSON attach report")
+    model_artifact_attach_parser.set_defaults(func=model_artifact_attach_command)
 
     model_eval_parser = model_subcommands.add_parser(
         "eval",
