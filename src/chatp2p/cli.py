@@ -150,6 +150,11 @@ from .model_release import (
     run_model_release_check,
     run_model_release_promote,
 )
+from .model_release_bundle import (
+    ModelReleaseBundleConfig,
+    format_model_release_bundle_summary,
+    run_model_release_bundle,
+)
 from .model_runtime import (
     ModelRuntimeAttachConfig,
     ModelRuntimeCheckConfig,
@@ -769,6 +774,34 @@ def model_release_promote_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_model_release_promote_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_release_bundle_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_release_bundle(
+            ModelReleaseBundleConfig(
+                registry_path=Path(args.registry),
+                governance_path=Path(args.governance),
+                model_id=args.model_id,
+                out_dir=Path(args.out),
+                runtime_report_path=Path(args.runtime_report) if args.runtime_report else None,
+                artifact_report_path=Path(args.artifact_report) if args.artifact_report else None,
+                eval_report_path=Path(args.eval_report) if args.eval_report else None,
+                governance_pack_report_path=Path(args.governance_pack_report) if args.governance_pack_report else None,
+                governance_review_report_path=Path(args.governance_review_report)
+                if args.governance_review_report
+                else None,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_release_bundle_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -4016,6 +4049,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     model_release_promote_parser.add_argument("--json", action="store_true", help="Print the full JSON promote report")
     model_release_promote_parser.set_defaults(func=model_release_promote_command)
+
+    model_release_bundle_parser = model_subcommands.add_parser(
+        "release-bundle",
+        help="Write a read-only release dossier from registry, governance, and evidence reports",
+    )
+    model_release_bundle_parser.add_argument(
+        "--registry",
+        default=".mesh/model-registry.json",
+        help="Path to the base model registry JSON",
+    )
+    model_release_bundle_parser.add_argument(
+        "--governance",
+        default=".mesh/model-governance.json",
+        help="Path to the model governance registry JSON",
+    )
+    model_release_bundle_parser.add_argument(
+        "--model-id",
+        required=True,
+        help="Model id from the registry to bundle",
+    )
+    model_release_bundle_parser.add_argument(
+        "--out",
+        default=".mesh/model-release-bundle",
+        help="Output directory for model-release-bundle.json and .md",
+    )
+    model_release_bundle_parser.add_argument("--runtime-report", default=None, help="Optional model-runtime-check JSON")
+    model_release_bundle_parser.add_argument(
+        "--artifact-report",
+        default=None,
+        help="Optional model-artifact-manifest or artifact-attach JSON",
+    )
+    model_release_bundle_parser.add_argument("--eval-report", default=None, help="Optional model-eval JSON")
+    model_release_bundle_parser.add_argument(
+        "--governance-pack-report",
+        default=None,
+        help="Optional model-governance-pack JSON",
+    )
+    model_release_bundle_parser.add_argument(
+        "--governance-review-report",
+        default=None,
+        help="Optional model-governance-review JSON",
+    )
+    model_release_bundle_parser.add_argument("--json", action="store_true", help="Print the full JSON bundle report")
+    model_release_bundle_parser.set_defaults(func=model_release_bundle_command)
 
     model_runtime_check_parser = model_subcommands.add_parser(
         "runtime-check",

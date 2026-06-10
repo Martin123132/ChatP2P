@@ -819,6 +819,8 @@ Model Eval Harness V0 turns that checklist into repeatable local evidence. The d
 
 Model Release Check V0 is the final read-only gate before a candidate can become the default model. It checks registry evidence, governance review, runtime support, hashes, eval completion, and matching approved weight-pack policy, then reports the exact blocker and next action. It never approves or edits a model.
 
+Model Release Bundle V0 turns the release evidence into one operator-readable dossier. `chatp2p model release-bundle` reruns release-check, summarizes each gate, optionally summarizes runtime/artifact/eval/governance evidence reports, writes JSON/Markdown, and prints the exact dry-run and write promotion commands. It remains read-only.
+
 Model Release Promote V0 is the explicit approval step after a passing release-check report. `chatp2p model release-promote` reruns release-check against the current registry/governance files, previews by default, and only writes `status: approved` when both `--write` and `--confirm-release-ready` are supplied.
 
 ```powershell
@@ -959,6 +961,22 @@ python -m chatp2p.cli model release-check `
   --out D:\ChatP2PData\model-release-check.json `
   --json
 ```
+
+```powershell
+python -m chatp2p.cli model release-bundle `
+  --registry D:\ChatP2PData\model-registry.json `
+  --governance D:\ChatP2PData\model-governance.json `
+  --model-id example-open-8b `
+  --out D:\ChatP2PData\model-release-bundle `
+  --runtime-report D:\ChatP2PData\model-runtime-check\model-runtime-check.json `
+  --artifact-report D:\ChatP2PData\model-artifact-manifest\model-artifact-manifest.json `
+  --eval-report D:\ChatP2PData\model-eval\model-eval-report.json `
+  --governance-pack-report D:\ChatP2PData\model-governance-pack.json `
+  --governance-review-report D:\ChatP2PData\model-governance-review.json `
+  --json
+```
+
+The bundle writes `model-release-bundle.json`, `model-release-bundle.md`, and a fresh nested `model-release-check.json`. It does not approve the model.
 
 ```powershell
 python -m chatp2p.cli model release-promote `
