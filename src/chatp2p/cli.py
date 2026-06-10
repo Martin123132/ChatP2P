@@ -133,6 +133,11 @@ from .model_release import (
     format_model_release_check_summary,
     run_model_release_check,
 )
+from .model_runtime import (
+    ModelRuntimeCheckConfig,
+    format_model_runtime_check_summary,
+    run_model_runtime_check,
+)
 from .model_shortlist import (
     ModelShortlistConfig,
     format_model_shortlist_summary,
@@ -621,6 +626,32 @@ def model_release_check_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_model_release_check_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_runtime_check_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_runtime_check(
+            ModelRuntimeCheckConfig(
+                registry_path=Path(args.registry),
+                model_id=args.model_id,
+                runtime=args.runtime,
+                out_dir=Path(args.out),
+                ollama_model=args.ollama_model,
+                ollama_base_url=args.ollama_base_url,
+                ollama_timeout_seconds=args.ollama_timeout_seconds,
+                prompt=args.prompt,
+                expected_text=args.expected_text,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_runtime_check_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -3639,6 +3670,60 @@ def build_parser() -> argparse.ArgumentParser:
     model_release_check_parser.add_argument("--out", default=None, help="Optional JSON release-check report path")
     model_release_check_parser.add_argument("--json", action="store_true", help="Print the full JSON release-check report")
     model_release_check_parser.set_defaults(func=model_release_check_command)
+
+    model_runtime_check_parser = model_subcommands.add_parser(
+        "runtime-check",
+        help="Verify a candidate against a local runtime without approving it",
+    )
+    model_runtime_check_parser.add_argument(
+        "--registry",
+        default=".mesh/model-registry.json",
+        help="Path to the model registry JSON",
+    )
+    model_runtime_check_parser.add_argument(
+        "--model-id",
+        required=True,
+        help="Model id from the registry to verify",
+    )
+    model_runtime_check_parser.add_argument(
+        "--runtime",
+        choices=["ollama"],
+        default="ollama",
+        help="Runtime to verify",
+    )
+    model_runtime_check_parser.add_argument(
+        "--out",
+        default=".mesh/model-runtime-check",
+        help="Output directory for model-runtime-check.json and .md",
+    )
+    model_runtime_check_parser.add_argument(
+        "--ollama-model",
+        default=None,
+        help="Local Ollama model name; defaults to a best-effort guess from model id",
+    )
+    model_runtime_check_parser.add_argument(
+        "--ollama-base-url",
+        default=DEFAULT_OLLAMA_BASE_URL,
+        help="Local Ollama base URL",
+    )
+    model_runtime_check_parser.add_argument(
+        "--ollama-timeout-seconds",
+        type=float,
+        default=30.0,
+        help="Timeout for Ollama tags and smoke requests",
+    )
+    model_runtime_check_parser.add_argument(
+        "--prompt",
+        default="Reply with exactly: ok",
+        help="Smoke prompt to send when the model is already present",
+    )
+    model_runtime_check_parser.add_argument(
+        "--expected-text",
+        default="ok",
+        help="Text expected in the smoke response",
+    )
+    model_runtime_check_parser.add_argument("--json", action="store_true", help="Print the full JSON runtime report")
+    model_runtime_check_parser.set_defaults(func=model_runtime_check_command)
 
     chat_parser = subcommands.add_parser("chat", help="Local chat product-loop proofs")
     chat_subcommands = chat_parser.add_subparsers(dest="chat_command", required=True)
