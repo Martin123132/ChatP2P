@@ -114,6 +114,8 @@ Base Model Registry V0 creates the approval checklist for the first actual model
 
 Model Shortlist V0 makes first-model research repeatable. `chatp2p model shortlist` compares a small starter set of open-weight candidates against license, size, runtime, scope, and hardware-fit constraints, then writes JSON/Markdown and a dry-run candidate-intake command preview. It is evidence only: no downloads, no registry writes, and no model approval.
 
+Model Candidate Pack V0 makes the next step one command. `chatp2p model candidate-pack` selects the shortlist recommendation by default, creates an isolated staging registry, writes the selected candidate only to that staging copy, runs fake eval, attaches eval evidence, and runs release-check. The live registry is not modified, and the output lists remaining gates such as runtime verification, artifact hashes, governance review, and approved weight-pack policy.
+
 Model Candidate Intake V0 turns model selection into a structured local workflow instead of manual JSON edits. `chatp2p model candidate` can preview or write candidate metadata, runtimes, hardware fit, hashes, domains, and license/source fields. It writes only `candidate` or `proposal` statuses and refuses to modify approved entries, keeping intake separate from governance approval.
 
 Model Eval Harness V0 makes the first eval evidence artifact. `chatp2p model eval` runs a deterministic local harness by default, writes JSON/Markdown reports, checks domain/regression/safety/local-smoke behavior, and records whether license/source evidence is still blocking approval. It never approves a model or edits the registry; the output is evidence to attach to a future model registry update.

@@ -105,6 +105,11 @@ from .model_candidate import (
     format_model_candidate_intake_summary,
     run_model_candidate_intake,
 )
+from .model_candidate_pack import (
+    ModelCandidatePackConfig,
+    format_model_candidate_pack_summary,
+    run_model_candidate_pack,
+)
 from .model_governance import (
     ModelGovernanceConfig,
     format_model_governance_summary,
@@ -571,6 +576,30 @@ def model_candidate_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_model_candidate_intake_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_candidate_pack_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_candidate_pack(
+            ModelCandidatePackConfig(
+                out_dir=Path(args.out),
+                registry_path=Path(args.registry),
+                governance_path=Path(args.governance),
+                model_id=args.model_id,
+                max_parameter_count_b=args.max_parameter_count_b,
+                prefer_license=args.prefer_license,
+                include_noncommercial=args.include_noncommercial,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_candidate_pack_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -3544,6 +3573,49 @@ def build_parser() -> argparse.ArgumentParser:
     )
     model_candidate_parser.add_argument("--json", action="store_true", help="Print the full JSON intake report")
     model_candidate_parser.set_defaults(func=model_candidate_command)
+
+    model_candidate_pack_parser = model_subcommands.add_parser(
+        "candidate-pack",
+        help="Build an isolated evidence pack for a shortlisted base-model candidate",
+    )
+    model_candidate_pack_parser.add_argument(
+        "--out",
+        default=".mesh/model-candidate-pack",
+        help="Output directory for candidate pack reports and staging registry",
+    )
+    model_candidate_pack_parser.add_argument(
+        "--registry",
+        default=".mesh/model-registry.json",
+        help="Live registry path to read as the staging seed; it is not modified",
+    )
+    model_candidate_pack_parser.add_argument(
+        "--governance",
+        default=".mesh/model-governance.json",
+        help="Governance registry used by the release check",
+    )
+    model_candidate_pack_parser.add_argument(
+        "--model-id",
+        default=None,
+        help="Shortlist model id to pack; defaults to the shortlist recommendation",
+    )
+    model_candidate_pack_parser.add_argument(
+        "--max-parameter-count-b",
+        type=float,
+        default=12.0,
+        help="Preferred upper bound for first-pass model size in billions of parameters",
+    )
+    model_candidate_pack_parser.add_argument(
+        "--prefer-license",
+        default="apache-2.0",
+        help="Preferred SPDX-like license id when ranking shortlist candidates",
+    )
+    model_candidate_pack_parser.add_argument(
+        "--include-noncommercial",
+        action="store_true",
+        help="Include noncommercial-only entries if they are added to the shortlist data",
+    )
+    model_candidate_pack_parser.add_argument("--json", action="store_true", help="Print the full JSON candidate pack")
+    model_candidate_pack_parser.set_defaults(func=model_candidate_pack_command)
 
     model_release_check_parser = model_subcommands.add_parser(
         "release-check",

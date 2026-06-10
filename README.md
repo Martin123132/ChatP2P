@@ -799,6 +799,8 @@ Base Model Registry V0 tracks candidate open-weight base models before the netwo
 
 Model Shortlist V0 turns first-model research into a reportable local artifact. It ranks a small starter set of open-weight candidates against license, size, runtime, and scope constraints, then writes JSON and Markdown with the next safe intake command preview. It does not approve, download, or write a registry entry.
 
+Model Candidate Pack V0 turns the shortlist recommendation into an isolated evidence pack. It creates a staging registry inside the output folder, writes the selected candidate only there, runs the fake eval harness, attaches eval evidence to the staging registry, and runs release-check. It leaves the live registry untouched and reports the exact remaining gates before a model could be promoted.
+
 Model Candidate Intake V0 adds a safer way to enter real candidate metadata without hand-editing registry JSON. It previews changes by default, requires `--write` to persist them, writes a backup when updating an existing registry, and never permits approval through this path.
 
 Model Eval Harness V0 turns that checklist into repeatable local evidence. The default `fake` mode is deterministic and does not download weights, spend credits, call a partner node, or approve a model. It writes JSON and Markdown evidence for domain, regression, safety, local smoke, and license/source checks so the next real model decision is based on artifacts rather than guesswork.
@@ -824,6 +826,14 @@ python -m chatp2p.cli model governance `
 ```powershell
 python -m chatp2p.cli model shortlist `
   --out D:\ChatP2PData\model-shortlist `
+  --json
+```
+
+```powershell
+python -m chatp2p.cli model candidate-pack `
+  --out D:\ChatP2PData\model-candidate-pack `
+  --registry D:\ChatP2PData\model-registry.json `
+  --governance D:\ChatP2PData\model-governance.json `
   --json
 ```
 
