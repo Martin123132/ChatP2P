@@ -121,10 +121,13 @@ from .model_candidate_pack import (
 from .model_governance import (
     ModelGovernanceConfig,
     ModelGovernancePackConfig,
+    ModelGovernanceReviewConfig,
     format_model_governance_pack_summary,
+    format_model_governance_review_summary,
     format_model_governance_summary,
     run_model_governance,
     run_model_governance_pack,
+    run_model_governance_review,
 )
 from .model_eval import (
     ModelEvalAttachConfig,
@@ -509,6 +512,32 @@ def model_governance_pack_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_model_governance_pack_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_governance_review_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_governance_review(
+            ModelGovernanceReviewConfig(
+                registry_path=Path(args.registry),
+                model_id=args.model_id,
+                out_path=Path(args.out) if args.out else None,
+                proposal_id=args.proposal_id,
+                review_status=args.review_status,
+                rollback_plan=args.rollback_plan,
+                approved_by=tuple(args.approved_by or ()),
+                write=args.write,
+                backup=not args.no_backup,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_governance_review_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -3568,6 +3597,52 @@ def build_parser() -> argparse.ArgumentParser:
     )
     model_governance_pack_parser.add_argument("--json", action="store_true", help="Print the full JSON pack report")
     model_governance_pack_parser.set_defaults(func=model_governance_pack_command)
+
+    model_governance_review_parser = model_subcommands.add_parser(
+        "governance-review",
+        help="Preview or write model governance review evidence without approving the model",
+    )
+    model_governance_review_parser.add_argument(
+        "--registry",
+        default=".mesh/model-registry.json",
+        help="Path to the model registry JSON",
+    )
+    model_governance_review_parser.add_argument("--model-id", required=True, help="Model id from the model registry")
+    model_governance_review_parser.add_argument("--out", default=None, help="Optional JSON governance-review report path")
+    model_governance_review_parser.add_argument(
+        "--proposal-id",
+        default=None,
+        help="Governance proposal id; defaults to a safe id derived from --model-id",
+    )
+    model_governance_review_parser.add_argument(
+        "--review-status",
+        choices=["not_submitted", "submitted", "approved", "rejected"],
+        default="submitted",
+        help="Governance review state to record; approved requires rollback and approver evidence",
+    )
+    model_governance_review_parser.add_argument(
+        "--rollback-plan",
+        default=None,
+        help="Rollback plan text or reference required for approved reviews",
+    )
+    model_governance_review_parser.add_argument(
+        "--approved-by",
+        action="append",
+        default=[],
+        help="Approver id or role; repeat for multiple approvers",
+    )
+    model_governance_review_parser.add_argument(
+        "--write",
+        action="store_true",
+        help="Write governance review evidence into the model registry; omitted means dry-run",
+    )
+    model_governance_review_parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Do not write a .bak copy of the model registry when --write is used",
+    )
+    model_governance_review_parser.add_argument("--json", action="store_true", help="Print the full JSON review report")
+    model_governance_review_parser.set_defaults(func=model_governance_review_command)
 
     model_shortlist_parser = model_subcommands.add_parser(
         "shortlist",

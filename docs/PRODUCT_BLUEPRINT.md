@@ -124,6 +124,8 @@ Model Artifact Attach V0 connects that evidence to the registry safely. `chatp2p
 
 Model Governance Pack V0 connects candidate hash evidence to model governance without opening the core weights. `chatp2p model governance-pack` creates a proposed non-editable weight-pack record from a candidate's registry artifacts, previews by default, writes only with `--write`, refuses already-approved packs, and keeps model approval as a separate release-check gate.
 
+Model Governance Review V0 records candidate review evidence without turning that into release approval. `chatp2p model governance-review` updates only the model registry governance fields, requires rollback and approver evidence for an approved review, refuses already-approved model entries, and leaves model status unchanged.
+
 Model Candidate Intake V0 turns model selection into a structured local workflow instead of manual JSON edits. `chatp2p model candidate` can preview or write candidate metadata, runtimes, hardware fit, hashes, domains, and license/source fields. It writes only `candidate` or `proposal` statuses and refuses to modify approved entries, keeping intake separate from governance approval.
 
 Model Eval Harness V0 makes the first eval evidence artifact. `chatp2p model eval` runs a deterministic local harness by default, writes JSON/Markdown reports, checks domain/regression/safety/local-smoke behavior, and records whether license/source evidence is still blocking approval. It never approves a model or edits the registry; the output is evidence to attach to a future model registry update.

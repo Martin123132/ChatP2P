@@ -809,6 +809,8 @@ Model Artifact Attach V0 closes that hash-evidence loop. `chatp2p model attach-a
 
 Model Governance Pack V0 turns reviewed candidate hash evidence into a non-editable governance weight-pack record. `chatp2p model governance-pack` reads the model registry and governance registry, previews a proposed pack by default, requires `--write` to persist it, refuses to modify already-approved packs, and still does not approve the model.
 
+Model Governance Review V0 records the review evidence that release-check expects on the model registry entry. `chatp2p model governance-review` previews by default, writes only with `--write`, requires rollback and approver evidence for an approved review, refuses approved model entries, and never changes model status.
+
 Model Candidate Intake V0 adds a safer way to enter real candidate metadata without hand-editing registry JSON. It previews changes by default, requires `--write` to persist them, writes a backup when updating an existing registry, and never permits approval through this path.
 
 Model Eval Harness V0 turns that checklist into repeatable local evidence. The default `fake` mode is deterministic and does not download weights, spend credits, call a partner node, or approve a model. It writes JSON and Markdown evidence for domain, regression, safety, local smoke, and license/source checks so the next real model decision is based on artifacts rather than guesswork.
@@ -886,6 +888,19 @@ python -m chatp2p.cli model governance-pack `
 ```
 
 Add `--write` only after reviewing the governance-pack report. The default pack status is `proposal`; `--status approved` is explicit and still only records governance state, not model approval.
+
+```powershell
+python -m chatp2p.cli model governance-review `
+  --registry D:\ChatP2PData\model-candidate-pack\staging-model-registry.json `
+  --model-id qwen2.5-7b-instruct `
+  --review-status approved `
+  --rollback-plan "restore previous approved model route" `
+  --approved-by domain_steward_placeholder `
+  --out D:\ChatP2PData\model-governance-review.json `
+  --json
+```
+
+Add `--write` only after reviewing the governance-review report. This records review evidence on the candidate entry; it still does not approve the model or edit the governance weight-pack registry.
 
 ```powershell
 python -m chatp2p.cli model candidate `

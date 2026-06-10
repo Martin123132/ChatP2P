@@ -21,6 +21,7 @@ from .model_registry import (
 MODEL_GOVERNANCE_REGISTRY_SCHEMA = "chatp2p.model-governance-registry.v1"
 MODEL_GOVERNANCE_REPORT_SCHEMA = "chatp2p.model-governance-report.v1"
 MODEL_GOVERNANCE_PACK_REPORT_SCHEMA = "chatp2p.model-governance-pack-report.v1"
+MODEL_GOVERNANCE_REVIEW_REPORT_SCHEMA = "chatp2p.model-governance-review-report.v1"
 MODEL_GOVERNANCE_DEFAULT_REGISTRY_ID = "chatp2p-default-model-governance-v0"
 MODEL_GOVERNANCE_REQUIRED_TIERS = {
     "standard_member",
@@ -59,6 +60,19 @@ class ModelGovernancePackConfig:
     pack_id: str | None = None
     status: str = "proposal"
     promotion_gate: str = "model_release_check_and_governance_review"
+    write: bool = False
+    backup: bool = True
+
+
+@dataclass(frozen=True)
+class ModelGovernanceReviewConfig:
+    registry_path: Path = Path(".mesh/model-registry.json")
+    model_id: str = "chatp2p-base-candidate-v0"
+    out_path: Path | None = None
+    proposal_id: str | None = None
+    review_status: str = "submitted"
+    rollback_plan: str | None = None
+    approved_by: tuple[str, ...] = ()
     write: bool = False
     backup: bool = True
 
@@ -402,6 +416,138 @@ def run_model_governance_pack(config: ModelGovernancePackConfig) -> dict[str, An
     return report
 
 
+def run_model_governance_review(config: ModelGovernanceReviewConfig) -> dict[str, Any]:
+    """Preview or write governance review evidence onto a model registry entry."""
+
+    started_at = time.time()
+    registry_path = config.registry_path.expanduser().resolve()
+    warnings: list[str] = []
+    errors: list[str] = []
+    allowed_statuses = {"not_submitted", "submitted", "approved", "rejected"}
+
+    registry, registry_status, load_warnings = _load_model_registry(registry_path)
+    warnings.extend(load_warnings)
+    validation_before = validate_model_registry(registry)
+    warnings.extend(f"model registry: {warning}" for warning in validation_before["warnings"])
+    errors.extend(f"model registry: {error}" for error in validation_before["errors"])
+
+    model = _find_model(registry, config.model_id)
+    if model is None:
+        errors.append(f"model_id not found in registry: {config.model_id}")
+    if isinstance(model, dict) and model.get("status") == "approved":
+        errors.append("approved model entries cannot be modified by governance-review")
+    if config.review_status not in allowed_statuses:
+        errors.append("review status must be not_submitted, submitted, approved, or rejected")
+
+    proposal_id = config.proposal_id or _proposal_id_from_model_id(config.model_id)
+    current_governance = model.get("governance") if isinstance(model, dict) and isinstance(model.get("governance"), dict) else {}
+    approved_by = [item for item in config.approved_by if str(item).strip()]
+    effective_rollback_plan = config.rollback_plan or current_governance.get("rollback_plan")
+    effective_approved_by = approved_by or (
+        current_governance.get("approved_by") if isinstance(current_governance.get("approved_by"), list) else []
+    )
+    if config.review_status == "approved":
+        if not effective_rollback_plan:
+            errors.append("approved governance review requires a rollback plan")
+        if not effective_approved_by:
+            errors.append("approved governance review requires at least one approver")
+
+    updated_registry = json.loads(json.dumps(registry))
+    updated_model = _find_model(updated_registry, config.model_id)
+    before_status = _safe_text(model.get("status")) if isinstance(model, dict) else None
+    changes: list[dict[str, Any]] = []
+    if not errors and isinstance(updated_model, dict):
+        governance = updated_model.get("governance") if isinstance(updated_model.get("governance"), dict) else {}
+        updated_model["governance"] = governance
+        changes.extend(
+            _merge_model_governance(
+                governance,
+                {
+                    "proposal_id": proposal_id,
+                    "review_status": config.review_status,
+                    "rollback_plan": effective_rollback_plan,
+                    "approved_by": effective_approved_by,
+                },
+            )
+        )
+
+    after_model = _find_model(updated_registry, config.model_id)
+    after_status = _safe_text(after_model.get("status")) if isinstance(after_model, dict) else None
+    if before_status != after_status:
+        errors.append("governance-review must not change model status")
+
+    validation_after = validate_model_registry(updated_registry if not errors else registry)
+    warnings.extend(f"updated model registry: {warning}" for warning in validation_after["warnings"])
+    if validation_after["errors"]:
+        errors.extend(f"updated model registry validation failed: {error}" for error in validation_after["errors"])
+
+    write_result = {"requested": config.write, "status": "dry_run", "registry_path": str(registry_path)}
+    if config.write and not errors:
+        if config.backup and registry_path.exists():
+            backup_path = registry_path.with_suffix(registry_path.suffix + ".bak")
+            backup_path.write_text(json.dumps(registry, indent=2, sort_keys=True), encoding="utf-8")
+            write_result["backup_path"] = str(backup_path)
+        registry_path.parent.mkdir(parents=True, exist_ok=True)
+        registry_path.write_text(json.dumps(updated_registry, indent=2, sort_keys=True), encoding="utf-8")
+        write_result["status"] = "written"
+    elif config.write and errors:
+        write_result["status"] = "blocked"
+
+    status = "fail" if errors else ("warn" if warnings else "pass")
+    report: dict[str, Any] = {
+        "schema": MODEL_GOVERNANCE_REVIEW_REPORT_SCHEMA,
+        "ok": not errors,
+        "status": status,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "duration_seconds": round(time.time() - started_at, 3),
+        "dry_run": not config.write,
+        "config": {
+            "registry_path": _safe_text(str(registry_path)),
+            "model_id": _safe_text(config.model_id),
+            "proposal_id": _safe_text(proposal_id),
+            "review_status": _safe_text(config.review_status),
+            "rollback_plan_present": bool(effective_rollback_plan),
+            "approved_by_count": len(effective_approved_by) if isinstance(effective_approved_by, list) else 0,
+            "out_path": _safe_text(str(config.out_path.expanduser().resolve())) if config.out_path else None,
+            "write": config.write,
+            "backup": config.backup,
+        },
+        "registry_status": registry_status,
+        "model": {
+            "id": _safe_text(config.model_id),
+            "status_before": before_status,
+            "status_after": after_status,
+            "approval_status_changed": before_status != after_status and after_status == "approved",
+        },
+        "governance_before": _safe_model_governance(current_governance),
+        "governance_after": _safe_model_governance(
+            after_model.get("governance") if isinstance(after_model, dict) else None
+        ),
+        "summary": {
+            "change_count": len(changes),
+            "review_status": _safe_text(config.review_status),
+            "does_not_approve_model": True,
+            "model_status_unchanged": before_status == after_status,
+            "recommended_next_action": _governance_review_next_action(
+                errors=errors,
+                write=config.write,
+                review_status=config.review_status,
+            ),
+        },
+        "write": write_result,
+        "changes": changes,
+        "registry_validation_summary": validation_after["summary"],
+        "warnings": warnings,
+        "errors": [_safe_text(error) for error in errors],
+    }
+    if config.out_path is not None:
+        out_path = config.out_path.expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+        report["artifacts"] = {"json": str(out_path)}
+    return report
+
+
 def validate_model_governance_registry(registry: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -506,6 +652,31 @@ def format_model_governance_pack_summary(report: dict[str, Any]) -> str:
         f"Operation: {summary.get('operation')}",
         f"Pack status: {summary.get('pack_status')}",
         f"Changes: {summary.get('change_count')}",
+        f"Write: {write.get('status')}",
+        f"Next: {summary.get('recommended_next_action')}",
+    ]
+    if report.get("warnings"):
+        lines.append("Warnings:")
+        lines.extend(f"- {warning}" for warning in report["warnings"])
+    if report.get("errors"):
+        lines.append("Errors:")
+        lines.extend(f"- {error}" for error in report["errors"])
+    if (report.get("artifacts") or {}).get("json"):
+        lines.append(f"Report: {(report.get('artifacts') or {}).get('json')}")
+    return "\n".join(lines)
+
+
+def format_model_governance_review_summary(report: dict[str, Any]) -> str:
+    summary = report.get("summary") or {}
+    model = report.get("model") or {}
+    write = report.get("write") or {}
+    lines = [
+        f"Model governance review: {str(report.get('status', 'unknown')).upper()}",
+        f"Model: {model.get('id')}",
+        f"Mode: {'dry-run' if report.get('dry_run') else 'write'}",
+        f"Review status: {summary.get('review_status')}",
+        f"Changes: {summary.get('change_count')}",
+        f"Model status: {model.get('status_before')} -> {model.get('status_after')}",
         f"Write: {write.get('status')}",
         f"Next: {summary.get('recommended_next_action')}",
     ]
@@ -655,6 +826,13 @@ def _pack_id_from_model_id(model_id: str) -> str:
     return f"{cleaned}_governance_pack_v0"
 
 
+def _proposal_id_from_model_id(model_id: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "_", str(model_id or "").lower()).strip("_")
+    if not cleaned or not cleaned[0].isalpha():
+        cleaned = f"model_{cleaned}" if cleaned else "model"
+    return f"{cleaned}_governance_review_v0"
+
+
 def _governance_pack_next_action(*, errors: list[str], write: bool, pack_status: str) -> str:
     if errors:
         return "fix_governance_pack_errors"
@@ -663,6 +841,28 @@ def _governance_pack_next_action(*, errors: list[str], write: bool, pack_status:
     if pack_status == "proposal":
         return "review_and_promote_governance_pack_when_ready"
     return "run_model_release_check"
+
+
+def _governance_review_next_action(*, errors: list[str], write: bool, review_status: str) -> str:
+    if errors:
+        return "fix_governance_review_errors"
+    if not write:
+        return "rerun_governance_review_with_write_after_review"
+    if review_status == "approved":
+        return "run_model_release_check"
+    if review_status == "rejected":
+        return "revise_or_replace_model_candidate"
+    return "complete_governance_review"
+
+
+def _merge_model_governance(target: dict[str, Any], values: dict[str, Any]) -> list[dict[str, Any]]:
+    changes: list[dict[str, Any]] = []
+    for key, value in values.items():
+        if target.get(key) == value:
+            continue
+        target[key] = value
+        changes.append({"field": f"governance.{key}", "status": "updated", "value_status": _value_status(value)})
+    return changes
 
 
 def _safe_governance_pack_model_view(model: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -686,6 +886,17 @@ def _safe_governance_pack_view(pack: dict[str, Any] | None) -> dict[str, Any] | 
     if not isinstance(pack, dict):
         return None
     return _safe_weight_pack(pack)
+
+
+def _safe_model_governance(governance: Any) -> dict[str, Any]:
+    governance = governance if isinstance(governance, dict) else {}
+    approved_by = governance.get("approved_by") if isinstance(governance.get("approved_by"), list) else []
+    return {
+        "proposal_id": _safe_text(governance.get("proposal_id")),
+        "review_status": _safe_text(governance.get("review_status")),
+        "rollback_plan_present": bool(governance.get("rollback_plan")),
+        "approved_by_count": len(approved_by),
+    }
 
 
 def _safe_registry_view(registry: dict[str, Any]) -> dict[str, Any]:

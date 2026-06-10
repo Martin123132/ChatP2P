@@ -4,13 +4,16 @@ from chatp2p.cli import build_parser
 from chatp2p.model_governance import (
     MODEL_GOVERNANCE_DEFAULT_REGISTRY_ID,
     MODEL_GOVERNANCE_PACK_REPORT_SCHEMA,
+    MODEL_GOVERNANCE_REVIEW_REPORT_SCHEMA,
     MODEL_GOVERNANCE_REGISTRY_SCHEMA,
     MODEL_GOVERNANCE_REPORT_SCHEMA,
     ModelGovernanceConfig,
     ModelGovernancePackConfig,
+    ModelGovernanceReviewConfig,
     default_model_governance_registry,
     run_model_governance,
     run_model_governance_pack,
+    run_model_governance_review,
     validate_model_governance_registry,
 )
 from chatp2p.model_registry import default_model_registry
@@ -282,6 +285,140 @@ def test_model_governance_pack_parser_accepts_flags():
     assert args.command == "model"
     assert args.model_command == "governance-pack"
     assert args.status == "approved"
+    assert args.write is True
+    assert args.no_backup is True
+    assert args.json is True
+
+
+def test_model_governance_review_dry_run_records_submitted_preview(tmp_path):
+    registry_path = _write_qwen_registry(tmp_path)
+    before = json.loads(registry_path.read_text(encoding="utf-8"))
+
+    report = run_model_governance_review(
+        ModelGovernanceReviewConfig(
+            registry_path=registry_path,
+            model_id="qwen2.5-7b-instruct",
+            out_path=tmp_path / "governance-review.json",
+        )
+    )
+    after = json.loads(registry_path.read_text(encoding="utf-8"))
+
+    assert report["schema"] == MODEL_GOVERNANCE_REVIEW_REPORT_SCHEMA
+    assert report["ok"] is True
+    assert report["dry_run"] is True
+    assert report["summary"]["review_status"] == "submitted"
+    assert report["summary"]["does_not_approve_model"] is True
+    assert report["summary"]["model_status_unchanged"] is True
+    assert report["summary"]["recommended_next_action"] == "rerun_governance_review_with_write_after_review"
+    assert report["governance_after"]["proposal_id"] == "qwen2_5_7b_instruct_governance_review_v0"
+    assert report["governance_after"]["review_status"] == "submitted"
+    assert before == after
+    assert (tmp_path / "governance-review.json").exists()
+
+
+def test_model_governance_review_write_approved_keeps_model_status_and_backs_up(tmp_path):
+    registry_path = _write_qwen_registry(tmp_path)
+
+    report = run_model_governance_review(
+        ModelGovernanceReviewConfig(
+            registry_path=registry_path,
+            model_id="qwen2.5-7b-instruct",
+            review_status="approved",
+            rollback_plan="restore previous default model route",
+            approved_by=("domain_steward_fixture",),
+            write=True,
+        )
+    )
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    model = next(model for model in registry["models"] if model["id"] == "qwen2.5-7b-instruct")
+
+    assert report["ok"] is True
+    assert report["dry_run"] is False
+    assert report["write"]["status"] == "written"
+    assert report["summary"]["recommended_next_action"] == "run_model_release_check"
+    assert report["model"]["status_before"] == "candidate"
+    assert report["model"]["status_after"] == "candidate"
+    assert report["governance_after"]["rollback_plan_present"] is True
+    assert report["governance_after"]["approved_by_count"] == 1
+    assert model["status"] == "candidate"
+    assert model["governance"]["review_status"] == "approved"
+    assert model["governance"]["rollback_plan"] == "restore previous default model route"
+    assert model["governance"]["approved_by"] == ["domain_steward_fixture"]
+    assert (tmp_path / "model-registry.json.bak").exists()
+
+
+def test_model_governance_review_blocks_approved_without_required_evidence(tmp_path):
+    registry_path = _write_qwen_registry(tmp_path)
+
+    report = run_model_governance_review(
+        ModelGovernanceReviewConfig(
+            registry_path=registry_path,
+            model_id="qwen2.5-7b-instruct",
+            review_status="approved",
+            write=True,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["write"]["status"] == "blocked"
+    assert any("rollback plan" in error for error in report["errors"])
+    assert any("approver" in error for error in report["errors"])
+
+
+def test_model_governance_review_refuses_to_modify_approved_model(tmp_path):
+    registry_path = _write_qwen_registry(tmp_path)
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    for model in registry["models"]:
+        if model["id"] == "qwen2.5-7b-instruct":
+            model["status"] = "approved"
+    registry_path.write_text(json.dumps(registry, indent=2), encoding="utf-8")
+
+    report = run_model_governance_review(
+        ModelGovernanceReviewConfig(
+            registry_path=registry_path,
+            model_id="qwen2.5-7b-instruct",
+            review_status="submitted",
+            write=True,
+        )
+    )
+
+    assert report["ok"] is False
+    assert report["write"]["status"] == "blocked"
+    assert any("approved model entries cannot be modified" in error for error in report["errors"])
+
+
+def test_model_governance_review_parser_accepts_flags():
+    parser = build_parser()
+
+    args = parser.parse_args(
+        [
+            "model",
+            "governance-review",
+            "--registry",
+            "D:\\ChatP2PData\\model-registry.json",
+            "--model-id",
+            "qwen2.5-7b-instruct",
+            "--out",
+            "D:\\ChatP2PData\\model-governance-review.json",
+            "--proposal-id",
+            "qwen-review-v0",
+            "--review-status",
+            "approved",
+            "--rollback-plan",
+            "restore previous default model route",
+            "--approved-by",
+            "domain_steward_fixture",
+            "--write",
+            "--no-backup",
+            "--json",
+        ]
+    )
+
+    assert args.func.__name__ == "model_governance_review_command"
+    assert args.command == "model"
+    assert args.model_command == "governance-review"
+    assert args.review_status == "approved"
+    assert args.approved_by == ["domain_steward_fixture"]
     assert args.write is True
     assert args.no_backup is True
     assert args.json is True
