@@ -803,6 +803,8 @@ Model Candidate Pack V0 turns the shortlist recommendation into an isolated evid
 
 Model Runtime Check V0 verifies whether a candidate actually runs on a local runtime. `chatp2p model runtime-check` checks Ollama reachability, confirms the requested model is already present, runs a tiny smoke prompt when possible, and writes JSON/Markdown evidence. It does not pull models, edit registries, call partner nodes, or approve the candidate.
 
+Model Artifact Manifest V0 records exact artifact hash evidence for a candidate. `chatp2p model artifact-manifest` can hash local manifest/weights files or normalize known SHA256 values from a trusted source, records quantization, and writes JSON/Markdown plus a dry-run candidate update preview. It does not download weights, edit registries, or approve the candidate.
+
 Model Candidate Intake V0 adds a safer way to enter real candidate metadata without hand-editing registry JSON. It previews changes by default, requires `--write` to persist them, writes a backup when updating an existing registry, and never permits approval through this path.
 
 Model Eval Harness V0 turns that checklist into repeatable local evidence. The default `fake` mode is deterministic and does not download weights, spend credits, call a partner node, or approve a model. It writes JSON and Markdown evidence for domain, regression, safety, local smoke, and license/source checks so the next real model decision is based on artifacts rather than guesswork.
@@ -846,6 +848,17 @@ python -m chatp2p.cli model runtime-check `
   --runtime ollama `
   --ollama-model qwen2.5:7b-instruct `
   --out D:\ChatP2PData\model-runtime-check `
+  --json
+```
+
+```powershell
+python -m chatp2p.cli model artifact-manifest `
+  --registry D:\ChatP2PData\model-candidate-pack\staging-model-registry.json `
+  --model-id qwen2.5-7b-instruct `
+  --manifest-artifact D:\ChatP2PData\models\qwen2.5-7b-instruct\manifest.json `
+  --weights-artifact D:\ChatP2PData\models\qwen2.5-7b-instruct\model.gguf `
+  --quantization q4_k_m `
+  --out D:\ChatP2PData\model-artifact-manifest `
   --json
 ```
 

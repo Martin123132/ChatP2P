@@ -100,6 +100,11 @@ from .node_runtime import (
 from .ollama import DEFAULT_OLLAMA_BASE_URL
 from .jsonio import read_json_file
 from .operator_config import OperatorConfig, write_operator_config
+from .model_artifact import (
+    ModelArtifactManifestConfig,
+    format_model_artifact_manifest_summary,
+    run_model_artifact_manifest,
+)
 from .model_candidate import (
     ModelCandidateIntakeConfig,
     format_model_candidate_intake_summary,
@@ -493,6 +498,33 @@ def model_registry_command(args: argparse.Namespace) -> None:
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
         print(format_model_registry_summary(report))
+    if not report["ok"]:
+        raise SystemExit(1)
+
+
+def model_artifact_manifest_command(args: argparse.Namespace) -> None:
+    try:
+        report = run_model_artifact_manifest(
+            ModelArtifactManifestConfig(
+                registry_path=Path(args.registry),
+                model_id=args.model_id,
+                out_dir=Path(args.out),
+                manifest_artifact=Path(args.manifest_artifact) if args.manifest_artifact else None,
+                weights_artifact=Path(args.weights_artifact) if args.weights_artifact else None,
+                artifact_paths=tuple(Path(path) for path in (args.artifact or [])),
+                manifest_sha256=args.manifest_sha256,
+                weights_sha256=args.weights_sha256,
+                quantization=args.quantization,
+                source_url=args.source_url,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(format_model_artifact_manifest_summary(report))
     if not report["ok"]:
         raise SystemExit(1)
 
@@ -3469,6 +3501,44 @@ def build_parser() -> argparse.ArgumentParser:
     )
     model_shortlist_parser.add_argument("--json", action="store_true", help="Print the full JSON shortlist report")
     model_shortlist_parser.set_defaults(func=model_shortlist_command)
+
+    model_artifact_manifest_parser = model_subcommands.add_parser(
+        "artifact-manifest",
+        help="Build a read-only artifact hash manifest for a model candidate",
+    )
+    model_artifact_manifest_parser.add_argument(
+        "--registry",
+        default=".mesh/model-registry.json",
+        help="Path to the model registry JSON",
+    )
+    model_artifact_manifest_parser.add_argument("--model-id", required=True, help="Model id from the registry")
+    model_artifact_manifest_parser.add_argument(
+        "--out",
+        default=".mesh/model-artifact-manifest",
+        help="Output directory for model-artifact-manifest.json and .md",
+    )
+    model_artifact_manifest_parser.add_argument(
+        "--manifest-artifact",
+        default=None,
+        help="Local manifest file to hash for manifest_sha256",
+    )
+    model_artifact_manifest_parser.add_argument(
+        "--weights-artifact",
+        default=None,
+        help="Local model weights file to hash for weights_sha256",
+    )
+    model_artifact_manifest_parser.add_argument(
+        "--artifact",
+        action="append",
+        default=None,
+        help="Additional local artifact file to hash; repeat for multiple files",
+    )
+    model_artifact_manifest_parser.add_argument("--manifest-sha256", default=None, help="Known manifest SHA256")
+    model_artifact_manifest_parser.add_argument("--weights-sha256", default=None, help="Known weights SHA256")
+    model_artifact_manifest_parser.add_argument("--quantization", default=None, help="Quantization label, such as q4_k_m")
+    model_artifact_manifest_parser.add_argument("--source-url", default=None, help="Optional source URL for the artifacts")
+    model_artifact_manifest_parser.add_argument("--json", action="store_true", help="Print the full JSON artifact report")
+    model_artifact_manifest_parser.set_defaults(func=model_artifact_manifest_command)
 
     model_eval_parser = model_subcommands.add_parser(
         "eval",

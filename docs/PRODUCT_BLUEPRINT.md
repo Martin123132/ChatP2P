@@ -118,6 +118,8 @@ Model Candidate Pack V0 makes the next step one command. `chatp2p model candidat
 
 Model Runtime Check V0 attacks the first remaining gate. `chatp2p model runtime-check` is read-only: it checks local Ollama reachability, verifies the selected model is already installed, runs a tiny smoke prompt only when the model is present, and records runtime evidence without pulling weights, editing registries, or approving the model.
 
+Model Artifact Manifest V0 attacks the hash-evidence gate. `chatp2p model artifact-manifest` hashes local manifest and weights files, or accepts known SHA256 values from a trusted source, then records quantization and emits a dry-run candidate update preview. The command is evidence-only: no downloads, no registry writes, and no approval.
+
 Model Candidate Intake V0 turns model selection into a structured local workflow instead of manual JSON edits. `chatp2p model candidate` can preview or write candidate metadata, runtimes, hardware fit, hashes, domains, and license/source fields. It writes only `candidate` or `proposal` statuses and refuses to modify approved entries, keeping intake separate from governance approval.
 
 Model Eval Harness V0 makes the first eval evidence artifact. `chatp2p model eval` runs a deterministic local harness by default, writes JSON/Markdown reports, checks domain/regression/safety/local-smoke behavior, and records whether license/source evidence is still blocking approval. It never approves a model or edits the registry; the output is evidence to attach to a future model registry update.
