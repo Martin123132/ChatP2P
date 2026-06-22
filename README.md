@@ -1,5 +1,7 @@
 # ChatP2P
 
+> *Supervisor order marker: keep this public repo paired with the private `Martin123132/ChatP2P-private-version-` repo during the alphabetical review pass.*
+
 Peer-contributed AI compute, starting with the boring pieces that have to be true before the dream gets big: signed nodes, signed jobs, verified results, credits, and a coordinator that can later give way to a wider mesh.
 
 ## Current Prototype
