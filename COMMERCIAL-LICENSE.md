@@ -8,7 +8,7 @@ Examples that require a commercial license:
 
 - adding ChatP2P features to a paid coding assistant or AI agent product;
 - running ChatP2P as part of a SaaS, API, hosted MCP server, or managed repository-analysis service;
-- embedding ChatP2P code, schemas, tests, pack format, or derived implementation details into a commercial tool;
+- embedding ChatP2P code, schemas, tests, formats, or derived implementation details into a commercial tool;
 - using ChatP2P materials to train, fine-tune, distill, evaluate, benchmark, or improve a commercial AI model or commercial AI system;
 - distributing a modified commercial version of ChatP2P.
 

@@ -12,7 +12,7 @@ Commercial use requires a separate written license from the licensor. Commercial
 - offering ChatP2P functionality through a hosted, managed, SaaS, cloud, API, or agent service;
 - using ChatP2P in an enterprise product or commercial developer tool;
 - using ChatP2P or derived code as part of a commercial AI coding, agent, memory, context, retrieval, or repository-analysis product;
-- training, fine-tuning, distilling, evaluating, or improving a commercial AI model or commercial AI system using ChatP2P source code, documentation, pack format, tests, or derived materials;
+- training, fine-tuning, distilling, evaluating, or improving a commercial AI model or commercial AI system using ChatP2P source code, documentation, tests, data formats, or derived materials;
 - removing or obscuring copyright, license, attribution, or required notices.
 
 ChatP2P was created by Martin Ollett and is owned/licensed by TWO HANDS NETWORK LTD.
